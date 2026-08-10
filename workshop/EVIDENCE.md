@@ -4,7 +4,7 @@ Evidence states are `hypothesis`, `demonstrated`, `contradicted`, or `retired`. 
 
 | Statement | State | Required proof | Current evidence |
 |---|---|---|---|
-| The pinned Rust toolchain builds the repository reproducibly | hypothesis | Clean locked debug/test/release commands | Toolchain pinned; clean-check evidence not yet recorded |
+| The pinned Rust toolchain builds the repository reproducibly | demonstrated | Clean locked debug/test/release commands | `just verify` passed in a fresh local clone of `7f28ecd` on 10 Aug 2026 |
 | Vitthal can explain ownership and the CLI error boundary without notes | hypothesis | Passing M1 implementation plus timed 15-minute explanation | None |
 | The workshop demonstrates a genuinely shared Arrow slice | hypothesis | Buffer-identity demonstration and test | None |
 | The workshop distinguishes operations that allocate from those that share buffers | hypothesis | Tested examples backed by Arrow documentation | None |

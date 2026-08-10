@@ -1,0 +1,5 @@
+id,name,note
+1,Ada,"quoted, comma"
+2,Zoë,"line one
+line two"
+3,,""
