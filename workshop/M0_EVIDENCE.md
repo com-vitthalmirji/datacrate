@@ -13,10 +13,10 @@
 
 ## Vitthal's short closeout
 
-- Five-minute explanation attempted after study: `TODO(Vitthal: DONE)`
-- Actual Rusty/workshop hours, 7–10 August: `TODO(Vitthal)`
-- Capacity: `TODO(Vitthal: safe for Amber / reduce further)`
-- One remaining uncertainty: `TODO(Vitthal)`
+- Five-minute explanation attempted after study: `DONE`
+- Actual Rusty/workshop hours, 7–10 August: Rusty 4h; workshop 18h; total 22h.
+- Capacity: safe for the mandatory Amber week.
+- One remaining uncertainty: I need more hands-on practice and greater conceptual clarity in Rust.
 
 ## Engineering evidence
 
@@ -27,7 +27,10 @@
 
 ## Decision
 
-M0 status: `READY TO CLOSE`.
+M0 status: `PASS`.
 
-Close it after the four short Vitthal inputs above and the initial commit. M1,
-due 24 August, still requires independent ownership explanation and diagnosis.
+Reason: the restart established an honest baseline, runnable and reproducible
+engineering evidence, a risk/gap statement, and a safe capacity decision.
+
+Next action: begin Own I under mandatory Amber capacity. M1, due 24 August,
+still requires independent ownership explanation and diagnosis.
