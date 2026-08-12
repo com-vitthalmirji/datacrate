@@ -10,3 +10,4 @@ supersedes it, and mark the old one's Status as `Superseded by ADR-XXXX`.
 
 - [0001. Proc-macro build-script diagnostics](0001-proc-macro-build-script-diagnostics.md)
 - [0002. Cargo workspace restructure](0002-cargo-workspace-restructure.md)
+- [0003. DSA practice crate isolation](0003-dsa-practice-crate-isolation.md)
