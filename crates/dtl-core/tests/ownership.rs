@@ -1,4 +1,4 @@
-use data_tools::ownership;
+use dtl_core::ownership;
 
 #[test]
 fn transfers_ownership_back_to_the_caller() {

@@ -1,4 +1,4 @@
-use data_tools::references;
+use dtl_core::references;
 
 #[test]
 fn returns_a_shared_view_of_the_input() {

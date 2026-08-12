@@ -1,4 +1,4 @@
-use data_tools::borrowing;
+use dtl_core::borrowing;
 
 #[test]
 fn observes_without_taking_ownership() {

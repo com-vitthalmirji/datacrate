@@ -1,7 +1,13 @@
-[package]
-name = "data-tools"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.97"
+[workspace]
+resolver = "2"
+members = ["crates/*"]
 
-[dependencies]
+[workspace.lints.clippy]
+# No unwrap() anywhere — matches this project's "no unwrap on any reachable
+# path" rule (CLAUDE.md); combined with `-D warnings` in `just lint`/CI, this
+# turns any unwrap() into a hard build failure, not just a style nit.
+unwrap_used = "warn"
+# Catch stray debugging leftovers before they ship.
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"

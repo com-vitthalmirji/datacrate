@@ -1,4 +1,4 @@
-use data_tools::{borrowing, ownership, references, slices};
+use dtl_core::{borrowing, ownership, references, slices};
 
 fn main() {
     println!("== Ownership ==");
