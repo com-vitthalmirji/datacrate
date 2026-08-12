@@ -5,6 +5,9 @@ on:
     tags:
       - "csv-select-cli-v*"
 
+permissions:
+  contents: write
+
 jobs:
   upload:
     strategy:
@@ -35,5 +38,5 @@ jobs:
           bin: csv-select
           manifest_path: crates/csv-cli/Cargo.toml
           target: ${{ matrix.target }}
-          archive: csv-select-$tag-$target
-          token: ${{ secrets.GITHUB_TOKEN }}
+          archive: csv-select-$target
+          token: ${{ secrets.GH_TOKEN }}
