@@ -6,11 +6,14 @@ git_tag_name = "{{ package }}-v{{ version }}"
 [[package]]
 name = "pipeline"
 release = false
+publish = false
 
 [[package]]
 name = "typestate"
 release = false
+publish = false
 
 [[package]]
 name = "rusty-ready"
 release = false
+publish = false
