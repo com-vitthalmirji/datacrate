@@ -1,4 +1,4 @@
-use data_tools::slices;
+use dtl_core::slices;
 
 #[test]
 fn returns_the_first_word() {
