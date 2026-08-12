@@ -1,0 +1,16 @@
+[workspace]
+changelog_update = true
+git_release_enable = true
+git_tag_name = "{{ package }}-v{{ version }}"
+
+[[package]]
+name = "pipeline"
+release = false
+
+[[package]]
+name = "typestate"
+release = false
+
+[[package]]
+name = "rusty-ready"
+release = false

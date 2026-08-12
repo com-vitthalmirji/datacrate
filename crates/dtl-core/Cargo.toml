@@ -3,6 +3,9 @@ name = "dtl-core"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.97"
+description = "Rust fundamentals workspace: ownership, borrowing, slices, and zero-copy CSV batching"
+license = "MIT"
+repository = "https://github.com/com-vitthalmirji/datacrate"
 
 [lints]
 workspace = true

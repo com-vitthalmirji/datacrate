@@ -3,6 +3,9 @@ name = "csv-cli"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.97"
+description = "Streaming CSV column-selection CLI (csv-select)"
+license = "MIT"
+repository = "https://github.com/com-vitthalmirji/datacrate"
 
 [lints]
 workspace = true

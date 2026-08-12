@@ -62,6 +62,18 @@ git config core.hooksPath .githooks
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for commit message conventions,
 branching, and the pull request process.
 
+## Releasing
+
+Versioning is automated by [release-plz](https://release-plz.dev). Commit
+type (`feat:`, `fix:`, `feat!:`/`BREAKING CHANGE:`) determines the version
+bump for each crate that changed. On every merge to `main`, release-plz opens
+or updates a "release" pull request with the version bump and changelog for
+affected crates. Merging that PR publishes `dtl-core` and `csv-cli` to
+crates.io, tags the release, and creates a GitHub Release; a follow-up
+workflow then attaches prebuilt `csv-select` binaries for Linux, macOS, and
+Windows. `pipeline`, `typestate`, and `rusty-ready` are excluded from
+publishing.
+
 ## License
 
 Licensed under the [MIT license](LICENSE).
