@@ -36,7 +36,7 @@ just verify   # fmt check, clippy (warnings denied), tests, release build
 Run the CSV column-selection CLI directly:
 
 ```sh
-cargo run -p csv-cli --bin csv-select -- fixtures/m1/headers.csv --column 1
+cargo run -p csv-select-cli --bin csv-select -- fixtures/m1/headers.csv --column 1
 ```
 
 ## Development
@@ -68,7 +68,7 @@ Versioning is automated by [release-plz](https://release-plz.dev). Commit
 type (`feat:`, `fix:`, `feat!:`/`BREAKING CHANGE:`) determines the version
 bump for each crate that changed. On every merge to `main`, release-plz opens
 or updates a "release" pull request with the version bump and changelog for
-affected crates. Merging that PR publishes `dtl-core` and `csv-cli` to
+affected crates. Merging that PR publishes `dtl-core` and `csv-select-cli` to
 crates.io, tags the release, and creates a GitHub Release; a follow-up
 workflow then attaches prebuilt `csv-select` binaries for Linux, macOS, and
 Windows. `pipeline`, `typestate`, and `rusty-ready` are excluded from

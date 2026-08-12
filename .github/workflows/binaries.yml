@@ -3,7 +3,7 @@ name: Binaries
 on:
   push:
     tags:
-      - "csv-cli-v*"
+      - "csv-select-cli-v*"
 
 jobs:
   upload:
