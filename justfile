@@ -14,3 +14,6 @@ release:
 
 verify: fmt lint test release
     git diff --check
+
+install-hooks:
+    git config core.hooksPath .githooks
