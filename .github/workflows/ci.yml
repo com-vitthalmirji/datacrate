@@ -55,9 +55,6 @@ jobs:
   semver-checks:
     runs-on: ubuntu-latest
     if: "github.event_name == 'pull_request' && !contains(github.event.head_commit.message, '[skip ci]') && !contains(github.event.head_commit.message, '[skip release]')"
-    # dtl-core has no crates.io release yet, so there is no baseline to
-    # diff against; this job starts enforcing once the first version ships.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
