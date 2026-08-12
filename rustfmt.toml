@@ -1,0 +1,3 @@
+# Stable-only options (this project builds on stable Rust, no nightly).
+# See: https://rust-lang.github.io/rustfmt/
+edition = "2024"

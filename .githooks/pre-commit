@@ -1,0 +1,16 @@
+#!/bin/sh
+# Enable with: git config core.hooksPath .githooks
+#
+# Checks only — never auto-formats or auto-fixes. If this fails, run
+# `cargo fmt --all` / `just verify` yourself and re-commit. Manual
+# intervention beats a hook silently rewriting staged code.
+set -eu
+
+echo "pre-commit: cargo fmt --all --check"
+cargo fmt --all --check
+
+echo "pre-commit: cargo clippy --all-targets --all-features -- -D warnings"
+cargo clippy --all-targets --all-features -- -D warnings
+
+echo "pre-commit: cargo test --all-targets --all-features --locked"
+cargo test --all-targets --all-features --locked

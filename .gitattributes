@@ -1,0 +1,9 @@
+# Normalize line endings regardless of OS/editor config so diffs stay clean
+# across contributors — .editorconfig only affects new content in editors
+# that respect it, this enforces it at the Git layer too.
+* text=auto eol=lf
+
+*.rs text
+Cargo.toml text
+Cargo.lock text -diff
+*.md text
