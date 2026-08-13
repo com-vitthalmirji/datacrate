@@ -71,6 +71,15 @@ git config core.hooksPath .githooks
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for commit message conventions,
 branching, and the pull request process.
 
+## Documentation
+
+- API reference (rustdoc): `cargo doc -p dtl-core --open`
+- Guide (mdBook): `cargo install mdbook --locked && mdbook serve book`
+
+The guide will be published to GitHub Pages once this repository is public;
+until then, `.github/workflows/docs.yml` builds and validates both on every
+push and pull request.
+
 ## Releasing
 
 Versioning is automated by [release-plz](https://release-plz.dev). Commit

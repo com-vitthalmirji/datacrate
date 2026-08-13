@@ -1,0 +1,9 @@
+[book]
+title = "datacrate"
+description = "Getting started, usage, and contributing guide for datacrate"
+authors = ["Vitthal Mirji"]
+language = "en"
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/com-vitthalmirji/datacrate"

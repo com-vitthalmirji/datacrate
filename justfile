@@ -12,6 +12,10 @@ test:
 release:
     cargo build --release --locked
 
+docs:
+    RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p dtl-core -p csv-select-cli
+    mdbook build book
+
 verify: fmt lint test release
     git diff --check
 

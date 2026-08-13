@@ -11,6 +11,11 @@ unwrap_used = "warn"
 dbg_macro = "warn"
 todo = "warn"
 unimplemented = "warn"
+# Public API doc completeness: keep # Errors/# Panics/# Safety sections
+# honest as the API surface grows, instead of relying on review alone.
+missing_errors_doc = "warn"
+missing_panics_doc = "warn"
+missing_safety_doc = "warn"
 
 # csv-select ships as a prebuilt binary (see binaries.yml) — optimize for
 # that, not just local `cargo build --release` iteration speed.
