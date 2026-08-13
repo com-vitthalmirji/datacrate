@@ -6,6 +6,8 @@
 streaming CSV tooling today, growing toward an Arrow/Parquet/DataFusion
 pipeline and typestate-based builder APIs.
 
+<!-- toc -->
+
 ## Prerequisites
 
 - [rustup](https://rustup.rs/) — the pinned toolchain in `rust-toolchain.toml`
