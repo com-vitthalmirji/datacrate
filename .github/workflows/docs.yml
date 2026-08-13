@@ -66,10 +66,17 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
           tool: mdbook@0.5.4
       - run: mdbook build book
+      - run: cargo doc --no-deps -p dtl-core -p csv-select-cli
+      - run: |
+          mkdir -p book/book/api
+          cp -r target/doc/* book/book/api/
+          echo '<meta http-equiv="refresh" content="0; url=dtl_core/index.html">' > book/book/api/index.html
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
