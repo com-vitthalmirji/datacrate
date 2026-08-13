@@ -1,6 +1,6 @@
 # Getting Started
 
-<img src="images/logo.png" alt="datacrate logo" width="160">
+<img src="images/cover.png" alt="datacrate" width="480">
 
 `datacrate` is a Rust Cargo workspace for building a typed data pipeline:
 streaming CSV tooling today, growing toward an Arrow/Parquet/DataFusion
