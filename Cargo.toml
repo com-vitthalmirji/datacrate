@@ -11,3 +11,10 @@ unwrap_used = "warn"
 dbg_macro = "warn"
 todo = "warn"
 unimplemented = "warn"
+
+# csv-select ships as a prebuilt binary (see binaries.yml) — optimize for
+# that, not just local `cargo build --release` iteration speed.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
