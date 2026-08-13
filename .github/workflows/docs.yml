@@ -21,6 +21,8 @@ jobs:
   # skipping the workflow trigger itself.
   changes:
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
     outputs:
       docs: ${{ steps.filter.outputs.docs }}
     steps:
