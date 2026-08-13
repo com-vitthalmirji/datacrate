@@ -75,12 +75,14 @@ branching, and the pull request process.
 ## Documentation
 
 - Guide (published): https://com-vitthalmirji.github.io/datacrate/
-- API reference (published): https://docs.rs/dtl-core
+- API reference (rustdoc, published): https://com-vitthalmirji.github.io/datacrate/api/
+- API reference (also on docs.rs): https://docs.rs/dtl-core
 - API reference (local): `cargo doc -p dtl-core --open`
 - Guide (local): `cargo install mdbook --locked && mdbook serve book`
 
 `.github/workflows/docs.yml` builds and validates both on every push and pull
-request, and publishes the guide to GitHub Pages on push to `main`.
+request, and publishes the guide plus rustdoc (under `/api/`) to GitHub Pages
+on push to `main`.
 
 ## Releasing
 

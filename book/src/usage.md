@@ -33,7 +33,8 @@ stdout before the error is detected and the process exits non-zero.
 lifetime-bound, zero-copy CSV row splitter). Each module and public item has
 rustdoc comments with runnable examples — the full API reference is generated
 from those comments and published at
-[docs.rs/dtl-core](https://docs.rs/dtl-core) (or locally via
+[docs.rs/dtl-core](https://docs.rs/dtl-core) and
+[alongside this guide](api/dtl_core/index.html) (or locally via
 `cargo doc -p dtl-core --open`).
 
 This guide narrates the shape of the crate; the doc comments in the source
