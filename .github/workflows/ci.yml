@@ -18,6 +18,8 @@ jobs:
   # filtering happens by skipping downstream jobs, not the workflow trigger.
   changes:
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
     steps:
