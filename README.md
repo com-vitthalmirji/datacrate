@@ -1,5 +1,3 @@
-# datacrate
-
 <img src="assets/cover.png" alt="datacrate" width="640">
 
 [![CI](https://github.com/com-vitthalmirji/datacrate/actions/workflows/ci.yml/badge.svg)](https://github.com/com-vitthalmirji/datacrate/actions/workflows/ci.yml)
@@ -9,6 +7,9 @@
 [![crates.io](https://img.shields.io/crates/v/dtl-core.svg)](https://crates.io/crates/dtl-core)
 [![Rust](https://img.shields.io/badge/rust-1.97%2B-orange.svg)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/github/license/com-vitthalmirji/datacrate.svg)](LICENSE)
+---
+
+# datacrate
 
 A Rust Cargo workspace for building a typed data pipeline: streaming CSV
 tooling today, growing toward an Arrow/Parquet/DataFusion pipeline and
@@ -79,23 +80,3 @@ branching, and the pull request process.
 - API reference (also on docs.rs): https://docs.rs/dtl-core
 - API reference (local): `cargo doc -p dtl-core --open`
 - Guide (local): `cargo install mdbook --locked && mdbook serve book`
-
-`.github/workflows/docs.yml` builds and validates both on every push and pull
-request, and publishes the guide plus rustdoc (under `/api/`) to GitHub Pages
-on push to `main`.
-
-## Releasing
-
-Versioning is automated by [release-plz](https://release-plz.dev). Commit
-type (`feat:`, `fix:`, `feat!:`/`BREAKING CHANGE:`) determines the version
-bump for each crate that changed. On every merge to `main`, release-plz opens
-or updates a "release" pull request with the version bump and changelog for
-affected crates. Merging that PR publishes `dtl-core` and `csv-select-cli` to
-crates.io, tags the release, and creates a GitHub Release; a follow-up
-workflow then attaches prebuilt `csv-select` binaries for Linux, macOS, and
-Windows. `pipeline`, `typestate`, and `rusty-ready` are excluded from
-publishing.
-
-## License
-
-Licensed under the [MIT license](LICENSE).
