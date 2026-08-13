@@ -51,6 +51,10 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: mdbook@0.5.4
+      # Not available via taiki-e/install-action's prebuilt-binary manifests,
+      # so pinned and built from source instead — same pin discipline as the
+      # mdbook install above.
+      - run: cargo install mdbook-toc --version 0.15.4 --locked
       - run: cargo doc --no-deps -p dtl-core -p csv-select-cli
       - run: mdbook build book
 
@@ -69,6 +73,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: mdbook@0.5.4
+      - run: cargo install mdbook-toc --version 0.15.4 --locked
       - run: mdbook build book
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
