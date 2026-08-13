@@ -5,6 +5,7 @@
 [![CI](https://github.com/com-vitthalmirji/datacrate/actions/workflows/ci.yml/badge.svg)](https://github.com/com-vitthalmirji/datacrate/actions/workflows/ci.yml)
 [![Release](https://github.com/com-vitthalmirji/datacrate/actions/workflows/release-plz.yml/badge.svg)](https://github.com/com-vitthalmirji/datacrate/actions/workflows/release-plz.yml)
 [![Audit](https://github.com/com-vitthalmirji/datacrate/actions/workflows/audit.yml/badge.svg)](https://github.com/com-vitthalmirji/datacrate/actions/workflows/audit.yml)
+[![Docs](https://github.com/com-vitthalmirji/datacrate/actions/workflows/docs.yml/badge.svg)](https://com-vitthalmirji.github.io/datacrate/)
 [![crates.io](https://img.shields.io/crates/v/dtl-core.svg)](https://crates.io/crates/dtl-core)
 [![Rust](https://img.shields.io/badge/rust-1.97%2B-orange.svg)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/github/license/com-vitthalmirji/datacrate.svg)](LICENSE)
@@ -73,12 +74,12 @@ branching, and the pull request process.
 
 ## Documentation
 
+- Guide (published): https://com-vitthalmirji.github.io/datacrate/
 - API reference (rustdoc): `cargo doc -p dtl-core --open`
-- Guide (mdBook): `cargo install mdbook --locked && mdbook serve book`
+- Guide (local): `cargo install mdbook --locked && mdbook serve book`
 
-The guide will be published to GitHub Pages once this repository is public;
-until then, `.github/workflows/docs.yml` builds and validates both on every
-push and pull request.
+`.github/workflows/docs.yml` builds and validates both on every push and pull
+request, and publishes the guide to GitHub Pages on push to `main`.
 
 ## Releasing
 
