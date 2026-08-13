@@ -4,8 +4,6 @@
 streaming CSV tooling today, growing toward an Arrow/Parquet/DataFusion
 pipeline and typestate-based builder APIs.
 
-<!-- toc -->
-
 ## Contributing
 
 See [CONTRIBUTING.md](https://github.com/com-vitthalmirji/datacrate/blob/main/CONTRIBUTING.md)

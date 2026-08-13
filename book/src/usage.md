@@ -1,7 +1,5 @@
 # Usage
 
-<!-- toc -->
-
 ## `csv-select`
 
 `csv-select` picks a single column out of a CSV file and writes it to
@@ -34,11 +32,9 @@ stdout before the error is detected and the process exits non-zero.
 `ownership`, `borrowing`, `references`, `slices`, and `csv_zero_copy` (a
 lifetime-bound, zero-copy CSV row splitter). Each module and public item has
 rustdoc comments with runnable examples — the full API reference is generated
-from those comments:
-
-```sh
-cargo doc -p dtl-core --open
-```
+from those comments and published at
+[docs.rs/dtl-core](https://docs.rs/dtl-core) (or locally via
+`cargo doc -p dtl-core --open`).
 
 This guide narrates the shape of the crate; the doc comments in the source
 are the source of truth for exact signatures and behavior.
