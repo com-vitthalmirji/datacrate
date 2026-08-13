@@ -57,11 +57,7 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
-    # GitHub Pages does not publish from private repositories on the free
-    # plan. Once this repo is public: enable Pages (Settings -> Pages ->
-    # Source: GitHub Actions), then flip this to
-    # `github.repository == 'com-vitthalmirji/datacrate' && github.ref == 'refs/heads/main'`.
-    if: false
+    if: "github.repository == 'com-vitthalmirji/datacrate' && github.ref == 'refs/heads/main'"
     permissions:
       pages: write
       id-token: write
