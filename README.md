@@ -1,6 +1,6 @@
 # datacrate
 
-<img src="assets/logo.png" alt="datacrate logo" width="200">
+<img src="assets/cover.png" alt="datacrate" width="640">
 
 [![CI](https://github.com/com-vitthalmirji/datacrate/actions/workflows/ci.yml/badge.svg)](https://github.com/com-vitthalmirji/datacrate/actions/workflows/ci.yml)
 [![Release](https://github.com/com-vitthalmirji/datacrate/actions/workflows/release-plz.yml/badge.svg)](https://github.com/com-vitthalmirji/datacrate/actions/workflows/release-plz.yml)
