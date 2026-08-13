@@ -1,7 +1,5 @@
 # Usage
 
-<!-- toc -->
-
 ## `csv-select`
 
 `csv-select` picks a single column out of a CSV file and writes it to
