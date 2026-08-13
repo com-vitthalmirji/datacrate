@@ -16,3 +16,10 @@ unimplemented = "warn"
 missing_errors_doc = "warn"
 missing_panics_doc = "warn"
 missing_safety_doc = "warn"
+
+# csv-select ships as a prebuilt binary (see binaries.yml) — optimize for
+# that, not just local `cargo build --release` iteration speed.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
