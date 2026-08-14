@@ -3,8 +3,8 @@
 <img src="images/cover.png" alt="datacrate" width="480">
 
 `datacrate` is a Rust Cargo workspace for building a typed data pipeline:
-streaming CSV tooling today, growing toward an Arrow/Parquet/DataFusion
-pipeline and typestate-based builder APIs.
+streaming CSV tooling, a typestate pipeline builder, and compile-time schema
+contracts today, growing toward a fuller Arrow/Parquet/DataFusion pipeline.
 
 ## Prerequisites
 
@@ -18,11 +18,13 @@ pipeline and typestate-based builder APIs.
 
 ```
 crates/
-├── dtl-core/     lib   — ownership/borrowing/slices fundamentals, zero-copy CSV batching
-├── csv-cli/      bin   — streaming CSV column-selection CLI (csv-select)
-├── pipeline/     lib   — Arrow/Parquet/DataFusion pipeline (in progress)
-├── typestate/    lib   — typestate builder patterns (in progress)
-└── rusty-ready/  lib   — DSA-in-Rust practice, isolated from the other crates
+├── dtl-core/          lib   — ownership/borrowing/slices fundamentals, zero-copy CSV batching
+├── csv-cli/           bin   — streaming CSV column-selection CLI (csv-select)
+├── pipeline/          lib   — CSV fixture → Arrow RecordBatch conversion
+├── typestate/         lib   — typestate pipeline builder (source/transform/sink)
+├── contracts/         lib   — compile-time schema-conformance checking
+├── contracts-derive/  lib   — `#[derive(Contract)]` proc macro backing `contracts`
+└── rusty-ready/       lib   — DSA-in-Rust practice, isolated from the other crates
 fixtures/         deterministic test data, committed
 exercises/        ownership/compiler exercises
 ```
@@ -42,4 +44,6 @@ cargo run -p csv-select-cli --bin csv-select -- fixtures/m1/headers.csv --column
 ```
 
 Continue to [Usage](usage.md) for a walkthrough of `csv-select` and the
-`dtl-core` library.
+`dtl-core` library, or jump straight to the
+[typestate pipeline builder](typestate.md) and
+[compile-time schema contracts](contracts.md) pages.
