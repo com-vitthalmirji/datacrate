@@ -1,0 +1,5 @@
+error: Contract cannot be derived for generic structs: a type parameter has no shape the macro can see, so distinct instantiations (e.g. Wrapper<i64> vs Wrapper<String>) would compare as identical
+ --> tests/compile_fail/generic_struct.rs:4:15
+  |
+4 | struct Generic<T> {
+  |               ^^^

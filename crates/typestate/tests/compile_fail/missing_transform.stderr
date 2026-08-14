@@ -1,0 +1,13 @@
+error[E0599]: no method named `build` found for struct `PipelineBuilder<Present<PathBuf>, Missing, Present<Box<(dyn Fn(arrow::array::RecordBatch) -> arrow::array::RecordBatch + 'static)>>>` in the current scope
+  --> tests/compile_fail/missing_transform.rs:13:10
+   |
+10 |       let _ = PipelineBuilder::new()
+   |  _____________-
+11 | |         .source(PathBuf::from("fixtures/m1/headers.csv"))
+12 | |         .sink(identity)
+13 | |         .build();
+   | |         -^^^^^ method not found in `PipelineBuilder<Present<PathBuf>, Missing, Present<Box<(dyn Fn(arrow::array::RecordBatch) -> arrow::array::RecordBatch + 'static)>>>`
+   | |_________|
+   |
+   |
+   = note: the method was found for `PipelineBuilder<Present<PathBuf>, Present<Box<(dyn Fn(arrow::array::RecordBatch) -> arrow::array::RecordBatch + 'static)>>, Present<Box<(dyn Fn(arrow::array::RecordBatch) -> arrow::array::RecordBatch + 'static)>>>`

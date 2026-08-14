@@ -1,0 +1,20 @@
+error[E0080]: evaluation panicked: producer schema does not conform to the contract under this policy
+ --> $RUST/core/src/panic.rs
+  |
+  |           $crate::panicking::panic_fmt($crate::const_format_args!($($t)+));
+  |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `contracts::SchemaConforms::<Producer, Contract2, contracts::Exact>::CHECK` failed here
+  |
+ ::: src/lib.rs
+  |
+  |       pub const CHECK: () = assert!(
+  |  ___________________________-
+  | |         conforms(Producer::SHAPE, ContractT::SHAPE, Policy::POLICY),
+  | |         "producer schema does not conform to the contract under this policy"
+  | |     );
+  | |_____- in this macro invocation
+
+note: erroneous constant encountered
+  --> tests/compile_fail/exact_mismatch.rs:16:15
+   |
+16 | const _: () = SchemaConforms::<Producer, Contract2, Exact>::CHECK;
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

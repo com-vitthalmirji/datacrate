@@ -17,3 +17,13 @@ publish = false
 name = "rusty-ready"
 release = false
 publish = false
+
+[[package]]
+name = "contracts"
+release = false
+publish = false
+
+[[package]]
+name = "contracts-derive"
+release = false
+publish = false
