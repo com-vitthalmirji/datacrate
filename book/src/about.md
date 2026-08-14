@@ -1,8 +1,8 @@
 # About & contributing
 
 `datacrate` is a Rust Cargo workspace for building a typed data pipeline:
-streaming CSV tooling today, growing toward an Arrow/Parquet/DataFusion
-pipeline and typestate-based builder APIs.
+streaming CSV tooling, a typestate pipeline builder, and compile-time schema
+contracts today, growing toward a fuller Arrow/Parquet/DataFusion pipeline.
 
 ## Contributing
 
