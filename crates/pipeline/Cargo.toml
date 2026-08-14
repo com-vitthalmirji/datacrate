@@ -9,3 +9,5 @@ publish = false
 workspace = true
 
 [dependencies]
+arrow = "59"
+csv = "1"
