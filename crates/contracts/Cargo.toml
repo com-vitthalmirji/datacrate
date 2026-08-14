@@ -1,5 +1,5 @@
 [package]
-name = "typestate"
+name = "contracts"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.97"
@@ -9,8 +9,7 @@ publish = false
 workspace = true
 
 [dependencies]
-arrow = "59"
-pipeline = { path = "../pipeline" }
+contracts-derive = { path = "../contracts-derive" }
 
 [dev-dependencies]
 trybuild = "1"
