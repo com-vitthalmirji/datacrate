@@ -1,11 +1,10 @@
 //! M2 scaffold: convert CSV fixtures into typed Arrow `RecordBatch` values.
 //!
-//! Bounded to `rust-to-de.md` Week 4's first Build bullet only ("Convert
-//! deterministic fixtures into typed Arrow arrays and RecordBatch values").
-//! Kernels, compute functions, and the Arrow rehearsal segment are
-//! deliberately out of scope — see `docs/internals/notes/decisions.md`,
-//! 2026-08-14, for why this is in the tree ahead of the M1 checklist
-//! passing.
+//! Scope is deliberately narrow: only the CSV-fixture-to-typed-columns
+//! conversion step ("convert deterministic fixtures into typed Arrow arrays
+//! and RecordBatch values"). Kernels, compute functions, and the Arrow
+//! rehearsal segment are out of scope — this is an explicit, recorded scope
+//! decision to extend `pipeline` ahead of the M1 checklist passing.
 
 #![warn(missing_docs)]
 
