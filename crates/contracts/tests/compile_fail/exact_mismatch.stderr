@@ -1,4 +1,4 @@
-error[E0080]: evaluation panicked: producer schema does not conform to the contract: field `note` does not conform
+error[E0080]: evaluation panicked: producer schema does not conform to the contract: missing `note`
  --> $CARGO/const_panic-$VERSION/src/macros.rs
   |
   |               (|args| $crate::concat_panic(args))
@@ -8,10 +8,10 @@ error[E0080]: evaluation panicked: producer schema does not conform to the contr
   |
   | /             const_panic::concat_panic!(
   | |                 const_panic::FmtArg::DISPLAY;
-  | |                 "producer schema does not conform to the contract: field `",
-  | |                 path[0],
+  | |                 "producer schema does not conform to the contract: ",
+  | |                 diff_lead_sep(&diffs, 0),
 ... |
-  | |                 "` does not conform"
+  | |                 diff_close(&diffs, 3)
   | |             );
   | |_____________- in this macro invocation
   |

@@ -28,7 +28,7 @@ use syn::{
 /// input the parser should already have rejected (`Fields::Named` only
 /// matches when every field is named), not a case a caller can hit with
 /// valid Rust source.
-#[proc_macro_derive(Contract)]
+#[proc_macro_derive(Contract, attributes(contract))]
 pub fn derive_contract(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
@@ -66,8 +66,9 @@ pub fn derive_contract(input: TokenStream) -> TokenStream {
             .expect("named field guaranteed by Fields::Named")
             .to_string();
         let shape = shape_tokens(&f.ty);
+        let has_default = has_default_attr(f);
         quote! {
-            ::contracts::FieldShape { name: #field_name, shape: #shape }
+            ::contracts::FieldShape { name: #field_name, shape: #shape, has_default: #has_default }
         }
     });
 
@@ -153,6 +154,25 @@ fn shape_tokens(ty: &Type) -> TokenStream2 {
     } else {
         quote! { <#ty as ::contracts::Contract>::SHAPE }
     }
+}
+
+/// Detects `#[contract(default)]` on a field — the Rust-side stand-in for a
+/// Scala default value, which has no runtime-inspectable equivalent here.
+/// A field carrying this attribute is treated as tolerable-if-missing under
+/// `SchemaPolicy::Backward`, the same way an `Option<T>` field already is.
+fn has_default_attr(field: &syn::Field) -> bool {
+    let mut found = false;
+    for attr in &field.attrs {
+        if attr.path().is_ident("contract") {
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("default") {
+                    found = true;
+                }
+                Ok(())
+            });
+        }
+    }
+    found
 }
 
 /// Rust/std primitive type names left as opaque `Primitive` shapes rather
