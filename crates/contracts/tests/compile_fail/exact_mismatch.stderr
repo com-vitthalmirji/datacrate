@@ -11,7 +11,7 @@ error[E0080]: evaluation panicked: producer schema does not conform to the contr
   | |                 "producer schema does not conform to the contract: ",
   | |                 diff_lead_sep(&diffs, 0),
 ... |
-  | |                 diff_close(&diffs, 3)
+  | |                 expected_close(&diffs, 7)
   | |             );
   | |_____________- in this macro invocation
   |

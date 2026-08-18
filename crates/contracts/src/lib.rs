@@ -18,7 +18,33 @@
 //! different shapes, and `HashMap<K, Option<V>>`'s value optionality survives
 //! comparison the same way — see `nested_optionality_is_preserved` in the
 //! test module.
+//!
+//! # Known permanent gap vs. `compile-time-data-contracts`
+//!
+//! This crate's Scala counterpart, `compile-time-data-contracts` (CTDC),
+//! renders an unbounded [`Vec`]-backed diff list with arbitrarily rich
+//! per-field text, because its macros run as ordinary compile-time Scala
+//! with full heap/`String`/`List` access. Rust's stable `const fn`
+//! evaluator has no heap: no `Vec`, no runtime `String` building. This
+//! crate's diagnostics are therefore, by necessity, both **bounded**
+//! ([`MAX_DIFFS`] diffs, [`MAX_PATH_DEPTH`] path segments each — a diff or
+//! path segment beyond either bound still fails the check, it just isn't
+//! individually named in the message) and **composed from fixed static
+//! strings** rather than freely formatted: each diff's optional/default
+//! annotation is selected from a small set of precomputed `&'static str`
+//! literals, and a `Mismatch`'s `expected`/`found` labels are ordinary
+//! `&'static str` values spliced in as their own `const_panic::concat_panic!`
+//! arguments (the same way path segments already are), since
+//! `const_format::concatcp!` cannot concatenate non-literal `const fn`
+//! parameters. This is a disclosed, permanent architectural limitation, not an
+//! oversight — closing it fully would mean abandoning `const fn`/CTFE
+//! diagnostics for a build-time codegen step, which this crate deliberately
+//! does not do.
 
+// `SchemaConforms::CHECK`'s hand-unrolled `concat_panic!` call has ~90
+// arguments (8 diff slots x ~11 pieces each) — well past `concat_panic!`'s
+// default recursion budget.
+#![recursion_limit = "512"]
 #![warn(missing_docs)]
 
 // Lets `#[derive(Contract)]`-generated code refer to this crate as
@@ -199,12 +225,12 @@ const MAX_PATH_DEPTH: usize = 6;
 
 /// How many diffs a single comparison can accumulate before later ones stop
 /// being individually named. `const fn`/CTFE has no `Vec`, so this mirrors
-/// `MAX_PATH_DEPTH`'s bounded-array approach; kept modest (rather than the
-/// originally-floated 8) because [`SchemaConforms::CHECK`]'s rendering has
-/// to hand-unroll one block of `concat_panic!` arguments per slot — a
-/// mismatch beyond this bound still fails the check, it just isn't named in
-/// the message.
-const MAX_DIFFS: usize = 4;
+/// `MAX_PATH_DEPTH`'s bounded-array approach; [`SchemaConforms::CHECK`]'s
+/// rendering has to hand-unroll one block of `concat_panic!` arguments per
+/// slot, so this is a genuine ceiling on the macro's size, not just the
+/// diff count — a mismatch beyond this bound still fails the check, it just
+/// isn't named in the message.
+const MAX_DIFFS: usize = 8;
 
 /// One field-level discrepancy found while comparing a producer's shape
 /// against a contract's shape.
@@ -229,6 +255,101 @@ struct Diff {
     /// `Optional` or `#[contract(default)]`, and so tolerable under
     /// `Backward`.
     optional_or_default: bool,
+    /// `" (optional)"`/`" (default)"` for a tolerable `Missing`, else `""`
+    /// — selected from a fixed set of literals via [`optional_annotation`],
+    /// so it can be spliced directly into [`SchemaConforms::CHECK`]'s
+    /// message with no further composition needed.
+    annotation: &'static str,
+    /// The contract side's type/shape label for a `Mismatch`, or `""` when
+    /// not applicable (every other diff kind, or a mismatch this crate
+    /// can't usefully label). Kept as a separate field rather than
+    /// pre-joined into `annotation`, since `expected`/`found` are ordinary
+    /// runtime-computed `&'static str` values that `const_format::concatcp!`
+    /// cannot concatenate at push time (it requires its arguments to be
+    /// const-promotable, not function parameters) — so
+    /// [`SchemaConforms::CHECK`] instead splices `expected`/`found` in as
+    /// their own `concat_panic!` arguments, the same way path segments
+    /// already are.
+    expected: &'static str,
+    /// The producer side's type/shape label for a `Mismatch`, or `""`. See
+    /// `expected`.
+    found: &'static str,
+}
+
+/// `" (optional)"` if `is_optional`, else `" (default)"` if `has_default`,
+/// else `""`. Mirrors CTDC's richer `Missing attributes: ... (optional)`/
+/// `(default)` rendering as closely as a bounded, statically-composed
+/// message can.
+const fn optional_annotation(is_optional: bool, has_default: bool) -> &'static str {
+    if is_optional {
+        " (optional)"
+    } else if has_default {
+        " (default)"
+    } else {
+        ""
+    }
+}
+
+/// A short, static label for a shape's kind: a `Primitive`'s own type name,
+/// or the container kind (`"Optional"`/`"Sequence"`/`"Map"`/`"Struct"`)
+/// otherwise — used to fill in `expected`/`found` for a shape-kind clash
+/// that isn't a `Primitive`-vs-`Primitive` mismatch.
+const fn shape_label(shape: &TypeShape) -> &'static str {
+    match shape {
+        TypeShape::Primitive(name) => name,
+        TypeShape::Optional(_) => "Optional",
+        TypeShape::Sequence(_) => "Sequence",
+        TypeShape::Map(_, _) => "Map",
+        TypeShape::Struct(_) => "Struct",
+    }
+}
+
+/// A `Missing` diff, annotated `" (optional)"`/`" (default)"` when the
+/// contract field is tolerable-if-absent under `Backward`.
+const fn missing_diff(
+    path: [&'static str; MAX_PATH_DEPTH],
+    is_optional: bool,
+    has_default: bool,
+) -> Diff {
+    Diff {
+        kind: DiffKind::Missing,
+        path,
+        optional_or_default: is_optional || has_default,
+        annotation: optional_annotation(is_optional, has_default),
+        expected: "",
+        found: "",
+    }
+}
+
+/// An `Extra` diff — no annotation applies.
+const fn extra_diff(path: [&'static str; MAX_PATH_DEPTH]) -> Diff {
+    Diff {
+        kind: DiffKind::Extra,
+        path,
+        optional_or_default: false,
+        annotation: "",
+        expected: "",
+        found: "",
+    }
+}
+
+/// A `Mismatch` diff labeled with what the contract expected and what the
+/// producer actually had — CTDC's `expected X, found Y` rendering, as
+/// closely as this crate's bounded, statically-composed message can
+/// reproduce it.
+const fn mismatch_diff_labeled(
+    path: [&'static str; MAX_PATH_DEPTH],
+    expected: &'static str,
+    found: &'static str,
+) -> Diff {
+    Diff {
+        kind: DiffKind::Mismatch,
+        path,
+        optional_or_default: false,
+        annotation: "",
+        expected,
+        found,
+    }
 }
 
 /// A bounded accumulator of [`Diff`]s, standing in for CTDC's unbounded
@@ -324,11 +445,11 @@ const fn diagnose_all(producer: TypeShape, contract: TypeShape, policy: SchemaPo
         }
         (producer, contract) => {
             if !shape_eq(producer, contract) {
-                diffs.push(Diff {
-                    kind: DiffKind::Mismatch,
-                    path: single_segment("<root>"),
-                    optional_or_default: false,
-                });
+                diffs.push(mismatch_diff_labeled(
+                    single_segment("<root>"),
+                    shape_label(contract),
+                    shape_label(producer),
+                ));
             }
         }
     }
@@ -415,11 +536,11 @@ const fn compare_by_name(
             }
             None => {
                 let (field_path, _) = append_segment(path, depth, c.name);
-                diffs.push(Diff {
-                    kind: DiffKind::Missing,
-                    path: field_path,
-                    optional_or_default: is_optional(&c.shape) || c.has_default,
-                });
+                diffs.push(missing_diff(
+                    field_path,
+                    is_optional(&c.shape),
+                    c.has_default,
+                ));
             }
         }
         i += 1;
@@ -429,19 +550,19 @@ const fn compare_by_name(
         let p = &producer[j];
         if find_field_mode(contract, p.name, mode.ci).is_none() {
             let (field_path, _) = append_segment(path, depth, p.name);
-            diffs.push(Diff {
-                kind: DiffKind::Extra,
-                path: field_path,
-                optional_or_default: false,
-            });
+            diffs.push(extra_diff(field_path));
         }
         j += 1;
     }
 }
 
-/// Index-aligned walk: at each shared index, mismatched names (case-aware)
-/// are reported as a `Mismatch` without descending further; matching names
-/// recurse via [`compare_shapes`]. Trailing contract fields beyond the
+/// Index-aligned walk: at each shared index, a name mismatch (case-aware)
+/// is reported as its own `Mismatch` (path suffixed `(name)`, distinguishing
+/// it from a shape diff at the same field) — but unlike a by-name mismatch,
+/// this does *not* stop the traversal from also descending into
+/// [`compare_shapes`] at that index, matching CTDC's `compareOrdered`, which
+/// unconditionally recurses into the paired shapes regardless of whether the
+/// names at that position agree. Trailing contract fields beyond the
 /// producer's length are `Missing`; trailing producer fields are `Extra`.
 const fn compare_ordered(
     producer: &[FieldShape],
@@ -461,37 +582,28 @@ const fn compare_ordered(
         } else {
             str_eq(p.name, c.name)
         };
-        if names_match {
-            let (field_path, field_depth) = append_segment(path, depth, c.name);
-            compare_shapes(&p.shape, &c.shape, field_path, field_depth, mode, diffs);
-        } else {
-            let (field_path, _) = append_segment(path, depth, c.name);
-            diffs.push(Diff {
-                kind: DiffKind::Mismatch,
-                path: field_path,
-                optional_or_default: false,
-            });
+        let (field_path, field_depth) = append_segment(path, depth, c.name);
+        if !names_match {
+            let (name_path, _) = append_segment(field_path, field_depth, "(name)");
+            diffs.push(mismatch_diff_labeled(name_path, c.name, p.name));
         }
+        compare_shapes(&p.shape, &c.shape, field_path, field_depth, mode, diffs);
         i += 1;
     }
     let mut j = shared;
     while j < contract.len() {
         let (field_path, _) = append_segment(path, depth, contract[j].name);
-        diffs.push(Diff {
-            kind: DiffKind::Missing,
-            path: field_path,
-            optional_or_default: is_optional(&contract[j].shape) || contract[j].has_default,
-        });
+        diffs.push(missing_diff(
+            field_path,
+            is_optional(&contract[j].shape),
+            contract[j].has_default,
+        ));
         j += 1;
     }
     let mut k = shared;
     while k < producer.len() {
         let (field_path, _) = append_segment(path, depth, producer[k].name);
-        diffs.push(Diff {
-            kind: DiffKind::Extra,
-            path: field_path,
-            optional_or_default: false,
-        });
+        diffs.push(extra_diff(field_path));
         k += 1;
     }
 }
@@ -520,21 +632,17 @@ const fn compare_by_position(
     let mut j = shared;
     while j < contract.len() {
         let (field_path, _) = append_segment(path, depth, contract[j].name);
-        diffs.push(Diff {
-            kind: DiffKind::Missing,
-            path: field_path,
-            optional_or_default: is_optional(&contract[j].shape) || contract[j].has_default,
-        });
+        diffs.push(missing_diff(
+            field_path,
+            is_optional(&contract[j].shape),
+            contract[j].has_default,
+        ));
         j += 1;
     }
     let mut k = shared;
     while k < producer.len() {
         let (field_path, _) = append_segment(path, depth, producer[k].name);
-        diffs.push(Diff {
-            kind: DiffKind::Extra,
-            path: field_path,
-            optional_or_default: false,
-        });
+        diffs.push(extra_diff(field_path));
         k += 1;
     }
 }
@@ -556,11 +664,7 @@ const fn compare_shapes(
     match (producer, contract) {
         (TypeShape::Primitive(p), TypeShape::Primitive(c)) => {
             if !str_eq(p, c) {
-                diffs.push(Diff {
-                    kind: DiffKind::Mismatch,
-                    path,
-                    optional_or_default: false,
-                });
+                diffs.push(mismatch_diff_labeled(path, c, p));
             }
         }
         (TypeShape::Optional(p), TypeShape::Optional(c)) => {
@@ -580,11 +684,11 @@ const fn compare_shapes(
             compare_fields(pf, cf, path, depth, mode, diffs);
         }
         _ => {
-            diffs.push(Diff {
-                kind: DiffKind::Mismatch,
+            diffs.push(mismatch_diff_labeled(
                 path,
-                optional_or_default: false,
-            });
+                shape_label(contract),
+                shape_label(producer),
+            ));
         }
     }
 }
@@ -756,6 +860,55 @@ const fn diff_close(diffs: &Diffs, i: usize) -> &'static str {
     }
 }
 
+/// A `Missing` diff's `" (optional)"`/`" (default)"` label, or `""`.
+const fn diff_annotation(diffs: &Diffs, i: usize) -> &'static str {
+    match diffs.items[i] {
+        Some(diff) => diff.annotation,
+        None => "",
+    }
+}
+
+/// `" (expected \`"` if this diff carries `expected`/`found` labels, else
+/// `""` — opens the CTDC-style `expected X, found Y` clause.
+const fn expected_open(diffs: &Diffs, i: usize) -> &'static str {
+    match diffs.items[i] {
+        Some(diff) if !diff.expected.is_empty() => " (expected `",
+        _ => "",
+    }
+}
+
+/// The `i`th diff's `expected` label, or `""`.
+const fn diff_expected(diffs: &Diffs, i: usize) -> &'static str {
+    match diffs.items[i] {
+        Some(diff) => diff.expected,
+        None => "",
+    }
+}
+
+/// `"\`, found \`"` between `expected` and `found`, or `""`.
+const fn expected_mid(diffs: &Diffs, i: usize) -> &'static str {
+    match diffs.items[i] {
+        Some(diff) if !diff.expected.is_empty() => "`, found `",
+        _ => "",
+    }
+}
+
+/// The `i`th diff's `found` label, or `""`.
+const fn diff_found(diffs: &Diffs, i: usize) -> &'static str {
+    match diffs.items[i] {
+        Some(diff) => diff.found,
+        None => "",
+    }
+}
+
+/// `"\`)"` closing the `expected X, found Y` clause, or `""`.
+const fn expected_close(diffs: &Diffs, i: usize) -> &'static str {
+    match diffs.items[i] {
+        Some(diff) if !diff.expected.is_empty() => "`)",
+        _ => "",
+    }
+}
+
 /// Proves, at compile time, that `Producer`'s shape conforms to
 /// `ContractT`'s shape under `Policy`.
 ///
@@ -802,6 +955,12 @@ where
                 diff_seg_sep(&diffs, 0, 4), diff_seg(&diffs, 0, 4),
                 diff_seg_sep(&diffs, 0, 5), diff_seg(&diffs, 0, 5),
                 diff_close(&diffs, 0),
+                diff_annotation(&diffs, 0),
+                expected_open(&diffs, 0),
+                diff_expected(&diffs, 0),
+                expected_mid(&diffs, 0),
+                diff_found(&diffs, 0),
+                expected_close(&diffs, 0),
                 diff_lead_sep(&diffs, 1),
                 diff_kind_label(&diffs, 1),
                 diff_seg(&diffs, 1, 0),
@@ -811,6 +970,12 @@ where
                 diff_seg_sep(&diffs, 1, 4), diff_seg(&diffs, 1, 4),
                 diff_seg_sep(&diffs, 1, 5), diff_seg(&diffs, 1, 5),
                 diff_close(&diffs, 1),
+                diff_annotation(&diffs, 1),
+                expected_open(&diffs, 1),
+                diff_expected(&diffs, 1),
+                expected_mid(&diffs, 1),
+                diff_found(&diffs, 1),
+                expected_close(&diffs, 1),
                 diff_lead_sep(&diffs, 2),
                 diff_kind_label(&diffs, 2),
                 diff_seg(&diffs, 2, 0),
@@ -820,6 +985,12 @@ where
                 diff_seg_sep(&diffs, 2, 4), diff_seg(&diffs, 2, 4),
                 diff_seg_sep(&diffs, 2, 5), diff_seg(&diffs, 2, 5),
                 diff_close(&diffs, 2),
+                diff_annotation(&diffs, 2),
+                expected_open(&diffs, 2),
+                diff_expected(&diffs, 2),
+                expected_mid(&diffs, 2),
+                diff_found(&diffs, 2),
+                expected_close(&diffs, 2),
                 diff_lead_sep(&diffs, 3),
                 diff_kind_label(&diffs, 3),
                 diff_seg(&diffs, 3, 0),
@@ -828,7 +999,73 @@ where
                 diff_seg_sep(&diffs, 3, 3), diff_seg(&diffs, 3, 3),
                 diff_seg_sep(&diffs, 3, 4), diff_seg(&diffs, 3, 4),
                 diff_seg_sep(&diffs, 3, 5), diff_seg(&diffs, 3, 5),
-                diff_close(&diffs, 3)
+                diff_close(&diffs, 3),
+                diff_annotation(&diffs, 3),
+                expected_open(&diffs, 3),
+                diff_expected(&diffs, 3),
+                expected_mid(&diffs, 3),
+                diff_found(&diffs, 3),
+                expected_close(&diffs, 3),
+                diff_lead_sep(&diffs, 4),
+                diff_kind_label(&diffs, 4),
+                diff_seg(&diffs, 4, 0),
+                diff_seg_sep(&diffs, 4, 1), diff_seg(&diffs, 4, 1),
+                diff_seg_sep(&diffs, 4, 2), diff_seg(&diffs, 4, 2),
+                diff_seg_sep(&diffs, 4, 3), diff_seg(&diffs, 4, 3),
+                diff_seg_sep(&diffs, 4, 4), diff_seg(&diffs, 4, 4),
+                diff_seg_sep(&diffs, 4, 5), diff_seg(&diffs, 4, 5),
+                diff_close(&diffs, 4),
+                diff_annotation(&diffs, 4),
+                expected_open(&diffs, 4),
+                diff_expected(&diffs, 4),
+                expected_mid(&diffs, 4),
+                diff_found(&diffs, 4),
+                expected_close(&diffs, 4),
+                diff_lead_sep(&diffs, 5),
+                diff_kind_label(&diffs, 5),
+                diff_seg(&diffs, 5, 0),
+                diff_seg_sep(&diffs, 5, 1), diff_seg(&diffs, 5, 1),
+                diff_seg_sep(&diffs, 5, 2), diff_seg(&diffs, 5, 2),
+                diff_seg_sep(&diffs, 5, 3), diff_seg(&diffs, 5, 3),
+                diff_seg_sep(&diffs, 5, 4), diff_seg(&diffs, 5, 4),
+                diff_seg_sep(&diffs, 5, 5), diff_seg(&diffs, 5, 5),
+                diff_close(&diffs, 5),
+                diff_annotation(&diffs, 5),
+                expected_open(&diffs, 5),
+                diff_expected(&diffs, 5),
+                expected_mid(&diffs, 5),
+                diff_found(&diffs, 5),
+                expected_close(&diffs, 5),
+                diff_lead_sep(&diffs, 6),
+                diff_kind_label(&diffs, 6),
+                diff_seg(&diffs, 6, 0),
+                diff_seg_sep(&diffs, 6, 1), diff_seg(&diffs, 6, 1),
+                diff_seg_sep(&diffs, 6, 2), diff_seg(&diffs, 6, 2),
+                diff_seg_sep(&diffs, 6, 3), diff_seg(&diffs, 6, 3),
+                diff_seg_sep(&diffs, 6, 4), diff_seg(&diffs, 6, 4),
+                diff_seg_sep(&diffs, 6, 5), diff_seg(&diffs, 6, 5),
+                diff_close(&diffs, 6),
+                diff_annotation(&diffs, 6),
+                expected_open(&diffs, 6),
+                diff_expected(&diffs, 6),
+                expected_mid(&diffs, 6),
+                diff_found(&diffs, 6),
+                expected_close(&diffs, 6),
+                diff_lead_sep(&diffs, 7),
+                diff_kind_label(&diffs, 7),
+                diff_seg(&diffs, 7, 0),
+                diff_seg_sep(&diffs, 7, 1), diff_seg(&diffs, 7, 1),
+                diff_seg_sep(&diffs, 7, 2), diff_seg(&diffs, 7, 2),
+                diff_seg_sep(&diffs, 7, 3), diff_seg(&diffs, 7, 3),
+                diff_seg_sep(&diffs, 7, 4), diff_seg(&diffs, 7, 4),
+                diff_seg_sep(&diffs, 7, 5), diff_seg(&diffs, 7, 5),
+                diff_close(&diffs, 7),
+                diff_annotation(&diffs, 7),
+                expected_open(&diffs, 7),
+                diff_expected(&diffs, 7),
+                expected_mid(&diffs, 7),
+                diff_found(&diffs, 7),
+                expected_close(&diffs, 7)
             );
         }
     };
@@ -957,6 +1194,35 @@ mod tests {
             ContractT::SHAPE,
             SchemaPolicy::ExactOrdered
         ));
+    }
+
+    #[test]
+    fn exact_ordered_name_mismatch_still_recurses_into_shape() {
+        // Matches CTDC's `compareOrdered`: a name mismatch at an index does
+        // not stop the traversal from also comparing the shapes at that
+        // index — both the name diff and the shape diff are reported.
+        #[allow(dead_code)]
+        #[derive(Contract)]
+        struct Producer {
+            name: String,
+            id: i64,
+        }
+        #[allow(dead_code)]
+        #[derive(Contract)]
+        struct ContractT {
+            id: i64,
+            name: String,
+        }
+        let diffs = diagnose_all(
+            Producer::SHAPE,
+            ContractT::SHAPE,
+            SchemaPolicy::ExactOrdered,
+        );
+        // Index 0: producer `name`(String) vs contract `id`(i64) — name
+        // mismatch AND shape mismatch. Index 1: mirror image. 4 diffs total.
+        assert_eq!(diffs.len, 4);
+        let kinds: std::vec::Vec<DiffKind> = diffs.items.iter().flatten().map(|d| d.kind).collect();
+        assert!(kinds.iter().all(|k| *k == DiffKind::Mismatch));
     }
 
     #[test]

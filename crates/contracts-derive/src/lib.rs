@@ -139,6 +139,16 @@ fn shape_tokens(ty: &Type) -> TokenStream2 {
             }
             "HashMap" | "BTreeMap" => {
                 if let Some((key, value)) = pair_type_args(segment) {
+                    let key_name = quote!(#key).to_string();
+                    if !is_atomic_key_name(&key_name) {
+                        let msg = format!(
+                            "Contract map key must be an atomic type (bool, String, or an \
+                             integer type); found `{key_name}` — matching \
+                             compile-time-data-contracts' `isAtomicKey` restriction, which \
+                             rejects non-atomic map keys at derive time"
+                        );
+                        return syn::Error::new_spanned(key, msg).to_compile_error();
+                    }
                     let key = shape_tokens(key);
                     let value = shape_tokens(value);
                     return quote! { ::contracts::TypeShape::Map(&#key, &#value) };
@@ -199,6 +209,30 @@ fn is_primitive_name(name: &str) -> bool {
             | "isize"
             | "f32"
             | "f64"
+    )
+}
+
+/// Rust equivalents of CTDC's `isAtomicKey` whitelist (`String`, `Int`,
+/// `Long`, `Short`, `Byte`, `Boolean`) — the types considered permissible
+/// `Map` keys. Notably narrower than [`is_primitive_name`]: no `char`, `str`,
+/// or floats, matching CTDC's own exclusion of those from map keys.
+fn is_atomic_key_name(name: &str) -> bool {
+    matches!(
+        name,
+        "bool"
+            | "String"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "usize"
+            | "isize"
     )
 }
 
