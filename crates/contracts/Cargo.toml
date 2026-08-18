@@ -9,6 +9,7 @@ publish = false
 workspace = true
 
 [dependencies]
+const_panic = "0.2.17"
 contracts-derive = { path = "../contracts-derive" }
 
 [dev-dependencies]

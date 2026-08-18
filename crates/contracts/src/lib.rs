@@ -131,60 +131,116 @@ impl SchemaPolicyMarker for Full {
 /// regardless of policy.
 #[must_use]
 pub const fn conforms(producer: TypeShape, contract: TypeShape, policy: SchemaPolicy) -> bool {
+    diagnose(producer, contract, policy).is_none()
+}
+
+/// Compares `producer` against `contract` under `policy`, returning the name
+/// of the first field that fails to conform, or `None` if they conform.
+///
+/// Reuses the exact same field-by-field traversal `conforms` relies on —
+/// `conforms` is defined in terms of this function, so the two can never
+/// disagree on whether a given pair conforms.
+///
+/// If `producer`/`contract` aren't both [`TypeShape::Struct`] (not currently
+/// reachable via `#[derive(Contract)]`, but `diagnose` stays total), a
+/// mismatch has no field to name — the sentinel `"<root>"` is returned
+/// instead of an actual field name.
+const fn diagnose(
+    producer: TypeShape,
+    contract: TypeShape,
+    policy: SchemaPolicy,
+) -> Option<&'static str> {
     match (producer, contract) {
         (TypeShape::Struct(producer_fields), TypeShape::Struct(contract_fields)) => match policy {
-            SchemaPolicy::Exact => exact_conforms(producer_fields, contract_fields),
-            SchemaPolicy::Backward => backward_conforms(producer_fields, contract_fields),
-            SchemaPolicy::Forward => forward_conforms(producer_fields, contract_fields),
-            SchemaPolicy::Full => {
-                backward_conforms(producer_fields, contract_fields)
-                    && forward_conforms(producer_fields, contract_fields)
-            }
+            SchemaPolicy::Exact => exact_diagnose(producer_fields, contract_fields),
+            SchemaPolicy::Backward => backward_diagnose(producer_fields, contract_fields),
+            SchemaPolicy::Forward => forward_diagnose(producer_fields, contract_fields),
+            SchemaPolicy::Full => match backward_diagnose(producer_fields, contract_fields) {
+                Some(field) => Some(field),
+                None => forward_diagnose(producer_fields, contract_fields),
+            },
         },
-        (producer, contract) => shape_eq(&producer, &contract),
+        (producer, contract) => {
+            if shape_eq(&producer, &contract) {
+                None
+            } else {
+                Some("<root>")
+            }
+        }
     }
 }
 
-const fn exact_conforms(producer: &[FieldShape], contract: &[FieldShape]) -> bool {
-    producer.len() == contract.len() && forward_conforms(producer, contract)
+const fn exact_diagnose(producer: &[FieldShape], contract: &[FieldShape]) -> Option<&'static str> {
+    match forward_diagnose(producer, contract) {
+        Some(field) => Some(field),
+        None => {
+            if producer.len() == contract.len() {
+                None
+            } else {
+                // forward_diagnose passing means every producer field is
+                // present in contract with a matching shape; a length
+                // mismatch then means contract has a field producer lacks.
+                first_absent(contract, producer)
+            }
+        }
+    }
 }
 
-const fn backward_conforms(producer: &[FieldShape], contract: &[FieldShape]) -> bool {
+const fn backward_diagnose(
+    producer: &[FieldShape],
+    contract: &[FieldShape],
+) -> Option<&'static str> {
     let mut i = 0;
     while i < contract.len() {
         let field = &contract[i];
         match find_field(producer, field.name) {
             Some(producer_field) => {
                 if !shape_eq(&producer_field.shape, &field.shape) {
-                    return false;
+                    return Some(field.name);
                 }
             }
             None => {
                 if !is_optional(&field.shape) {
-                    return false;
+                    return Some(field.name);
                 }
             }
         }
         i += 1;
     }
-    true
+    None
 }
 
-const fn forward_conforms(producer: &[FieldShape], contract: &[FieldShape]) -> bool {
+const fn forward_diagnose(
+    producer: &[FieldShape],
+    contract: &[FieldShape],
+) -> Option<&'static str> {
     let mut i = 0;
     while i < producer.len() {
         let field = &producer[i];
         match find_field(contract, field.name) {
             Some(contract_field) => {
                 if !shape_eq(&field.shape, &contract_field.shape) {
-                    return false;
+                    return Some(field.name);
                 }
             }
-            None => return false,
+            None => return Some(field.name),
         }
         i += 1;
     }
-    true
+    None
+}
+
+/// Returns the name of the first field in `fields` that has no matching
+/// name in `other`, or `None` if every field in `fields` is present there.
+const fn first_absent(fields: &[FieldShape], other: &[FieldShape]) -> Option<&'static str> {
+    let mut i = 0;
+    while i < fields.len() {
+        if find_field(other, fields[i].name).is_none() {
+            return Some(fields[i].name);
+        }
+        i += 1;
+    }
+    None
 }
 
 const fn find_field<'a>(fields: &'a [FieldShape], name: &str) -> Option<&'a FieldShape> {
@@ -261,11 +317,27 @@ where
     Policy: SchemaPolicyMarker,
 {
     /// Panics at compile time if `Producer` does not conform to `ContractT`
-    /// under `Policy`.
-    pub const CHECK: () = assert!(
-        conforms(Producer::SHAPE, ContractT::SHAPE, Policy::POLICY),
-        "producer schema does not conform to the contract under this policy"
-    );
+    /// under `Policy`, naming the first mismatched field in the panic
+    /// message.
+    ///
+    /// Built with `const_panic::concat_panic!` rather than `panic!("{}", ..)`
+    /// or `const_format::concatcp!`: the field name is only known once
+    /// `Producer`/`ContractT`/`Policy` are monomorphized, and both of those
+    /// alternatives need the message to already be, or reduce to, a
+    /// standalone item that doesn't depend on the enclosing generics —
+    /// `concat_panic!` builds the message from a fixed-size `PanicVal` array
+    /// sized by argument count, not by string length, so it has no such
+    /// item to place.
+    pub const CHECK: () = {
+        if let Some(field) = diagnose(Producer::SHAPE, ContractT::SHAPE, Policy::POLICY) {
+            const_panic::concat_panic!(
+                const_panic::FmtArg::DISPLAY;
+                "producer schema does not conform to the contract: field `",
+                field,
+                "` does not conform"
+            );
+        }
+    };
 }
 
 #[cfg(test)]
