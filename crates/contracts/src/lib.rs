@@ -45,9 +45,11 @@ pub struct FieldShape {
 /// survive comparison instead of being flattened away.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypeShape {
-    /// A scalar or otherwise-undecomposed type, identified by name (e.g.
-    /// `"i64"`, `"String"`, or a nested custom struct's type name — nested
-    /// structs are compared nominally, not decomposed field-by-field).
+    /// A scalar type with no further structure to compare, identified by
+    /// name (e.g. `"i64"`, `"String"`). A nested `#[derive(Contract)]` type
+    /// is *not* represented this way — it's decomposed into its own
+    /// [`TypeShape::Struct`] so mismatches inside it can be traced by path
+    /// (e.g. `shipTo.zip`) instead of compared opaquely by name.
     Primitive(&'static str),
     /// `Option<T>`.
     Optional(&'static TypeShape),
@@ -68,6 +70,14 @@ pub trait Contract {
 }
 
 /// How strictly a producer's shape must match a contract's shape.
+///
+/// This policy governs only the *top-level* field comparison. A field whose
+/// shape is itself a nested `#[derive(Contract)]` struct is always compared
+/// under [`SchemaPolicy::Exact`] semantics one level down, regardless of the
+/// policy chosen here — `Backward`/`Forward`/`Full` do not recurse into
+/// nested structs. For example, under `Backward`, adding a new required
+/// field to a nested struct still fails conformance even though adding one
+/// at the top level would not.
 ///
 /// The ordered-fields and case-insensitive-name variants FlowForge and
 /// compile-time-data-contracts both support are not ported in this slice —
@@ -134,8 +144,17 @@ pub const fn conforms(producer: TypeShape, contract: TypeShape, policy: SchemaPo
     diagnose(producer, contract, policy).is_none()
 }
 
-/// Compares `producer` against `contract` under `policy`, returning the name
-/// of the first field that fails to conform, or `None` if they conform.
+/// How many `.`-separated segments a mismatch path can hold (e.g.
+/// `["shipTo", "zip", "", "", "", ""]`). A mismatch nested deeper than this
+/// still fails to conform — the crate already requires an exact structural
+/// match inside nested structs (see [`shape_eq`]'s `Struct` arm) regardless
+/// of policy — it just reports only its outermost `MAX_PATH_DEPTH` segments
+/// instead of the full path.
+const MAX_PATH_DEPTH: usize = 6;
+
+/// Compares `producer` against `contract` under `policy`, returning the path
+/// (root field first, left-aligned, empty-string-padded past the mismatch)
+/// to the first field that fails to conform, or `None` if they conform.
 ///
 /// Reuses the exact same field-by-field traversal `conforms` relies on —
 /// `conforms` is defined in terms of this function, so the two can never
@@ -143,20 +162,20 @@ pub const fn conforms(producer: TypeShape, contract: TypeShape, policy: SchemaPo
 ///
 /// If `producer`/`contract` aren't both [`TypeShape::Struct`] (not currently
 /// reachable via `#[derive(Contract)]`, but `diagnose` stays total), a
-/// mismatch has no field to name — the sentinel `"<root>"` is returned
-/// instead of an actual field name.
+/// mismatch has no field to name — the sentinel `"<root>"` is returned as a
+/// single-segment path instead of an actual field name.
 const fn diagnose(
     producer: TypeShape,
     contract: TypeShape,
     policy: SchemaPolicy,
-) -> Option<&'static str> {
+) -> Option<[&'static str; MAX_PATH_DEPTH]> {
     match (producer, contract) {
         (TypeShape::Struct(producer_fields), TypeShape::Struct(contract_fields)) => match policy {
             SchemaPolicy::Exact => exact_diagnose(producer_fields, contract_fields),
             SchemaPolicy::Backward => backward_diagnose(producer_fields, contract_fields),
             SchemaPolicy::Forward => forward_diagnose(producer_fields, contract_fields),
             SchemaPolicy::Full => match backward_diagnose(producer_fields, contract_fields) {
-                Some(field) => Some(field),
+                Some(path) => Some(path),
                 None => forward_diagnose(producer_fields, contract_fields),
             },
         },
@@ -164,15 +183,18 @@ const fn diagnose(
             if shape_eq(&producer, &contract) {
                 None
             } else {
-                Some("<root>")
+                Some(single_segment("<root>"))
             }
         }
     }
 }
 
-const fn exact_diagnose(producer: &[FieldShape], contract: &[FieldShape]) -> Option<&'static str> {
+const fn exact_diagnose(
+    producer: &[FieldShape],
+    contract: &[FieldShape],
+) -> Option<[&'static str; MAX_PATH_DEPTH]> {
     match forward_diagnose(producer, contract) {
-        Some(field) => Some(field),
+        Some(path) => Some(path),
         None => {
             if producer.len() == contract.len() {
                 None
@@ -189,19 +211,19 @@ const fn exact_diagnose(producer: &[FieldShape], contract: &[FieldShape]) -> Opt
 const fn backward_diagnose(
     producer: &[FieldShape],
     contract: &[FieldShape],
-) -> Option<&'static str> {
+) -> Option<[&'static str; MAX_PATH_DEPTH]> {
     let mut i = 0;
     while i < contract.len() {
         let field = &contract[i];
         match find_field(producer, field.name) {
             Some(producer_field) => {
                 if !shape_eq(&producer_field.shape, &field.shape) {
-                    return Some(field.name);
+                    return Some(blame(field.name, &producer_field.shape, &field.shape));
                 }
             }
             None => {
                 if !is_optional(&field.shape) {
-                    return Some(field.name);
+                    return Some(single_segment(field.name));
                 }
             }
         }
@@ -213,34 +235,123 @@ const fn backward_diagnose(
 const fn forward_diagnose(
     producer: &[FieldShape],
     contract: &[FieldShape],
-) -> Option<&'static str> {
+) -> Option<[&'static str; MAX_PATH_DEPTH]> {
     let mut i = 0;
     while i < producer.len() {
         let field = &producer[i];
         match find_field(contract, field.name) {
             Some(contract_field) => {
                 if !shape_eq(&field.shape, &contract_field.shape) {
-                    return Some(field.name);
+                    return Some(blame(field.name, &field.shape, &contract_field.shape));
                 }
             }
-            None => return Some(field.name),
+            None => return Some(single_segment(field.name)),
         }
         i += 1;
     }
     None
 }
 
-/// Returns the name of the first field in `fields` that has no matching
-/// name in `other`, or `None` if every field in `fields` is present there.
-const fn first_absent(fields: &[FieldShape], other: &[FieldShape]) -> Option<&'static str> {
+/// Returns the path to the first field in `fields` that has no matching name
+/// in `other`, or `None` if every field in `fields` is present there. Always
+/// a single-segment path: an absent field has nothing to recurse into.
+const fn first_absent(
+    fields: &[FieldShape],
+    other: &[FieldShape],
+) -> Option<[&'static str; MAX_PATH_DEPTH]> {
     let mut i = 0;
     while i < fields.len() {
         if find_field(other, fields[i].name).is_none() {
-            return Some(fields[i].name);
+            return Some(single_segment(fields[i].name));
         }
         i += 1;
     }
     None
+}
+
+/// Builds the path for a field named `name` whose `producer_shape` doesn't
+/// conform to `contract_shape`. When both sides are [`TypeShape::Struct`],
+/// recurses via [`nested_field_diagnose`] to name the specific field inside
+/// that clashes, instead of stopping at the outer field's own name.
+const fn blame(
+    name: &'static str,
+    producer_shape: &TypeShape,
+    contract_shape: &TypeShape,
+) -> [&'static str; MAX_PATH_DEPTH] {
+    match (producer_shape, contract_shape) {
+        (TypeShape::Struct(producer_fields), TypeShape::Struct(contract_fields)) => {
+            prepend_segment(
+                name,
+                nested_field_diagnose(producer_fields, contract_fields),
+            )
+        }
+        _ => single_segment(name),
+    }
+}
+
+/// Finds which field differs between two struct field lists already known
+/// (by the caller) not to satisfy [`fields_eq`] — mirroring `fields_eq`'s
+/// own index-by-index, order-sensitive walk exactly, rather than `find_field`'s
+/// by-name lookup, is what keeps `diagnose` and `shape_eq`/`conforms` from
+/// ever disagreeing on whether something conforms; this function only
+/// decides which field to blame for a failure `fields_eq` already found.
+///
+/// A field-count mismatch has no single positional field to blame, so it
+/// returns an empty path — the caller (via [`blame`]) has already prepended
+/// the outer field's own name, so the reported path simply stops there.
+const fn nested_field_diagnose(
+    producer: &[FieldShape],
+    contract: &[FieldShape],
+) -> [&'static str; MAX_PATH_DEPTH] {
+    if producer.len() != contract.len() {
+        return [""; MAX_PATH_DEPTH];
+    }
+    let mut i = 0;
+    while i < producer.len() {
+        let p = &producer[i];
+        let c = &contract[i];
+        if !str_eq(p.name, c.name) || !shape_eq(&p.shape, &c.shape) {
+            if str_eq(p.name, c.name) {
+                return blame(p.name, &p.shape, &c.shape);
+            }
+            // Same position, different names: report the producer's name at
+            // that position — there's no principled "same field" pairing to
+            // prefer once names disagree.
+            return single_segment(p.name);
+        }
+        i += 1;
+    }
+    [""; MAX_PATH_DEPTH]
+}
+
+/// Builds a path with `name` in the first slot and every other slot empty.
+const fn single_segment(name: &'static str) -> [&'static str; MAX_PATH_DEPTH] {
+    let mut path = [""; MAX_PATH_DEPTH];
+    path[0] = name;
+    path
+}
+
+/// Shifts `inner` right by one slot (dropping anything past the bound) and
+/// puts `name` in the first slot.
+const fn prepend_segment(
+    name: &'static str,
+    inner: [&'static str; MAX_PATH_DEPTH],
+) -> [&'static str; MAX_PATH_DEPTH] {
+    let mut path = [""; MAX_PATH_DEPTH];
+    path[0] = name;
+    let mut i = 1;
+    while i < MAX_PATH_DEPTH {
+        path[i] = inner[i - 1];
+        i += 1;
+    }
+    path
+}
+
+/// `"."` if `segment` is a real path segment, `""` if it's unused padding —
+/// used to join [`diagnose`]'s fixed-size path array without ever printing a
+/// stray separator for an empty trailing slot.
+const fn sep(segment: &'static str) -> &'static str {
+    if segment.is_empty() { "" } else { "." }
 }
 
 const fn find_field<'a>(fields: &'a [FieldShape], name: &str) -> Option<&'a FieldShape> {
@@ -317,23 +428,32 @@ where
     Policy: SchemaPolicyMarker,
 {
     /// Panics at compile time if `Producer` does not conform to `ContractT`
-    /// under `Policy`, naming the first mismatched field in the panic
-    /// message.
+    /// under `Policy`, naming the dotted path (e.g. `shipTo.zip`) to the
+    /// first mismatched field in the panic message.
     ///
     /// Built with `const_panic::concat_panic!` rather than `panic!("{}", ..)`
-    /// or `const_format::concatcp!`: the field name is only known once
+    /// or `const_format::concatcp!`: the path is only known once
     /// `Producer`/`ContractT`/`Policy` are monomorphized, and both of those
     /// alternatives need the message to already be, or reduce to, a
     /// standalone item that doesn't depend on the enclosing generics —
     /// `concat_panic!` builds the message from a fixed-size `PanicVal` array
-    /// sized by argument count, not by string length, so it has no such
-    /// item to place.
+    /// sized by argument count, not by string length, so it has no such item
+    /// to place. The path's segments are passed as individual arguments
+    /// (with a `.` separator computed per slot) rather than pre-joined into
+    /// one string, since `concat_panic!` already concatenates its arguments
+    /// — no string-building dependency is needed for a fixed number of
+    /// slots.
     pub const CHECK: () = {
-        if let Some(field) = diagnose(Producer::SHAPE, ContractT::SHAPE, Policy::POLICY) {
+        if let Some(path) = diagnose(Producer::SHAPE, ContractT::SHAPE, Policy::POLICY) {
             const_panic::concat_panic!(
                 const_panic::FmtArg::DISPLAY;
                 "producer schema does not conform to the contract: field `",
-                field,
+                path[0],
+                sep(path[1]), path[1],
+                sep(path[2]), path[2],
+                sep(path[3]), path[3],
+                sep(path[4]), path[4],
+                sep(path[5]), path[5],
                 "` does not conform"
             );
         }
@@ -423,6 +543,135 @@ mod tests {
         const _: () = SchemaConforms::<WideProducer, ExactContract, Exact>::CHECK;
     }
 
+    mod nested_struct_paths {
+        use super::*;
+
+        #[allow(dead_code)]
+        #[derive(Contract)]
+        struct Address {
+            street: String,
+            zip: String,
+        }
+
+        #[allow(dead_code)]
+        #[derive(Contract)]
+        struct AddressZipMismatch {
+            street: String,
+            zip: i64,
+        }
+
+        #[allow(dead_code)]
+        #[derive(Contract)]
+        struct AddressMissingZip {
+            street: String,
+        }
+
+        #[allow(dead_code)]
+        #[derive(Contract)]
+        struct ShipToProducer {
+            id: i64,
+            ship_to: Address,
+        }
+
+        #[allow(dead_code)]
+        #[derive(Contract)]
+        struct ShipToZipMismatch {
+            id: i64,
+            ship_to: AddressZipMismatch,
+        }
+
+        #[allow(dead_code)]
+        #[derive(Contract)]
+        struct ShipToMissingZip {
+            id: i64,
+            ship_to: AddressMissingZip,
+        }
+
+        #[allow(dead_code)]
+        #[derive(Contract)]
+        struct Geo {
+            lat: f64,
+        }
+
+        #[allow(dead_code)]
+        #[derive(Contract)]
+        struct GeoLatMismatch {
+            lat: i64,
+        }
+
+        #[allow(dead_code)]
+        #[derive(Contract)]
+        struct AddressWithGeo {
+            geo: Geo,
+        }
+
+        #[allow(dead_code)]
+        #[derive(Contract)]
+        struct AddressWithGeoMismatch {
+            geo: GeoLatMismatch,
+        }
+
+        #[allow(dead_code)]
+        #[derive(Contract)]
+        struct OrderProducer {
+            ship_to: AddressWithGeo,
+        }
+
+        #[allow(dead_code)]
+        #[derive(Contract)]
+        struct OrderGeoMismatch {
+            ship_to: AddressWithGeoMismatch,
+        }
+
+        #[test]
+        fn nested_struct_paths_are_decomposed_not_opaque() {
+            assert!(conforms(
+                ShipToProducer::SHAPE,
+                ShipToProducer::SHAPE,
+                SchemaPolicy::Exact
+            ));
+        }
+
+        #[test]
+        fn one_level_nested_mismatch_reports_dotted_path() {
+            let path = diagnose(
+                ShipToProducer::SHAPE,
+                ShipToZipMismatch::SHAPE,
+                SchemaPolicy::Exact,
+            )
+            .expect("shapes must not conform");
+            assert_eq!(path[0], "ship_to");
+            assert_eq!(path[1], "zip");
+            assert_eq!(path[2], "");
+        }
+
+        #[test]
+        fn two_level_nested_mismatch_reports_full_path() {
+            let path = diagnose(
+                OrderProducer::SHAPE,
+                OrderGeoMismatch::SHAPE,
+                SchemaPolicy::Exact,
+            )
+            .expect("shapes must not conform");
+            assert_eq!(path[0], "ship_to");
+            assert_eq!(path[1], "geo");
+            assert_eq!(path[2], "lat");
+            assert_eq!(path[3], "");
+        }
+
+        #[test]
+        fn nested_struct_missing_a_field_stops_the_path_at_the_outer_field() {
+            let path = diagnose(
+                ShipToProducer::SHAPE,
+                ShipToMissingZip::SHAPE,
+                SchemaPolicy::Exact,
+            )
+            .expect("shapes must not conform");
+            assert_eq!(path[0], "ship_to");
+            assert_eq!(path[1], "");
+        }
+    }
+
     #[test]
     fn compile_fail_mismatched_shapes_panic_the_const_check() {
         let t = trybuild::TestCases::new();
@@ -435,9 +684,12 @@ mod tests {
         // A local type literally named `Vec`, with no generics. The derive
         // macro sees only syntax (not resolved types), so it used to assume
         // any segment named "Vec" had exactly one generic argument and
-        // panicked reaching for it. It must now fall back to treating this
-        // as an opaque primitive instead.
+        // panicked reaching for it. It must fall through to the
+        // primitive/nested-Contract case instead of panicking — since "Vec"
+        // isn't a recognized primitive name, that means it's now treated as
+        // a nested Contract type, which requires deriving Contract here too.
         #[allow(dead_code)]
+        #[derive(Contract)]
         struct Vec {
             x: i32,
         }

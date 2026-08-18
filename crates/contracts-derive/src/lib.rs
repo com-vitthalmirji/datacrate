@@ -87,19 +87,29 @@ pub fn derive_contract(input: TokenStream) -> TokenStream {
 /// optionality (e.g. `Vec<Option<T>>`) is preserved rather than collapsed
 /// to the outer container's shape alone.
 ///
-/// Any other named type (including nested custom structs, which are not
-/// decomposed field-by-field here) is recorded as an opaque primitive named
-/// after its own type path — still comparable by name, just not recursed
-/// into further.
+/// Any named type recognized as a Rust/std primitive (`bool`, `char`, `str`,
+/// `String`, the integer and float types) is recorded as an opaque
+/// `Primitive`, comparable only by name. Anything else is assumed to be a
+/// nested `#[derive(Contract)]` type and emitted as `<T as Contract>::SHAPE`
+/// so `diagnose` can recurse into it and name a mismatched field by its full
+/// path (e.g. `shipTo.zip`).
+///
+/// This is a heuristic, not a type resolution — a proc macro sees syntax,
+/// not resolved types, so it cannot actually confirm a field's type
+/// implements `Contract`. A field typed with a non-primitive that does *not*
+/// derive `Contract` (e.g. `uuid::Uuid` used directly) fails to compile with
+/// an unsatisfied-trait-bound error rather than silently comparing wrong —
+/// consistent with this crate's premise that drift is a compile error, not a
+/// silent gap.
 ///
 /// Container detection matches on the last path segment's *name* only
-/// (`"Option"`, `"Vec"`, `"HashMap"`, `"BTreeMap"`) — a proc macro sees
-/// syntax, not resolved types, so it cannot tell `std::vec::Vec` apart from
-/// a same-named local type. To stay safe under that ambiguity, a segment is
-/// only treated as a container when its generic-argument count matches the
-/// container's arity (one for `Option`/`Vec`, two for the maps); anything
-/// else — including a non-generic type that happens to be named `Vec` —
-/// falls through to the opaque-primitive case below instead of panicking.
+/// (`"Option"`, `"Vec"`, `"HashMap"`, `"BTreeMap"`) — the same syntactic
+/// limitation applies here too. To stay safe under that ambiguity, a segment
+/// is only treated as a container when its generic-argument count matches
+/// the container's arity (one for `Option`/`Vec`, two for the maps);
+/// anything else — including a non-generic type that happens to be named
+/// `Vec` — falls through to the primitive/nested-`Contract` case below
+/// instead of panicking.
 fn shape_tokens(ty: &Type) -> TokenStream2 {
     if let Type::Reference(r) = ty {
         return shape_tokens(&r.elem);
@@ -138,7 +148,38 @@ fn shape_tokens(ty: &Type) -> TokenStream2 {
     }
 
     let name = quote!(#ty).to_string();
-    quote! { ::contracts::TypeShape::Primitive(#name) }
+    if is_primitive_name(&name) {
+        quote! { ::contracts::TypeShape::Primitive(#name) }
+    } else {
+        quote! { <#ty as ::contracts::Contract>::SHAPE }
+    }
+}
+
+/// Rust/std primitive type names left as opaque `Primitive` shapes rather
+/// than being treated as a nested `Contract` type. `str` is included even
+/// though field types are practically always `String`, not a bare `str`.
+fn is_primitive_name(name: &str) -> bool {
+    matches!(
+        name,
+        "bool"
+            | "char"
+            | "str"
+            | "String"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "usize"
+            | "isize"
+            | "f32"
+            | "f64"
+    )
 }
 
 /// Returns the segment's sole generic type argument, or `None` if it has
