@@ -28,7 +28,7 @@ use syn::{
 /// input the parser should already have rejected (`Fields::Named` only
 /// matches when every field is named), not a case a caller can hit with
 /// valid Rust source.
-#[proc_macro_derive(Contract)]
+#[proc_macro_derive(Contract, attributes(contract))]
 pub fn derive_contract(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
@@ -66,8 +66,9 @@ pub fn derive_contract(input: TokenStream) -> TokenStream {
             .expect("named field guaranteed by Fields::Named")
             .to_string();
         let shape = shape_tokens(&f.ty);
+        let has_default = has_default_attr(f);
         quote! {
-            ::contracts::FieldShape { name: #field_name, shape: #shape }
+            ::contracts::FieldShape { name: #field_name, shape: #shape, has_default: #has_default }
         }
     });
 
@@ -87,19 +88,29 @@ pub fn derive_contract(input: TokenStream) -> TokenStream {
 /// optionality (e.g. `Vec<Option<T>>`) is preserved rather than collapsed
 /// to the outer container's shape alone.
 ///
-/// Any other named type (including nested custom structs, which are not
-/// decomposed field-by-field here) is recorded as an opaque primitive named
-/// after its own type path — still comparable by name, just not recursed
-/// into further.
+/// Any named type recognized as a Rust/std primitive (`bool`, `char`, `str`,
+/// `String`, the integer and float types) is recorded as an opaque
+/// `Primitive`, comparable only by name. Anything else is assumed to be a
+/// nested `#[derive(Contract)]` type and emitted as `<T as Contract>::SHAPE`
+/// so `diagnose` can recurse into it and name a mismatched field by its full
+/// path (e.g. `shipTo.zip`).
+///
+/// This is a heuristic, not a type resolution — a proc macro sees syntax,
+/// not resolved types, so it cannot actually confirm a field's type
+/// implements `Contract`. A field typed with a non-primitive that does *not*
+/// derive `Contract` (e.g. `uuid::Uuid` used directly) fails to compile with
+/// an unsatisfied-trait-bound error rather than silently comparing wrong —
+/// consistent with this crate's premise that drift is a compile error, not a
+/// silent gap.
 ///
 /// Container detection matches on the last path segment's *name* only
-/// (`"Option"`, `"Vec"`, `"HashMap"`, `"BTreeMap"`) — a proc macro sees
-/// syntax, not resolved types, so it cannot tell `std::vec::Vec` apart from
-/// a same-named local type. To stay safe under that ambiguity, a segment is
-/// only treated as a container when its generic-argument count matches the
-/// container's arity (one for `Option`/`Vec`, two for the maps); anything
-/// else — including a non-generic type that happens to be named `Vec` —
-/// falls through to the opaque-primitive case below instead of panicking.
+/// (`"Option"`, `"Vec"`, `"HashMap"`, `"BTreeMap"`) — the same syntactic
+/// limitation applies here too. To stay safe under that ambiguity, a segment
+/// is only treated as a container when its generic-argument count matches
+/// the container's arity (one for `Option`/`Vec`, two for the maps);
+/// anything else — including a non-generic type that happens to be named
+/// `Vec` — falls through to the primitive/nested-`Contract` case below
+/// instead of panicking.
 fn shape_tokens(ty: &Type) -> TokenStream2 {
     if let Type::Reference(r) = ty {
         return shape_tokens(&r.elem);
@@ -128,6 +139,16 @@ fn shape_tokens(ty: &Type) -> TokenStream2 {
             }
             "HashMap" | "BTreeMap" => {
                 if let Some((key, value)) = pair_type_args(segment) {
+                    let key_name = quote!(#key).to_string();
+                    if !is_atomic_key_name(&key_name) {
+                        let msg = format!(
+                            "Contract map key must be an atomic type (bool, String, or an \
+                             integer type); found `{key_name}` — matching \
+                             compile-time-data-contracts' `isAtomicKey` restriction, which \
+                             rejects non-atomic map keys at derive time"
+                        );
+                        return syn::Error::new_spanned(key, msg).to_compile_error();
+                    }
                     let key = shape_tokens(key);
                     let value = shape_tokens(value);
                     return quote! { ::contracts::TypeShape::Map(&#key, &#value) };
@@ -138,7 +159,81 @@ fn shape_tokens(ty: &Type) -> TokenStream2 {
     }
 
     let name = quote!(#ty).to_string();
-    quote! { ::contracts::TypeShape::Primitive(#name) }
+    if is_primitive_name(&name) {
+        quote! { ::contracts::TypeShape::Primitive(#name) }
+    } else {
+        quote! { <#ty as ::contracts::Contract>::SHAPE }
+    }
+}
+
+/// Detects `#[contract(default)]` on a field — the Rust-side stand-in for a
+/// Scala default value, which has no runtime-inspectable equivalent here.
+/// A field carrying this attribute is treated as tolerable-if-missing under
+/// `SchemaPolicy::Backward`, the same way an `Option<T>` field already is.
+fn has_default_attr(field: &syn::Field) -> bool {
+    let mut found = false;
+    for attr in &field.attrs {
+        if attr.path().is_ident("contract") {
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("default") {
+                    found = true;
+                }
+                Ok(())
+            });
+        }
+    }
+    found
+}
+
+/// Rust/std primitive type names left as opaque `Primitive` shapes rather
+/// than being treated as a nested `Contract` type. `str` is included even
+/// though field types are practically always `String`, not a bare `str`.
+fn is_primitive_name(name: &str) -> bool {
+    matches!(
+        name,
+        "bool"
+            | "char"
+            | "str"
+            | "String"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "usize"
+            | "isize"
+            | "f32"
+            | "f64"
+    )
+}
+
+/// Rust equivalents of CTDC's `isAtomicKey` whitelist (`String`, `Int`,
+/// `Long`, `Short`, `Byte`, `Boolean`) — the types considered permissible
+/// `Map` keys. Notably narrower than [`is_primitive_name`]: no `char`, `str`,
+/// or floats, matching CTDC's own exclusion of those from map keys.
+fn is_atomic_key_name(name: &str) -> bool {
+    matches!(
+        name,
+        "bool"
+            | "String"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "usize"
+            | "isize"
+    )
 }
 
 /// Returns the segment's sole generic type argument, or `None` if it has

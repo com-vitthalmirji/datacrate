@@ -1,0 +1,5 @@
+error: Contract map key must be an atomic type (bool, String, or an integer type); found `f64` — matching compile-time-data-contracts' `isAtomicKey` restriction, which rejects non-atomic map keys at derive time
+ --> tests/compile_fail/non_atomic_map_key.rs:6:21
+  |
+6 |     scores: HashMap<f64, i64>,
+  |                     ^^^

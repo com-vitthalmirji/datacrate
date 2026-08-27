@@ -1,0 +1,24 @@
+error[E0080]: evaluation panicked: producer schema does not conform to the contract: mismatch `id.(name)` (expected `id`, found `name`); mismatch `id` (expected `i64`, found `String`); mismatch `name.(name)` (expected `name`, found `id`); mismatch `name` (expected `String`, found `i64`)
+ --> $CARGO/const_panic-$VERSION/src/macros.rs
+  |
+  |               (|args| $crate::concat_panic(args))
+  |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `contracts::SchemaConforms::<Producer, Contract2, contracts::ExactOrdered>::CHECK` failed here
+  |
+ ::: src/lib.rs
+  |
+  | /             const_panic::concat_panic!(
+  | |                 const_panic::FmtArg::DISPLAY;
+  | |                 "producer schema does not conform to the contract: ",
+  | |                 diff_lead_sep(&diffs, 0),
+... |
+  | |                 expected_close(&diffs, 7)
+  | |             );
+  | |_____________- in this macro invocation
+  |
+  = note: this error originates in the macro `const_panic::concat_panic` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+note: erroneous constant encountered
+  --> tests/compile_fail/exact_ordered_mismatch.rs:15:15
+   |
+15 | const _: () = SchemaConforms::<Producer, Contract2, ExactOrdered>::CHECK;
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
