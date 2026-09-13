@@ -14,6 +14,11 @@ use std::sync::Arc;
 
 use arrow::array::{ArrayRef, Int64Array, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use parquet::arrow::ArrowWriter;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::basic::Compression;
+use parquet::errors::ParquetError;
+use parquet::file::properties::WriterProperties;
 
 /// Errors that can occur while converting a CSV fixture into a `RecordBatch`.
 #[derive(Debug)]
@@ -42,6 +47,23 @@ pub enum FixtureError {
         /// The underlying Arrow error.
         source: arrow::error::ArrowError,
     },
+    /// A Parquet output file could not be created.
+    OpenOutput {
+        /// The path that could not be created.
+        path: std::path::PathBuf,
+        /// The underlying I/O error.
+        source: std::io::Error,
+    },
+    /// A `RecordBatch` could not be written to Parquet.
+    WriteParquet {
+        /// The underlying Parquet error.
+        source: ParquetError,
+    },
+    /// A Parquet file could not be read back into a `RecordBatch`.
+    ReadParquet {
+        /// The underlying Parquet error.
+        source: ParquetError,
+    },
 }
 
 impl std::fmt::Display for FixtureError {
@@ -59,6 +81,15 @@ impl std::fmt::Display for FixtureError {
             FixtureError::BuildBatch { source } => {
                 write!(f, "failed to build record batch: {source}")
             }
+            FixtureError::OpenOutput { path, source } => {
+                write!(f, "failed to create {}: {source}", path.display())
+            }
+            FixtureError::WriteParquet { source } => {
+                write!(f, "failed to write parquet: {source}")
+            }
+            FixtureError::ReadParquet { source } => {
+                write!(f, "failed to read parquet: {source}")
+            }
         }
     }
 }
@@ -70,6 +101,10 @@ impl std::error::Error for FixtureError {
             FixtureError::ReadRecord { source } => Some(source),
             FixtureError::InvalidId { .. } => None,
             FixtureError::BuildBatch { source } => Some(source),
+            FixtureError::OpenOutput { source, .. } => Some(source),
+            FixtureError::WriteParquet { source } | FixtureError::ReadParquet { source } => {
+                Some(source)
+            }
         }
     }
 }
@@ -94,6 +129,22 @@ struct Row {
     note: Option<String>,
 }
 
+/// Parses one already-read CSV record into a [`Row`], given its zero-based
+/// row index (used only for [`FixtureError::InvalidId`]'s message).
+fn parse_row(row: usize, record: &csv::StringRecord) -> Result<Row, FixtureError> {
+    let id_field = record.get(0).unwrap_or_default();
+    let id: i64 = id_field.parse().map_err(|_| FixtureError::InvalidId {
+        row,
+        value: id_field.to_string(),
+    })?;
+    let name = record.get(1).unwrap_or_default().to_string();
+    let note = match record.get(2).unwrap_or_default() {
+        "" => None,
+        note => Some(note.to_string()),
+    };
+    Ok(Row { id, name, note })
+}
+
 fn parse_rows(path: &Path) -> Result<Vec<Row>, FixtureError> {
     let file = File::open(path).map_err(|source| FixtureError::OpenInput {
         path: path.to_path_buf(),
@@ -104,17 +155,7 @@ fn parse_rows(path: &Path) -> Result<Vec<Row>, FixtureError> {
     let mut rows = Vec::new();
     for (row, record) in reader.records().enumerate() {
         let record = record.map_err(|source| FixtureError::ReadRecord { source })?;
-        let id_field = record.get(0).unwrap_or_default();
-        let id: i64 = id_field.parse().map_err(|_| FixtureError::InvalidId {
-            row,
-            value: id_field.to_string(),
-        })?;
-        let name = record.get(1).unwrap_or_default().to_string();
-        let note = match record.get(2).unwrap_or_default() {
-            "" => None,
-            note => Some(note.to_string()),
-        };
-        rows.push(Row { id, name, note });
+        rows.push(parse_row(row, &record)?);
     }
     Ok(rows)
 }
@@ -164,6 +205,63 @@ pub fn fixture_to_record_batches(
         .chunks(batch_size)
         .map(batch_from_rows)
         .collect()
+}
+
+/// Writes `batch` to `path` as a single-row-group Parquet file, compressed
+/// with `compression`.
+///
+/// # Errors
+///
+/// Returns [`FixtureError`] if `path` cannot be created or the batch cannot
+/// be encoded as Parquet.
+pub fn write_parquet(
+    batch: &RecordBatch,
+    path: &Path,
+    compression: Compression,
+) -> Result<(), FixtureError> {
+    let file = File::create(path).map_err(|source| FixtureError::OpenOutput {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let props = WriterProperties::builder()
+        .set_compression(compression)
+        .build();
+    let mut writer = ArrowWriter::try_new(file, batch.schema(), Some(props))
+        .map_err(|source| FixtureError::WriteParquet { source })?;
+    writer
+        .write(batch)
+        .map_err(|source| FixtureError::WriteParquet { source })?;
+    writer
+        .close()
+        .map_err(|source| FixtureError::WriteParquet { source })?;
+    Ok(())
+}
+
+/// Reads a Parquet file written by [`write_parquet`] back into a single
+/// `RecordBatch`.
+///
+/// # Errors
+///
+/// Returns [`FixtureError`] if `path` cannot be opened or its contents
+/// cannot be decoded as a `RecordBatch` matching [`schema`].
+pub fn read_parquet(path: &Path) -> Result<RecordBatch, FixtureError> {
+    let file = File::open(path).map_err(|source| FixtureError::OpenInput {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|source| FixtureError::ReadParquet { source })?
+        .build()
+        .map_err(|source| FixtureError::ReadParquet { source })?;
+
+    let batches: Vec<RecordBatch> =
+        reader
+            .collect::<Result<_, _>>()
+            .map_err(|source| FixtureError::ReadParquet {
+                source: ParquetError::from(source),
+            })?;
+    arrow::compute::concat_batches(&schema(), &batches)
+        .map_err(|source| FixtureError::BuildBatch { source })
 }
 
 #[cfg(test)]
@@ -300,5 +398,84 @@ mod tests {
 
         let total_rows: usize = batches.iter().map(RecordBatch::num_rows).sum();
         assert_eq!(total_rows, 3);
+    }
+
+    #[test]
+    fn parquet_round_trip_preserves_schema_nulls_and_values() {
+        let original = fixture_to_record_batch(&fixture_path("headers.csv"))
+            .expect("fixture should convert cleanly");
+
+        let dir = tempfile::tempdir().expect("temp dir should be creatable");
+        let path = dir.path().join("headers.parquet");
+
+        write_parquet(&original, &path, Compression::SNAPPY)
+            .expect("batch should write to parquet cleanly");
+        let round_tripped = read_parquet(&path).expect("parquet should read back cleanly");
+
+        assert_eq!(round_tripped.schema(), original.schema());
+        assert_eq!(round_tripped.num_rows(), original.num_rows());
+
+        for column in 0..original.num_columns() {
+            assert_eq!(
+                round_tripped.column(column).as_ref(),
+                original.column(column).as_ref(),
+                "column {column} should match exactly after a parquet round trip"
+            );
+        }
+
+        let original_notes = original
+            .column(2)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("note column should be Utf8");
+        let round_tripped_notes = round_tripped
+            .column(2)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("note column should be Utf8");
+        assert_eq!(
+            round_tripped_notes.null_count(),
+            original_notes.null_count()
+        );
+        for row in 0..original.num_rows() {
+            assert_eq!(
+                round_tripped_notes.is_null(row),
+                original_notes.is_null(row)
+            );
+        }
+    }
+
+    #[test]
+    fn slicing_shares_the_underlying_buffer_instead_of_copying() {
+        let ids = Int64Array::from(vec![1, 2, 3, 4, 5]);
+        let sliced = ids.slice(1, 3);
+
+        // `data_ptr()` (not `as_ptr()`) points at the start of the underlying
+        // allocation, ignoring the view offset a slice introduces — that
+        // offset is exactly why `as_ptr()` differs between the two views
+        // even though they share one allocation.
+        let original_ptr = ids.to_data().buffers()[0].data_ptr();
+        let sliced_ptr = sliced.to_data().buffers()[0].data_ptr();
+
+        assert_eq!(
+            original_ptr, sliced_ptr,
+            "Array::slice should reuse the original buffer allocation, not copy it"
+        );
+        assert_eq!(sliced.values(), &[2, 3, 4]);
+    }
+
+    #[test]
+    fn casting_to_a_different_width_allocates_a_new_buffer() {
+        let ids = Int64Array::from(vec![1, 2, 3]);
+        let casted = arrow::compute::cast(&ids, &DataType::Float64)
+            .expect("Int64 to Float64 cast should succeed");
+
+        let original_ptr = ids.to_data().buffers()[0].data_ptr();
+        let casted_ptr = casted.to_data().buffers()[0].data_ptr();
+
+        assert_ne!(
+            original_ptr, casted_ptr,
+            "cast must allocate a new buffer: Int64 and Float64 differ in byte width"
+        );
     }
 }
