@@ -11,3 +11,7 @@ workspace = true
 [dependencies]
 arrow = "59"
 csv = "1"
+parquet = { version = "59.3.0", default-features = false, features = ["arrow", "snap", "zstd"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"

@@ -113,9 +113,9 @@ impl PipelineBuilder<Present<PathBuf>, Present<Transform>, Present<Sink>> {
     ///
     /// # Errors
     ///
-    /// Returns [`pipeline::FixtureError`] if the fixture cannot be read or
+    /// Returns [`pipeline::PipelineIoError`] if the fixture cannot be read or
     /// parsed into a `RecordBatch`.
-    pub fn build(self) -> Result<RecordBatch, pipeline::FixtureError> {
+    pub fn build(self) -> Result<RecordBatch, pipeline::PipelineIoError> {
         let batch = pipeline::fixture_to_record_batch(&self.source.0)?;
         let batch = (self.transform.0)(batch);
         Ok((self.sink.0)(batch))
