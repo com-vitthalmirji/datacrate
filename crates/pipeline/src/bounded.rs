@@ -16,8 +16,11 @@ use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread;
 
 use arrow::array::RecordBatch;
+use object_store::ObjectStore;
+use object_store::path::Path as ObjectPath;
 use parquet::basic::Compression;
 
+use crate::object_store_io::{download_to_temp, upload_from_temp};
 use crate::{PipelineIoError, Row, batch_from_rows, open_parquet_writer, parse_row, schema};
 
 /// Tuning for [`run_bounded_pipeline`]: how many rows make one `RecordBatch`,
@@ -278,6 +281,42 @@ pub fn run_bounded_pipeline(
     }
 }
 
+/// Runs [`run_bounded_pipeline`] against objects in `store` instead of local
+/// paths: downloads `input_key` to a local temp CSV, runs the unmodified
+/// local pipeline, then uploads the resulting Parquet to `output_key`. Local
+/// disk staging keeps the bounded pipeline's memory envelope unchanged from
+/// the local-file case — only the two ends of the pipe move.
+///
+/// # Errors
+///
+/// Returns [`PipelineError::Io`] if the download, the local pipeline run, or
+/// the upload fails, or [`PipelineError::Cancelled`] if `cancel` was set
+/// before output could be published.
+///
+/// # Panics
+///
+/// Panics if `config.batch_size` is zero (same as [`run_bounded_pipeline`]).
+pub fn run_bounded_pipeline_s3(
+    store: &dyn ObjectStore,
+    input_key: &ObjectPath,
+    output_key: &ObjectPath,
+    config: &PipelineConfig,
+    cancel: &CancellationToken,
+) -> Result<PipelineReport, PipelineError> {
+    let staging_dir = tempfile::tempdir().map_err(|source| PipelineIoError::OpenOutput {
+        path: std::env::temp_dir(),
+        source,
+    })?;
+    let local_input = staging_dir.path().join("input.csv");
+    let local_output = staging_dir.path().join("output.parquet");
+
+    download_to_temp(store, input_key, &local_input)?;
+    let report = run_bounded_pipeline(&local_input, &local_output, config, cancel)?;
+    upload_from_temp(store, &local_output, output_key)?;
+
+    Ok(report)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,5 +498,50 @@ mod tests {
             &config,
             &CancellationToken::new(),
         );
+    }
+
+    fn test_block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread tokio runtime should build")
+            .block_on(future)
+    }
+
+    #[test]
+    fn s3_pipeline_downloads_transforms_and_uploads_through_an_in_memory_store() {
+        use object_store::PutPayload;
+        use object_store::memory::InMemory;
+        use object_store::path::Path as ObjectPath;
+
+        let store = InMemory::new();
+        let input_key = ObjectPath::from("input.csv");
+        let output_key = ObjectPath::from("output.parquet");
+
+        let csv = std::fs::read(fixture_path("headers.csv")).expect("fixture should be readable");
+        test_block_on(store.put(&input_key, PutPayload::from(csv)))
+            .expect("seeding the in-memory store should succeed");
+
+        let report = run_bounded_pipeline_s3(
+            &store,
+            &input_key,
+            &output_key,
+            &PipelineConfig::default(),
+            &CancellationToken::new(),
+        )
+        .expect("s3 pipeline should succeed against an in-memory store");
+
+        assert_eq!(report.rows_written, 3);
+
+        let uploaded = test_block_on(async {
+            store
+                .get(&output_key)
+                .await
+                .expect("output object should exist")
+                .bytes()
+                .await
+                .expect("output object bytes should be readable")
+        });
+        assert!(!uploaded.is_empty());
     }
 }
