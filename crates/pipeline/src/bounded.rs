@@ -178,6 +178,10 @@ fn produce_batches(
 /// `staging_path`. Reports [`PipelineError::Cancelled`] if `cancel` is set
 /// either before the first batch or between batches, without writing
 /// anything further.
+///
+/// `receiver` is taken by value so that every early return below drops it:
+/// that drop is what unblocks [`produce_batches`] if it's parked in a
+/// blocking `sender.send()` on a full channel, rather than deadlocking.
 fn consume_batches(
     receiver: Receiver<Result<RecordBatch, PipelineIoError>>,
     staging_path: &Path,
@@ -222,6 +226,11 @@ fn consume_batches(
 /// size. Output is staged and renamed into place only on success — any
 /// error or cancellation leaves `output` untouched and removes the staged
 /// file.
+///
+/// `thread::scope` only returns once the producer thread has observed
+/// [`consume_batches`]'s receiver drop (as a `SendError`, if it was blocked
+/// on `send()`) and returned, so the rename/cleanup step below never races
+/// a still-running producer.
 ///
 /// # Errors
 ///
