@@ -12,8 +12,8 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{Int64Array, RecordBatch, StringArray};
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::array::{ArrayRef, Int64Array, RecordBatch, StringArray};
+use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 
 /// Errors that can occur while converting a CSV fixture into a `RecordBatch`.
 #[derive(Debug)]
@@ -74,12 +74,65 @@ impl std::error::Error for FixtureError {
     }
 }
 
+/// The fixed three-column schema (`id: Int64`, `name: Utf8`, `note: Utf8`,
+/// nullable) every [`fixture_to_record_batch`]/[`fixture_to_record_batches`]
+/// batch shares.
+pub fn schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("name", DataType::Utf8, false),
+        Field::new("note", DataType::Utf8, true),
+    ]))
+}
+
+/// A single parsed `id,name,note` row. `note` is `None` when the CSV field
+/// was empty, so the resulting Arrow column carries a real validity bit
+/// instead of an empty string standing in for "missing".
+struct Row {
+    id: i64,
+    name: String,
+    note: Option<String>,
+}
+
+fn parse_rows(path: &Path) -> Result<Vec<Row>, FixtureError> {
+    let file = File::open(path).map_err(|source| FixtureError::OpenInput {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut reader = csv::Reader::from_reader(file);
+
+    let mut rows = Vec::new();
+    for (row, record) in reader.records().enumerate() {
+        let record = record.map_err(|source| FixtureError::ReadRecord { source })?;
+        let id_field = record.get(0).unwrap_or_default();
+        let id: i64 = id_field.parse().map_err(|_| FixtureError::InvalidId {
+            row,
+            value: id_field.to_string(),
+        })?;
+        let name = record.get(1).unwrap_or_default().to_string();
+        let note = match record.get(2).unwrap_or_default() {
+            "" => None,
+            note => Some(note.to_string()),
+        };
+        rows.push(Row { id, name, note });
+    }
+    Ok(rows)
+}
+
+fn batch_from_rows(rows: &[Row]) -> Result<RecordBatch, FixtureError> {
+    let ids: Int64Array = rows.iter().map(|r| r.id).collect();
+    let names: StringArray = rows.iter().map(|r| Some(r.name.as_str())).collect();
+    let notes: StringArray = rows.iter().map(|r| r.note.as_deref()).collect();
+
+    let columns: Vec<ArrayRef> = vec![Arc::new(ids), Arc::new(names), Arc::new(notes)];
+    RecordBatch::try_new(schema(), columns).map_err(|source| FixtureError::BuildBatch { source })
+}
+
 /// Reads a headered CSV file with an `id,name,note` schema and converts it
 /// into a single typed Arrow [`RecordBatch`].
 ///
-/// `id` becomes an `Int64` column; `name` and `note` become `Utf8` columns.
-/// Missing trailing fields become empty strings, not nulls — this function
-/// does not build a null bitmap.
+/// `id` and `name` are non-nullable; an empty `note` field becomes a real
+/// null, not an empty string.
 ///
 /// # Errors
 ///
@@ -88,48 +141,35 @@ impl std::error::Error for FixtureError {
 /// `id` field is not a valid integer, or the resulting arrays cannot be
 /// assembled into a `RecordBatch`.
 pub fn fixture_to_record_batch(path: &Path) -> Result<RecordBatch, FixtureError> {
-    let file = File::open(path).map_err(|source| FixtureError::OpenInput {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    let mut reader = csv::Reader::from_reader(file);
+    batch_from_rows(&parse_rows(path)?)
+}
 
-    let mut ids = Vec::new();
-    let mut names = Vec::new();
-    let mut notes = Vec::new();
-
-    for (row, record) in reader.records().enumerate() {
-        let record = record.map_err(|source| FixtureError::ReadRecord { source })?;
-        let id_field = record.get(0).unwrap_or_default();
-        let id: i64 = id_field.parse().map_err(|_| FixtureError::InvalidId {
-            row,
-            value: id_field.to_string(),
-        })?;
-        ids.push(id);
-        names.push(record.get(1).unwrap_or_default().to_string());
-        notes.push(record.get(2).unwrap_or_default().to_string());
-    }
-
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::Int64, false),
-        Field::new("name", DataType::Utf8, false),
-        Field::new("note", DataType::Utf8, false),
-    ]));
-
-    RecordBatch::try_new(
-        schema,
-        vec![
-            Arc::new(Int64Array::from(ids)),
-            Arc::new(StringArray::from(names)),
-            Arc::new(StringArray::from(notes)),
-        ],
-    )
-    .map_err(|source| FixtureError::BuildBatch { source })
+/// Reads the same `id,name,note` fixture as [`fixture_to_record_batch`], but
+/// splits the rows into multiple batches of at most `batch_size` rows each,
+/// all sharing the same [`schema`].
+///
+/// # Errors
+///
+/// Same conditions as [`fixture_to_record_batch`].
+///
+/// # Panics
+///
+/// Panics if `batch_size` is zero.
+pub fn fixture_to_record_batches(
+    path: &Path,
+    batch_size: usize,
+) -> Result<Vec<RecordBatch>, FixtureError> {
+    assert!(batch_size > 0, "batch_size must be greater than zero");
+    parse_rows(path)?
+        .chunks(batch_size)
+        .map(batch_from_rows)
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::array::Array;
 
     fn fixture_path(name: &str) -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -185,5 +225,80 @@ mod tests {
         let err = fixture_to_record_batch(&fixture_path("malformed.csv"))
             .expect_err("a row with fewer fields than the header should fail");
         assert!(matches!(err, FixtureError::ReadRecord { .. }));
+    }
+
+    #[test]
+    fn empty_note_field_becomes_a_real_null_not_an_empty_string() {
+        let batch = fixture_to_record_batch(&fixture_path("headers.csv"))
+            .expect("fixture should convert cleanly");
+
+        let notes = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("note column should be Utf8");
+
+        assert!(!notes.is_null(0));
+        assert!(!notes.is_null(1));
+        assert!(notes.is_null(2));
+        assert_eq!(notes.null_count(), 1);
+    }
+
+    #[test]
+    fn null_propagates_through_the_is_null_kernel() {
+        let batch = fixture_to_record_batch(&fixture_path("headers.csv"))
+            .expect("fixture should convert cleanly");
+        let notes = batch.column(2);
+
+        let mask = arrow::compute::is_null(notes).expect("is_null kernel should run");
+        assert!(!mask.value(0));
+        assert!(!mask.value(1));
+        assert!(mask.value(2));
+    }
+
+    #[test]
+    fn record_batch_try_new_rejects_a_schema_mismatch() {
+        let wrong_type_column: ArrayRef = Arc::new(StringArray::from(vec!["not an int"]));
+        let columns: Vec<ArrayRef> = vec![
+            wrong_type_column,
+            Arc::new(StringArray::from(vec!["a name"])),
+            Arc::new(StringArray::from(vec![Some("a note")])),
+        ];
+
+        let err = RecordBatch::try_new(schema(), columns)
+            .expect_err("an Int64 schema column backed by a Utf8 array must fail, not panic");
+        assert!(matches!(
+            err,
+            arrow::error::ArrowError::InvalidArgumentError(_)
+        ));
+    }
+
+    #[test]
+    fn record_batch_supports_zero_rows() {
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(Int64Array::from(Vec::<i64>::new())),
+            Arc::new(StringArray::from(Vec::<&str>::new())),
+            Arc::new(StringArray::from(Vec::<Option<&str>>::new())),
+        ];
+        let batch = RecordBatch::try_new(schema(), columns).expect("an empty batch is valid");
+
+        assert_eq!(batch.num_rows(), 0);
+        assert_eq!(batch.num_columns(), 3);
+    }
+
+    #[test]
+    fn fixture_splits_into_multiple_batches_sharing_one_schema() {
+        let batches = fixture_to_record_batches(&fixture_path("headers.csv"), 2)
+            .expect("fixture should split cleanly");
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].num_rows(), 2);
+        assert_eq!(batches[1].num_rows(), 1);
+        for batch in &batches {
+            assert_eq!(batch.schema(), schema());
+        }
+
+        let total_rows: usize = batches.iter().map(RecordBatch::num_rows).sum();
+        assert_eq!(total_rows, 3);
     }
 }
