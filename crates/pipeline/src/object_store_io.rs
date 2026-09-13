@@ -10,7 +10,7 @@ use std::io::Write;
 use std::path::Path;
 
 use object_store::path::Path as ObjectPath;
-use object_store::{ObjectStore, PutPayload};
+use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 
 use crate::PipelineIoError;
 

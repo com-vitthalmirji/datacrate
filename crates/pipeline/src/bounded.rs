@@ -321,6 +321,7 @@ pub fn run_bounded_pipeline_s3(
 mod tests {
     use super::*;
     use crate::read_parquet;
+    use object_store::ObjectStoreExt;
     use std::io::Write;
 
     fn fixture_path(name: &str) -> PathBuf {
