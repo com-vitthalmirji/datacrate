@@ -8,6 +8,8 @@
 
 #![warn(missing_docs)]
 
+pub mod bounded;
+
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
@@ -123,7 +125,7 @@ pub fn schema() -> SchemaRef {
 /// A single parsed `id,name,note` row. `note` is `None` when the CSV field
 /// was empty, so the resulting Arrow column carries a real validity bit
 /// instead of an empty string standing in for "missing".
-struct Row {
+pub(crate) struct Row {
     id: i64,
     name: String,
     note: Option<String>,
@@ -131,7 +133,7 @@ struct Row {
 
 /// Parses one already-read CSV record into a [`Row`], given its zero-based
 /// row index (used only for [`FixtureError::InvalidId`]'s message).
-fn parse_row(row: usize, record: &csv::StringRecord) -> Result<Row, FixtureError> {
+pub(crate) fn parse_row(row: usize, record: &csv::StringRecord) -> Result<Row, FixtureError> {
     let id_field = record.get(0).unwrap_or_default();
     let id: i64 = id_field.parse().map_err(|_| FixtureError::InvalidId {
         row,
@@ -160,7 +162,7 @@ fn parse_rows(path: &Path) -> Result<Vec<Row>, FixtureError> {
     Ok(rows)
 }
 
-fn batch_from_rows(rows: &[Row]) -> Result<RecordBatch, FixtureError> {
+pub(crate) fn batch_from_rows(rows: &[Row]) -> Result<RecordBatch, FixtureError> {
     let ids: Int64Array = rows.iter().map(|r| r.id).collect();
     let names: StringArray = rows.iter().map(|r| Some(r.name.as_str())).collect();
     let notes: StringArray = rows.iter().map(|r| r.note.as_deref()).collect();
