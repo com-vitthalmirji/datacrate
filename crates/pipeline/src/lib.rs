@@ -9,6 +9,7 @@
 #![warn(missing_docs)]
 
 pub mod bounded;
+pub mod object_store_io;
 
 use std::fs::File;
 use std::path::Path;
@@ -67,6 +68,20 @@ pub enum PipelineIoError {
         /// The underlying Parquet error.
         source: ParquetError,
     },
+    /// An object could not be downloaded from an [`object_store::ObjectStore`].
+    DownloadObject {
+        /// The object key that could not be downloaded.
+        key: object_store::path::Path,
+        /// The underlying `object_store` error.
+        source: object_store::Error,
+    },
+    /// An object could not be uploaded to an [`object_store::ObjectStore`].
+    UploadObject {
+        /// The object key that could not be uploaded.
+        key: object_store::path::Path,
+        /// The underlying `object_store` error.
+        source: object_store::Error,
+    },
 }
 
 impl std::fmt::Display for PipelineIoError {
@@ -93,6 +108,12 @@ impl std::fmt::Display for PipelineIoError {
             PipelineIoError::ReadParquet { source } => {
                 write!(f, "failed to read parquet: {source}")
             }
+            PipelineIoError::DownloadObject { key, source } => {
+                write!(f, "failed to download {key}: {source}")
+            }
+            PipelineIoError::UploadObject { key, source } => {
+                write!(f, "failed to upload {key}: {source}")
+            }
         }
     }
 }
@@ -108,6 +129,8 @@ impl std::error::Error for PipelineIoError {
             PipelineIoError::WriteParquet { source } | PipelineIoError::ReadParquet { source } => {
                 Some(source)
             }
+            PipelineIoError::DownloadObject { source, .. }
+            | PipelineIoError::UploadObject { source, .. } => Some(source),
         }
     }
 }
