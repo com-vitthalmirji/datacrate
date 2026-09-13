@@ -20,9 +20,10 @@ use parquet::basic::Compression;
 use parquet::errors::ParquetError;
 use parquet::file::properties::WriterProperties;
 
-/// Errors that can occur while converting a CSV fixture into a `RecordBatch`.
+/// Errors that can occur while converting a CSV fixture into a `RecordBatch`,
+/// or while writing/reading that batch as Parquet.
 #[derive(Debug)]
-pub enum FixtureError {
+pub enum PipelineIoError {
     /// The input file could not be opened.
     OpenInput {
         /// The path that could not be opened.
@@ -66,43 +67,43 @@ pub enum FixtureError {
     },
 }
 
-impl std::fmt::Display for FixtureError {
+impl std::fmt::Display for PipelineIoError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            FixtureError::OpenInput { path, source } => {
+            PipelineIoError::OpenInput { path, source } => {
                 write!(f, "failed to open {}: {source}", path.display())
             }
-            FixtureError::ReadRecord { source } => {
+            PipelineIoError::ReadRecord { source } => {
                 write!(f, "failed to read CSV record: {source}")
             }
-            FixtureError::InvalidId { row, value } => {
+            PipelineIoError::InvalidId { row, value } => {
                 write!(f, "row {row}: invalid id {value:?}, expected an integer")
             }
-            FixtureError::BuildBatch { source } => {
+            PipelineIoError::BuildBatch { source } => {
                 write!(f, "failed to build record batch: {source}")
             }
-            FixtureError::OpenOutput { path, source } => {
+            PipelineIoError::OpenOutput { path, source } => {
                 write!(f, "failed to create {}: {source}", path.display())
             }
-            FixtureError::WriteParquet { source } => {
+            PipelineIoError::WriteParquet { source } => {
                 write!(f, "failed to write parquet: {source}")
             }
-            FixtureError::ReadParquet { source } => {
+            PipelineIoError::ReadParquet { source } => {
                 write!(f, "failed to read parquet: {source}")
             }
         }
     }
 }
 
-impl std::error::Error for FixtureError {
+impl std::error::Error for PipelineIoError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            FixtureError::OpenInput { source, .. } => Some(source),
-            FixtureError::ReadRecord { source } => Some(source),
-            FixtureError::InvalidId { .. } => None,
-            FixtureError::BuildBatch { source } => Some(source),
-            FixtureError::OpenOutput { source, .. } => Some(source),
-            FixtureError::WriteParquet { source } | FixtureError::ReadParquet { source } => {
+            PipelineIoError::OpenInput { source, .. } => Some(source),
+            PipelineIoError::ReadRecord { source } => Some(source),
+            PipelineIoError::InvalidId { .. } => None,
+            PipelineIoError::BuildBatch { source } => Some(source),
+            PipelineIoError::OpenOutput { source, .. } => Some(source),
+            PipelineIoError::WriteParquet { source } | PipelineIoError::ReadParquet { source } => {
                 Some(source)
             }
         }
@@ -130,10 +131,10 @@ struct Row {
 }
 
 /// Parses one already-read CSV record into a [`Row`], given its zero-based
-/// row index (used only for [`FixtureError::InvalidId`]'s message).
-fn parse_row(row: usize, record: &csv::StringRecord) -> Result<Row, FixtureError> {
+/// row index (used only for [`PipelineIoError::InvalidId`]'s message).
+fn parse_row(row: usize, record: &csv::StringRecord) -> Result<Row, PipelineIoError> {
     let id_field = record.get(0).unwrap_or_default();
-    let id: i64 = id_field.parse().map_err(|_| FixtureError::InvalidId {
+    let id: i64 = id_field.parse().map_err(|_| PipelineIoError::InvalidId {
         row,
         value: id_field.to_string(),
     })?;
@@ -145,8 +146,8 @@ fn parse_row(row: usize, record: &csv::StringRecord) -> Result<Row, FixtureError
     Ok(Row { id, name, note })
 }
 
-fn parse_rows(path: &Path) -> Result<Vec<Row>, FixtureError> {
-    let file = File::open(path).map_err(|source| FixtureError::OpenInput {
+fn parse_rows(path: &Path) -> Result<Vec<Row>, PipelineIoError> {
+    let file = File::open(path).map_err(|source| PipelineIoError::OpenInput {
         path: path.to_path_buf(),
         source,
     })?;
@@ -154,19 +155,19 @@ fn parse_rows(path: &Path) -> Result<Vec<Row>, FixtureError> {
 
     let mut rows = Vec::new();
     for (row, record) in reader.records().enumerate() {
-        let record = record.map_err(|source| FixtureError::ReadRecord { source })?;
+        let record = record.map_err(|source| PipelineIoError::ReadRecord { source })?;
         rows.push(parse_row(row, &record)?);
     }
     Ok(rows)
 }
 
-fn batch_from_rows(rows: &[Row]) -> Result<RecordBatch, FixtureError> {
+fn batch_from_rows(rows: &[Row]) -> Result<RecordBatch, PipelineIoError> {
     let ids: Int64Array = rows.iter().map(|r| r.id).collect();
     let names: StringArray = rows.iter().map(|r| Some(r.name.as_str())).collect();
     let notes: StringArray = rows.iter().map(|r| r.note.as_deref()).collect();
 
     let columns: Vec<ArrayRef> = vec![Arc::new(ids), Arc::new(names), Arc::new(notes)];
-    RecordBatch::try_new(schema(), columns).map_err(|source| FixtureError::BuildBatch { source })
+    RecordBatch::try_new(schema(), columns).map_err(|source| PipelineIoError::BuildBatch { source })
 }
 
 /// Reads a headered CSV file with an `id,name,note` schema and converts it
@@ -177,11 +178,11 @@ fn batch_from_rows(rows: &[Row]) -> Result<RecordBatch, FixtureError> {
 ///
 /// # Errors
 ///
-/// Returns [`FixtureError`] if the file cannot be opened, a record cannot be
+/// Returns [`PipelineIoError`] if the file cannot be opened, a record cannot be
 /// read (including a row with a different column count than the header), an
 /// `id` field is not a valid integer, or the resulting arrays cannot be
 /// assembled into a `RecordBatch`.
-pub fn fixture_to_record_batch(path: &Path) -> Result<RecordBatch, FixtureError> {
+pub fn fixture_to_record_batch(path: &Path) -> Result<RecordBatch, PipelineIoError> {
     batch_from_rows(&parse_rows(path)?)
 }
 
@@ -199,7 +200,7 @@ pub fn fixture_to_record_batch(path: &Path) -> Result<RecordBatch, FixtureError>
 pub fn fixture_to_record_batches(
     path: &Path,
     batch_size: usize,
-) -> Result<Vec<RecordBatch>, FixtureError> {
+) -> Result<Vec<RecordBatch>, PipelineIoError> {
     assert!(batch_size > 0, "batch_size must be greater than zero");
     parse_rows(path)?
         .chunks(batch_size)
@@ -207,33 +208,50 @@ pub fn fixture_to_record_batches(
         .collect()
 }
 
-/// Writes `batch` to `path` as a single-row-group Parquet file, compressed
-/// with `compression`.
+/// Creates `path` and opens an [`ArrowWriter`] against it for `schema`,
+/// compressed with `compression`. Shared by [`write_parquet`] and the bounded
+/// pipeline's consumer, which both need the same open-file/writer-properties
+/// setup before writing any batches.
 ///
 /// # Errors
 ///
-/// Returns [`FixtureError`] if `path` cannot be created or the batch cannot
-/// be encoded as Parquet.
-pub fn write_parquet(
-    batch: &RecordBatch,
+/// Returns [`PipelineIoError`] if `path` cannot be created or the writer
+/// cannot be constructed for `schema`.
+pub(crate) fn open_parquet_writer(
     path: &Path,
+    schema: SchemaRef,
     compression: Compression,
-) -> Result<(), FixtureError> {
-    let file = File::create(path).map_err(|source| FixtureError::OpenOutput {
+) -> Result<ArrowWriter<File>, PipelineIoError> {
+    let file = File::create(path).map_err(|source| PipelineIoError::OpenOutput {
         path: path.to_path_buf(),
         source,
     })?;
     let props = WriterProperties::builder()
         .set_compression(compression)
         .build();
-    let mut writer = ArrowWriter::try_new(file, batch.schema(), Some(props))
-        .map_err(|source| FixtureError::WriteParquet { source })?;
+    ArrowWriter::try_new(file, schema, Some(props))
+        .map_err(|source| PipelineIoError::WriteParquet { source })
+}
+
+/// Writes `batch` to `path` as a single-row-group Parquet file, compressed
+/// with `compression`.
+///
+/// # Errors
+///
+/// Returns [`PipelineIoError`] if `path` cannot be created or the batch cannot
+/// be encoded as Parquet.
+pub fn write_parquet(
+    batch: &RecordBatch,
+    path: &Path,
+    compression: Compression,
+) -> Result<(), PipelineIoError> {
+    let mut writer = open_parquet_writer(path, batch.schema(), compression)?;
     writer
         .write(batch)
-        .map_err(|source| FixtureError::WriteParquet { source })?;
+        .map_err(|source| PipelineIoError::WriteParquet { source })?;
     writer
         .close()
-        .map_err(|source| FixtureError::WriteParquet { source })?;
+        .map_err(|source| PipelineIoError::WriteParquet { source })?;
     Ok(())
 }
 
@@ -242,26 +260,26 @@ pub fn write_parquet(
 ///
 /// # Errors
 ///
-/// Returns [`FixtureError`] if `path` cannot be opened or its contents
+/// Returns [`PipelineIoError`] if `path` cannot be opened or its contents
 /// cannot be decoded as a `RecordBatch` matching [`schema`].
-pub fn read_parquet(path: &Path) -> Result<RecordBatch, FixtureError> {
-    let file = File::open(path).map_err(|source| FixtureError::OpenInput {
+pub fn read_parquet(path: &Path) -> Result<RecordBatch, PipelineIoError> {
+    let file = File::open(path).map_err(|source| PipelineIoError::OpenInput {
         path: path.to_path_buf(),
         source,
     })?;
     let reader = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|source| FixtureError::ReadParquet { source })?
+        .map_err(|source| PipelineIoError::ReadParquet { source })?
         .build()
-        .map_err(|source| FixtureError::ReadParquet { source })?;
+        .map_err(|source| PipelineIoError::ReadParquet { source })?;
 
     let batches: Vec<RecordBatch> =
         reader
             .collect::<Result<_, _>>()
-            .map_err(|source| FixtureError::ReadParquet {
+            .map_err(|source| PipelineIoError::ReadParquet {
                 source: ParquetError::from(source),
             })?;
     arrow::compute::concat_batches(&schema(), &batches)
-        .map_err(|source| FixtureError::BuildBatch { source })
+        .map_err(|source| PipelineIoError::BuildBatch { source })
 }
 
 #[cfg(test)]
@@ -322,7 +340,7 @@ mod tests {
     fn rejects_a_short_row_before_building_a_batch() {
         let err = fixture_to_record_batch(&fixture_path("malformed.csv"))
             .expect_err("a row with fewer fields than the header should fail");
-        assert!(matches!(err, FixtureError::ReadRecord { .. }));
+        assert!(matches!(err, PipelineIoError::ReadRecord { .. }));
     }
 
     #[test]
