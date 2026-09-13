@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/com-vitthalmirji/datacrate/compare/csv-select-cli-v0.1.1...csv-select-cli-v0.1.2) - 2026-09-13
+
+### Other
+
+- *(csv-cli)* dedupe csv-select's per-record write loop ([#42](https://github.com/com-vitthalmirji/datacrate/pull/42))
+
 ## [0.1.1](https://github.com/com-vitthalmirji/datacrate/compare/csv-select-cli-v0.1.0...csv-select-cli-v0.1.1) - 2026-09-13
 
 ### Other
