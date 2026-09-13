@@ -16,11 +16,9 @@ use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread;
 
 use arrow::array::RecordBatch;
-use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
-use parquet::file::properties::WriterProperties;
 
-use crate::{FixtureError, Row, batch_from_rows, parse_row, schema};
+use crate::{PipelineIoError, Row, batch_from_rows, open_parquet_writer, parse_row, schema};
 
 /// Tuning for [`run_bounded_pipeline`]: how many rows make one `RecordBatch`,
 /// and how many batches may be in flight between the reader and writer at
@@ -62,12 +60,12 @@ impl CancellationToken {
 
     /// Requests cancellation. Idempotent.
     pub fn cancel(&self) {
-        self.0.store(true, Ordering::SeqCst);
+        self.0.store(true, Ordering::Relaxed);
     }
 
     /// Reports whether [`cancel`](Self::cancel) has been called.
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+        self.0.load(Ordering::Relaxed)
     }
 }
 
@@ -83,9 +81,9 @@ pub struct PipelineReport {
 /// Errors from [`run_bounded_pipeline`].
 #[derive(Debug)]
 pub enum PipelineError {
-    /// The reader or writer failed for a reason [`FixtureError`] already
+    /// The reader or writer failed for a reason [`PipelineIoError`] already
     /// models (I/O, malformed CSV, schema mismatch, Parquet errors).
-    Fixture(FixtureError),
+    Io(PipelineIoError),
     /// The pipeline was cancelled via [`CancellationToken::cancel`] before
     /// output could be published.
     Cancelled,
@@ -94,7 +92,7 @@ pub enum PipelineError {
 impl std::fmt::Display for PipelineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PipelineError::Fixture(source) => write!(f, "{source}"),
+            PipelineError::Io(source) => write!(f, "{source}"),
             PipelineError::Cancelled => {
                 write!(f, "pipeline was cancelled before output was published")
             }
@@ -105,15 +103,15 @@ impl std::fmt::Display for PipelineError {
 impl std::error::Error for PipelineError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            PipelineError::Fixture(source) => Some(source),
+            PipelineError::Io(source) => Some(source),
             PipelineError::Cancelled => None,
         }
     }
 }
 
-impl From<FixtureError> for PipelineError {
-    fn from(source: FixtureError) -> Self {
-        PipelineError::Fixture(source)
+impl From<PipelineIoError> for PipelineError {
+    fn from(source: PipelineIoError) -> Self {
+        PipelineError::Io(source)
     }
 }
 
@@ -131,12 +129,12 @@ fn produce_batches(
     path: &Path,
     batch_size: usize,
     cancel: &CancellationToken,
-    sender: SyncSender<Result<RecordBatch, FixtureError>>,
+    sender: SyncSender<Result<RecordBatch, PipelineIoError>>,
 ) {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(source) => {
-            let _ = sender.send(Err(FixtureError::OpenInput {
+            let _ = sender.send(Err(PipelineIoError::OpenInput {
                 path: path.to_path_buf(),
                 source,
             }));
@@ -151,7 +149,7 @@ fn produce_batches(
             return;
         }
         let row = match record
-            .map_err(|source| FixtureError::ReadRecord { source })
+            .map_err(|source| PipelineIoError::ReadRecord { source })
             .and_then(|record| parse_row(row_index, &record))
         {
             Ok(row) => row,
@@ -181,7 +179,7 @@ fn produce_batches(
 /// either before the first batch or between batches, without writing
 /// anything further.
 fn consume_batches(
-    receiver: Receiver<Result<RecordBatch, FixtureError>>,
+    receiver: Receiver<Result<RecordBatch, PipelineIoError>>,
     staging_path: &Path,
     compression: Compression,
     cancel: &CancellationToken,
@@ -190,15 +188,7 @@ fn consume_batches(
         return Err(PipelineError::Cancelled);
     }
 
-    let file = File::create(staging_path).map_err(|source| FixtureError::OpenOutput {
-        path: staging_path.to_path_buf(),
-        source,
-    })?;
-    let props = WriterProperties::builder()
-        .set_compression(compression)
-        .build();
-    let mut writer = ArrowWriter::try_new(file, schema(), Some(props))
-        .map_err(|source| FixtureError::WriteParquet { source })?;
+    let mut writer = open_parquet_writer(staging_path, schema(), compression)?;
 
     let mut report = PipelineReport::default();
 
@@ -209,7 +199,7 @@ fn consume_batches(
         let batch = received?;
         writer
             .write(&batch)
-            .map_err(|source| FixtureError::WriteParquet { source })?;
+            .map_err(|source| PipelineIoError::WriteParquet { source })?;
         report.batches_written += 1;
         report.rows_written += batch.num_rows();
     }
@@ -220,7 +210,7 @@ fn consume_batches(
 
     writer
         .close()
-        .map_err(|source| FixtureError::WriteParquet { source })?;
+        .map_err(|source| PipelineIoError::WriteParquet { source })?;
     Ok(report)
 }
 
@@ -235,18 +225,26 @@ fn consume_batches(
 ///
 /// # Errors
 ///
-/// Returns [`PipelineError::Fixture`] for the same conditions as
+/// Returns [`PipelineError::Io`] for the same conditions as
 /// [`crate::fixture_to_record_batch`], plus writer/staging I/O failures, or
 /// [`PipelineError::Cancelled`] if `cancel` was set before output could be
 /// published.
+///
+/// # Panics
+///
+/// Panics if `config.batch_size` is zero.
 pub fn run_bounded_pipeline(
     input: &Path,
     output: &Path,
     config: &PipelineConfig,
     cancel: &CancellationToken,
 ) -> Result<PipelineReport, PipelineError> {
+    assert!(
+        config.batch_size > 0,
+        "config.batch_size must be greater than zero"
+    );
     let (sender, receiver) =
-        sync_channel::<Result<RecordBatch, FixtureError>>(config.channel_capacity);
+        sync_channel::<Result<RecordBatch, PipelineIoError>>(config.channel_capacity);
     let staging_path = staging_path_for(output);
 
     let result = thread::scope(|scope| {
@@ -256,9 +254,11 @@ pub fn run_bounded_pipeline(
 
     match result {
         Ok(report) => {
-            std::fs::rename(&staging_path, output).map_err(|source| FixtureError::OpenOutput {
-                path: output.to_path_buf(),
-                source,
+            std::fs::rename(&staging_path, output).map_err(|source| {
+                PipelineIoError::OpenOutput {
+                    path: output.to_path_buf(),
+                    source,
+                }
             })?;
             Ok(report)
         }
@@ -378,7 +378,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            PipelineError::Fixture(FixtureError::ReadRecord { .. })
+            PipelineError::Io(PipelineIoError::ReadRecord { .. })
         ));
         assert!(!output.exists());
         assert!(!staging_path_for(&output).exists());
@@ -421,7 +421,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            PipelineError::Fixture(FixtureError::OpenOutput { .. })
+            PipelineError::Io(PipelineIoError::OpenOutput { .. })
         ));
         assert!(!output.exists());
     }
@@ -432,5 +432,23 @@ mod tests {
         assert!(!cancel.is_cancelled());
         cancel.cancel();
         assert!(cancel.is_cancelled());
+    }
+
+    #[test]
+    #[should_panic(expected = "config.batch_size must be greater than zero")]
+    fn zero_batch_size_panics_instead_of_silently_buffering_everything() {
+        let dir = tempfile::tempdir().expect("temp dir should be creatable");
+        let output = dir.path().join("out.parquet");
+        let config = PipelineConfig {
+            batch_size: 0,
+            ..PipelineConfig::default()
+        };
+
+        let _ = run_bounded_pipeline(
+            &fixture_path("headers.csv"),
+            &output,
+            &config,
+            &CancellationToken::new(),
+        );
     }
 }
