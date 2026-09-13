@@ -96,6 +96,22 @@ fn run(args: &Args) -> Result<(), CliError> {
     })
 }
 
+/// Looks up `column` in `record`, reporting [`CliError::ColumnOutOfRange`] if
+/// it's missing, then writes the selected field as a one-column record.
+fn select_and_write<W: std::io::Write>(
+    writer: &mut csv::Writer<W>,
+    record: &csv::StringRecord,
+    column: usize,
+) -> Result<(), CliError> {
+    let field = record.get(column).ok_or(CliError::ColumnOutOfRange {
+        column,
+        available: record.len(),
+    })?;
+    writer
+        .write_record([field])
+        .map_err(|source| CliError::WriteOutput { source })
+}
+
 fn write_with_headers<R: std::io::Read, W: std::io::Write>(
     reader: &mut csv::Reader<R>,
     writer: &mut csv::Writer<W>,
@@ -108,24 +124,11 @@ fn write_with_headers<R: std::io::Read, W: std::io::Write>(
         .headers()
         .map_err(|source| CliError::ReadRecord { source })?
         .clone();
-    let selected_header = headers.get(column).ok_or(CliError::ColumnOutOfRange {
-        column,
-        available: headers.len(),
-    })?;
-
-    writer
-        .write_record([selected_header])
-        .map_err(|source| CliError::WriteOutput { source })?;
+    select_and_write(writer, &headers, column)?;
 
     for record in reader.records() {
         let record = record.map_err(|source| CliError::ReadRecord { source })?;
-        let field = record.get(column).ok_or(CliError::ColumnOutOfRange {
-            column,
-            available: record.len(),
-        })?;
-        writer
-            .write_record([field])
-            .map_err(|source| CliError::WriteOutput { source })?;
+        select_and_write(writer, &record, column)?;
     }
     Ok(())
 }
@@ -135,29 +138,9 @@ fn write_no_headers<R: std::io::Read, W: std::io::Write>(
     writer: &mut csv::Writer<W>,
     column: usize,
 ) -> Result<(), CliError> {
-    let mut records = reader.records();
-
-    let Some(first) = records.next() else {
-        return Ok(());
-    };
-    let first = first.map_err(|source| CliError::ReadRecord { source })?;
-    let field = first.get(column).ok_or(CliError::ColumnOutOfRange {
-        column,
-        available: first.len(),
-    })?;
-    writer
-        .write_record([field])
-        .map_err(|source| CliError::WriteOutput { source })?;
-
-    for record in records {
+    for record in reader.records() {
         let record = record.map_err(|source| CliError::ReadRecord { source })?;
-        let field = record.get(column).ok_or(CliError::ColumnOutOfRange {
-            column,
-            available: record.len(),
-        })?;
-        writer
-            .write_record([field])
-            .map_err(|source| CliError::WriteOutput { source })?;
+        select_and_write(writer, &record, column)?;
     }
     Ok(())
 }
