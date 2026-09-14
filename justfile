@@ -19,6 +19,9 @@ docs:
 verify: fmt lint test release
     git diff --check
 
+preflight:
+    scripts/preflight.sh
+
 install-hooks:
     git config core.hooksPath .githooks
 
