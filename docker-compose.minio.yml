@@ -1,0 +1,14 @@
+services:
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"   # S3 API — this is the port run-s3-pipeline talks to
+      - "9001:9001"   # web console — open this one in a browser
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio-data:/data
+volumes:
+  minio-data:
