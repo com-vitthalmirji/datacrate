@@ -8,7 +8,8 @@
 //! execution via `DataFrame::execute_stream`, aggregate spilling, the
 //! hash-join build-side failure path, and stream-drop cleanup - all proven
 //! directly against the pinned `datafusion = "55.1.0"` source, not assumed
-//! from docs.
+//! from docs. See docs/adr/0006-datafusion-query-parity-and-pushdown-proof.md
+//! and docs/adr/0007-datafusion-resource-control.md.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -426,7 +427,7 @@ pub fn context_with_filter_pushdown() -> SessionContext {
 /// `with_temp_file_path(spill_dir)` is set even though the default
 /// `DiskManager` already spills to the OS temp directory - it exists here
 /// purely so tests can point at a known, inspectable directory rather than
-/// the shared OS temp dir.
+/// the shared OS temp dir. See docs/adr/0007-datafusion-resource-control.md.
 ///
 /// # Errors
 ///

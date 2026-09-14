@@ -20,7 +20,7 @@ use pipeline::datafusion_query::{join_aggregate_query_sql, register_orders, regi
 
 /// Bounds the in-memory `FairSpillPool` so the join spills to disk instead of
 /// growing unbounded and swap-thrashing the OS — the default `RuntimeEnv` has
-/// no memory limit at all.
+/// no memory limit at all. See docs/adr/0007-datafusion-resource-control.md.
 const MEMORY_POOL_SIZE_BYTES: usize = 40 * 1024 * 1024 * 1024;
 /// Disk quota for spilled data, matching the raised quota already used by
 /// `ballista-executor-scale` for the same 91GB dataset.
