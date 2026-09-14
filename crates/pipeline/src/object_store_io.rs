@@ -66,7 +66,8 @@ impl From<std::io::Error> for DownloadStepError {
 /// existing file. Streams the object in `CHUNK_BYTES`-sized ranges rather
 /// than materializing it whole in memory, so peak RSS stays flat as the
 /// object grows — a whole-file `get`/`bytes()` here was measured to scale
-/// peak memory linearly with input size.
+/// peak memory linearly with input size. See
+/// docs/adr/0005.1-stream-object-store-io-in-chunks.md.
 ///
 /// # Errors
 ///
