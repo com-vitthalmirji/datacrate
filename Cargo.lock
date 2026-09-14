@@ -2730,6 +2730,7 @@ dependencies = [
  "clap",
  "csv",
  "datafusion",
+ "futures-util",
  "object_store 0.14.1",
  "parquet",
  "tempfile",
