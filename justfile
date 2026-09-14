@@ -21,3 +21,12 @@ verify: fmt lint test release
 
 install-hooks:
     git config core.hooksPath .githooks
+
+minio-up:
+    docker compose -f docker-compose.minio.yml up -d
+
+minio-down:
+    docker compose -f docker-compose.minio.yml down
+
+minio-reset:
+    docker compose -f docker-compose.minio.yml down -v
