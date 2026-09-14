@@ -9,6 +9,7 @@
 #![warn(missing_docs)]
 
 pub mod bounded;
+pub mod datafusion_query;
 pub mod object_store_io;
 
 use std::fs::File;
@@ -41,6 +42,21 @@ pub enum PipelineIoError {
     },
     /// The `id` column did not contain a valid integer.
     InvalidId {
+        /// The row index (zero-based, excluding the header) where parsing failed.
+        row: usize,
+        /// The value that failed to parse.
+        value: String,
+    },
+    /// The `amount` column did not contain a fixed-scale-2 decimal.
+    InvalidAmount {
+        /// The row index (zero-based, excluding the header) where parsing failed.
+        row: usize,
+        /// The value that failed to parse.
+        value: String,
+    },
+    /// The `placed_at` column did not contain a valid `YYYY-MM-DDTHH:MM:SS`
+    /// timestamp.
+    InvalidTimestamp {
         /// The row index (zero-based, excluding the header) where parsing failed.
         row: usize,
         /// The value that failed to parse.
@@ -96,6 +112,18 @@ impl std::fmt::Display for PipelineIoError {
             PipelineIoError::InvalidId { row, value } => {
                 write!(f, "row {row}: invalid id {value:?}, expected an integer")
             }
+            PipelineIoError::InvalidAmount { row, value } => {
+                write!(
+                    f,
+                    "row {row}: invalid amount {value:?}, expected a fixed-scale-2 decimal"
+                )
+            }
+            PipelineIoError::InvalidTimestamp { row, value } => {
+                write!(
+                    f,
+                    "row {row}: invalid placed_at {value:?}, expected YYYY-MM-DDTHH:MM:SS"
+                )
+            }
             PipelineIoError::BuildBatch { source } => {
                 write!(f, "failed to build record batch: {source}")
             }
@@ -123,7 +151,9 @@ impl std::error::Error for PipelineIoError {
         match self {
             PipelineIoError::OpenInput { source, .. } => Some(source),
             PipelineIoError::ReadRecord { source } => Some(source),
-            PipelineIoError::InvalidId { .. } => None,
+            PipelineIoError::InvalidId { .. }
+            | PipelineIoError::InvalidAmount { .. }
+            | PipelineIoError::InvalidTimestamp { .. } => None,
             PipelineIoError::BuildBatch { source } => Some(source),
             PipelineIoError::OpenOutput { source, .. } => Some(source),
             PipelineIoError::WriteParquet { source } | PipelineIoError::ReadParquet { source } => {
