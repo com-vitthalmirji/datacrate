@@ -4,6 +4,16 @@
 //! Tokio runtime just for its own `block_on` — no async spreads past this
 //! module. [`crate::bounded::run_bounded_pipeline`] itself stays fully
 //! synchronous.
+//!
+//! This only stays sound as long as nothing calls into this module from
+//! inside an already-running Tokio runtime: nesting `block_on` inside async
+//! code is the "async-blocking-async sandwich" Tokio's own docs warn
+//! against, and it panics deep inside Tokio's internals rather than at this
+//! module's boundary. `block_on` below asserts that invariant explicitly so
+//! a violation fails immediately and points at the fix, instead of surfacing
+//! as an unexplained panic somewhere else. `decisions.md`'s 2026-09-14 entry
+//! has the M3 migration plan (switch to `tokio::task::spawn_blocking` once
+//! this module is reached from async code).
 
 use std::fs::File;
 use std::io::Write;
@@ -15,6 +25,13 @@ use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use crate::PipelineIoError;
 
 fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    assert!(
+        tokio::runtime::Handle::try_current().is_err(),
+        "object_store_io::block_on called from inside an existing Tokio \
+         runtime — this is the async-blocking-async sandwich and would \
+         panic or deadlock. Once a caller runs inside async code, replace \
+         this call with tokio::task::spawn_blocking instead."
+    );
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -121,5 +138,16 @@ mod tests {
         let err =
             download_to_temp(&store, &key, &dest).expect_err("a missing key must fail, not panic");
         assert!(matches!(err, PipelineIoError::DownloadObject { .. }));
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "async-blocking-async sandwich")]
+    async fn block_on_from_inside_a_running_runtime_panics_immediately() {
+        let store = InMemory::new();
+        let key = ObjectPath::from("input.csv");
+        let dir = tempfile::tempdir().expect("temp dir should be creatable");
+        let dest = dir.path().join("dest.csv");
+
+        let _ = download_to_temp(&store, &key, &dest);
     }
 }

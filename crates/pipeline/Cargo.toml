@@ -15,4 +15,4 @@ csv = "1"
 object_store = { version = "0.14", features = ["aws"] }
 parquet = { version = "59.3.0", default-features = false, features = ["arrow", "snap", "zstd"] }
 tempfile = "3.27.0"
-tokio = { version = "1", default-features = false, features = ["rt"] }
+tokio = { version = "1", default-features = false, features = ["rt", "macros"] }
