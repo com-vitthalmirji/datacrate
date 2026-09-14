@@ -2,10 +2,13 @@
 //! filter/projection/ordering query and the same aggregation through both the
 //! SQL and DataFrame APIs.
 //!
-//! Scope is deliberately narrow to Week 7's build contract: SQL/DataFrame
-//! parity, proven by golden-result tests. Plan reading, pushdown, UDFs
-//! (Week 8) and streaming/memory/spill/cancellation (Week 9) are separate,
-//! later work.
+//! Week 8 added plan reading (`EXPLAIN ANALYZE`), filter/projection
+//! pushdown, a scalar UDF, and a CAST-divergence characterization. Week 9
+//! added memory-limited contexts (`context_with_memory_limit`), streaming
+//! execution via `DataFrame::execute_stream`, aggregate spilling, the
+//! hash-join build-side failure path, and stream-drop cleanup - all proven
+//! directly against the pinned `datafusion = "55.1.0"` source, not assumed
+//! from docs (see the Week 9 correction in `docs/internals/workshop/M3.md`).
 
 use std::path::Path;
 use std::sync::Arc;
@@ -16,6 +19,7 @@ use arrow::array::{
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use chrono::NaiveDateTime;
 use datafusion::error::DataFusionError;
+use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::logical_expr::{ColumnarValue, JoinType, Volatility, col, create_udf};
 use datafusion::prelude::{SessionConfig, SessionContext, lit};
 
@@ -437,6 +441,32 @@ pub fn context_with_filter_pushdown() -> SessionContext {
     SessionContext::new_with_config(config)
 }
 
+/// Builds a [`SessionContext`] whose `RuntimeEnv` enforces a `max_bytes`
+/// memory limit and spills to `spill_dir`.
+///
+/// `with_temp_file_path(spill_dir)` is set even though the default
+/// `DiskManager` already spills to the OS temp directory (see the Week 9
+/// correction in `docs/internals/workshop/M3.md`) - it exists here purely so
+/// tests can point at a known, inspectable directory rather than the shared
+/// OS temp dir.
+///
+/// # Errors
+///
+/// Returns a [`DataFusionError`] if the `RuntimeEnv` cannot be built.
+pub fn context_with_memory_limit(
+    max_bytes: usize,
+    spill_dir: &Path,
+) -> Result<SessionContext, DataFusionError> {
+    let runtime = RuntimeEnvBuilder::new()
+        .with_memory_limit(max_bytes, 1.0)
+        .with_temp_file_path(spill_dir)
+        .build_arc()?;
+    Ok(SessionContext::new_with_config_rt(
+        SessionConfig::new(),
+        runtime,
+    ))
+}
+
 /// Runs the row-level filter/projection/ordering query (`amount > 50.00`,
 /// `id, amount, placed_at, note`, ordered by `placed_at`) via the SQL API.
 ///
@@ -555,7 +585,13 @@ mod tests {
     }
 
     async fn context_over_orders_and_shipments() -> (SessionContext, NamedTempFile, NamedTempFile) {
-        let (ctx, orders_parquet) = context_over_fixture().await;
+        context_over_orders_and_shipments_with(SessionContext::new()).await
+    }
+
+    async fn context_over_orders_and_shipments_with(
+        ctx: SessionContext,
+    ) -> (SessionContext, NamedTempFile, NamedTempFile) {
+        let (ctx, orders_parquet) = context_over_fixture_with(ctx).await;
 
         let batch = fixture_to_shipments_batch(&shipments_fixture_path()).expect("fixture parses");
         let parquet = tempfile::Builder::new()
@@ -909,5 +945,99 @@ mod tests {
                  {result:?}"
             );
         }
+    }
+
+    const AGGREGATE_SPILL_MAX_BYTES: usize = 1200;
+    const GROUP_BY_NOTE_SQL: &str =
+        "SELECT note, COUNT(*) AS cnt, SUM(amount) AS total FROM orders GROUP BY note";
+
+    #[tokio::test]
+    async fn memory_limited_aggregate_spills_and_still_completes() {
+        let spill_dir = tempfile::tempdir().expect("temp spill dir");
+        let ctx = context_with_memory_limit(AGGREGATE_SPILL_MAX_BYTES, spill_dir.path())
+            .expect("build memory-limited context");
+        let (ctx, _parquet) = context_over_fixture_with(ctx).await;
+
+        let batches = ctx
+            .sql(GROUP_BY_NOTE_SQL)
+            .await
+            .expect("plan query")
+            .collect()
+            .await
+            .expect("aggregate query must succeed under a memory limit by spilling");
+
+        let total_rows: usize = batches.iter().map(RecordBatch::num_rows).sum();
+        assert_eq!(
+            total_rows, 7,
+            "6 distinct non-null notes plus 1 NULL group in the fixture"
+        );
+
+        let progress = ctx.runtime_env().spilling_progress();
+        assert!(
+            progress.active_files_count > 0
+                || spill_dir.path().read_dir().expect("read spill dir").count() > 0,
+            "a memory-constrained GROUP BY must materialize at least one spill file, got \
+             spilling_progress={progress:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_limited_join_fails_with_resources_exhausted() {
+        let spill_dir = tempfile::tempdir().expect("temp spill dir");
+        let ctx = context_with_memory_limit(AGGREGATE_SPILL_MAX_BYTES, spill_dir.path())
+            .expect("build memory-limited context");
+        let (ctx, _orders_parquet, _shipments_parquet) =
+            context_over_orders_and_shipments_with(ctx).await;
+
+        let result = join_query_sql(&ctx).await;
+
+        // The join's ORDER BY adds a sort after the hash join, so DataFusion
+        // may wrap the underlying ResourcesExhausted in a Context(..) error
+        // (e.g. from the external sort merge) - find_root() unwraps that to
+        // the actual cause.
+        let err = result.expect_err("query must fail under this memory limit");
+        assert!(
+            matches!(err.find_root(), DataFusionError::ResourcesExhausted(_)),
+            "hash join build side has no spill fallback in datafusion 55.1.0 (see \
+             docs/internals/workshop/M3.md's Week 9 correction) - expected \
+             ResourcesExhausted at the root, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_stream_early_cleans_up_spill_files() {
+        use futures_util::StreamExt;
+
+        let spill_dir = tempfile::tempdir().expect("temp spill dir");
+        let ctx = context_with_memory_limit(AGGREGATE_SPILL_MAX_BYTES, spill_dir.path())
+            .expect("build memory-limited context");
+        let (ctx, _parquet) = context_over_fixture_with(ctx).await;
+
+        let mut stream = ctx
+            .sql(GROUP_BY_NOTE_SQL)
+            .await
+            .expect("plan query")
+            .execute_stream()
+            .await
+            .expect("start streaming execution");
+        stream.next().await;
+        drop(stream);
+
+        // The aggregation's spilling runs on a spawned task that observes
+        // the dropped receiver asynchronously, not synchronously on drop -
+        // yield until it notices and its RefCountedTempFile guards drop.
+        let mut progress = ctx.runtime_env().spilling_progress();
+        for _ in 0..1000 {
+            if progress.active_files_count == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+            progress = ctx.runtime_env().spilling_progress();
+        }
+        assert_eq!(
+            progress.active_files_count, 0,
+            "dropping the stream must eventually run RefCountedTempFile's Drop impl and clean \
+             up any in-flight spill files via ordinary Rust scope exit, got: {progress:?}"
+        );
     }
 }
