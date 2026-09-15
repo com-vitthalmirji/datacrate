@@ -25,7 +25,9 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Instant;
 
-use arrow::array::{Decimal128Array, Int64Array, RecordBatch, StringArray, TimestampMicrosecondArray};
+use arrow::array::{
+    Decimal128Array, Int64Array, RecordBatch, StringArray, TimestampMicrosecondArray,
+};
 use clap::Parser;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
@@ -146,8 +148,8 @@ fn run() -> Result<(), CliError> {
     let props = WriterProperties::builder()
         .set_compression(Compression::SNAPPY)
         .build();
-    let mut writer = ArrowWriter::try_new(file, orders_schema(), Some(props))
-        .map_err(CliError::WriteParquet)?;
+    let mut writer =
+        ArrowWriter::try_new(file, orders_schema(), Some(props)).map_err(CliError::WriteParquet)?;
 
     let start = Instant::now();
     let mut written = 0u64;
