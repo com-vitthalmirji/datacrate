@@ -59,6 +59,9 @@ enum CliError {
         source: std::io::Error,
     },
     WriteParquet(parquet::errors::ParquetError),
+    RowsExceedI64Max {
+        rows: u64,
+    },
 }
 
 impl std::fmt::Display for CliError {
@@ -68,6 +71,13 @@ impl std::fmt::Display for CliError {
                 write!(f, "creating {}: {source}", path.display())
             }
             Self::WriteParquet(source) => write!(f, "writing parquet: {source}"),
+            Self::RowsExceedI64Max { rows } => {
+                write!(
+                    f,
+                    "--rows {rows} exceeds i64::MAX ({}); id and timestamp columns are i64",
+                    i64::MAX
+                )
+            }
         }
     }
 }
@@ -80,6 +90,9 @@ fn amount_cents(id: u64) -> i128 {
     (hashed % 9_901 + 100) as i128
 }
 
+/// `start_id + len <= total_rows` and `total_rows <= i64::MAX` (checked once
+/// by `run()` before the write loop), so every `id as i64` / `total_rows as
+/// i64` below is a lossless cast, not a truncation.
 fn synthetic_batch(start_id: u64, len: u64, total_rows: u64) -> RecordBatch {
     let ids: Int64Array = (start_id..start_id + len).map(|id| id as i64).collect();
     let amounts = Decimal128Array::from_iter_values((start_id..start_id + len).map(amount_cents))
@@ -122,6 +135,9 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), CliError> {
     let args = Args::parse();
+    if args.rows > i64::MAX as u64 {
+        return Err(CliError::RowsExceedI64Max { rows: args.rows });
+    }
 
     let file = std::fs::File::create(&args.output).map_err(|source| CliError::OpenOutput {
         path: args.output.clone(),
