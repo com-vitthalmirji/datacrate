@@ -524,6 +524,31 @@ pub async fn aggregate_query_sql(
     .await
 }
 
+/// Runs an inner join of `orders` to `shipments` on `orders.id =
+/// shipments.order_id`, filtered to `amount > 50.00`, collapsed to a single
+/// `COUNT(*)`/`SUM(amount)` row. Unlike [`join_query_sql`]'s LEFT JOIN (which
+/// preserves every order), this INNER JOIN drops unshipped orders and
+/// duplicates multi-shipment orders' contribution to the sum - the M3.7
+/// join/shuffle comparison benchmarks this shape because it is the one whose
+/// physical plan requires a real hash-join build/probe (and, distributed, a
+/// shuffle) rather than a single-table scan.
+///
+/// # Errors
+///
+/// Returns a [`DataFusionError`] if the query cannot be planned or executed.
+pub async fn join_aggregate_query_sql(
+    ctx: &SessionContext,
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    ctx.sql(
+        "SELECT COUNT(*) AS shipped_order_count, SUM(orders.amount) AS shipped_total_amount \
+         FROM orders JOIN shipments ON orders.id = shipments.order_id \
+         WHERE orders.amount > 50.00",
+    )
+    .await?
+    .collect()
+    .await
+}
+
 /// Runs the same aggregation query as [`aggregate_query_sql`] via the
 /// DataFrame API.
 ///
@@ -744,6 +769,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn join_aggregate_counts_and_sums_shipped_orders_over_fifty() {
+        let (ctx, _orders_parquet, _shipments_parquet) = context_over_orders_and_shipments().await;
+        let batches = join_aggregate_query_sql(&ctx).await.expect("sql query");
+        assert_eq!(batches.len(), 1);
+        let batch = &batches[0];
+        assert_eq!(batch.num_rows(), 1);
+
+        let counts = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("shipped_order_count column is Int64");
+        // Orders with amount > 50.00: ids 1, 2, 3, 4, 8 (5 orders). Every one
+        // of those has at least one shipment (order 3 has two: DHL, FedEx),
+        // so the inner join keeps 6 rows.
+        assert_eq!(counts.value(0), 6);
+
+        let totals = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Decimal128Array>()
+            .expect("shipped_total_amount column is Decimal128");
+        // order 3's amount is 99.99, not order 8's 999999.99 (id and
+        // placed_at order don't coincide in the fixture): 100.00 + 250.75 +
+        // 99.99*2 (order 3's two shipments) + 1000.00 + 999999.99 =
+        // 1,001,550.72.
+        assert_eq!(totals.value(0), 100_155_072);
+    }
+
+    #[tokio::test]
     async fn window_query_sql_and_dataframe_paths_agree() {
         let (ctx, _parquet) = context_over_fixture().await;
 
@@ -812,6 +867,77 @@ mod tests {
             extract_metric(&pushdown_metrics, "pushdown_rows_pruned") > 0,
             "pushdown-enabled context should report pushdown_rows_pruned > 0, got: \
              {pushdown_metrics}"
+        );
+    }
+
+    #[tokio::test]
+    async fn aggregate_query_explain_analyze_reports_output_rows() {
+        let (ctx, _parquet) = context_over_fixture().await;
+        let batches = explain_analyze(
+            &ctx,
+            "SELECT COUNT(*) AS order_count, SUM(amount) AS total_amount \
+             FROM orders WHERE amount > 50.00",
+        )
+        .await
+        .expect("explain analyze");
+        let plan = format!("{batches:?}");
+
+        assert!(
+            plan.contains("AggregateExec"),
+            "aggregate plan must show an AggregateExec operator, got: {plan}"
+        );
+        assert_eq!(
+            extract_metric(&plan, "output_rows"),
+            1,
+            "COUNT/SUM with no GROUP BY collapses to a single row, got: {plan}"
+        );
+    }
+
+    #[tokio::test]
+    async fn join_query_explain_analyze_reports_output_rows() {
+        let (ctx, _orders_parquet, _shipments_parquet) = context_over_orders_and_shipments().await;
+        let batches = explain_analyze(
+            &ctx,
+            "SELECT orders.id, orders.amount, shipments.carrier, shipments.shipped_at \
+             FROM orders LEFT JOIN shipments ON orders.id = shipments.order_id \
+             ORDER BY orders.id, shipments.carrier",
+        )
+        .await
+        .expect("explain analyze");
+        let plan = format!("{batches:?}");
+
+        assert!(
+            plan.contains("HashJoinExec"),
+            "join plan must show a HashJoinExec operator, got: {plan}"
+        );
+        assert_eq!(
+            extract_metric(&plan, "output_rows"),
+            9,
+            "left join keeps all 8 orders plus one duplicate for order 3's two shipments, \
+             got: {plan}"
+        );
+    }
+
+    #[tokio::test]
+    async fn window_query_explain_analyze_reports_output_rows() {
+        let (ctx, _parquet) = context_over_fixture().await;
+        let batches = explain_analyze(
+            &ctx,
+            "SELECT id, amount, RANK() OVER (ORDER BY amount DESC) AS amount_rank \
+             FROM orders ORDER BY amount_rank, id",
+        )
+        .await
+        .expect("explain analyze");
+        let plan = format!("{batches:?}");
+
+        assert!(
+            plan.contains("BoundedWindowAggExec"),
+            "window plan must show a BoundedWindowAggExec operator, got: {plan}"
+        );
+        assert_eq!(
+            extract_metric(&plan, "output_rows"),
+            8,
+            "a ranking window over all 8 orders keeps every row, got: {plan}"
         );
     }
 

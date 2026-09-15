@@ -1,0 +1,7 @@
+services:
+  spark:
+    image: apache/spark:4.1.3-java17
+    entrypoint: ["tail", "-f", "/dev/null"]
+    volumes:
+      - ./benchmark/spark-comet:/spark-comet
+      - ./benchmark/join-shuffle:/join-shuffle
