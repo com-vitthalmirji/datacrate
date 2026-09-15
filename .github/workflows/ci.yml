@@ -58,6 +58,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      # arrow/parquet/datafusion/ballista + trybuild's temp compiles exceed the
+      # runner's ~14GB free disk; reclaim space from toolchains this repo doesn't use.
+      - run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97.1"
@@ -71,6 +74,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97.1"
