@@ -9,6 +9,8 @@
 //!
 //! Accepts every `ballista-executor` flag (via `#[command(flatten)]`) plus
 //! `--max-temp-directory-size`.
+//!
+//! See docs/adr/0008-ballista-and-comet-benchmark-engines.md.
 
 use ballista_core::error::{BallistaError, Result as BallistaResult};
 use ballista_executor::config::Config;
