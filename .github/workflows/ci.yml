@@ -80,7 +80,9 @@ jobs:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - run: cargo build --release --locked
+      # fat LTO across arrow/datafusion/ballista is memory-heavy; pipeline builds
+      # four binaries, and linking them concurrently OOM-killed the runner.
+      - run: cargo build --release --locked --jobs 1
 
   semver-checks:
     needs: checks
