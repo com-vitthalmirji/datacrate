@@ -3,3 +3,6 @@
 /.idea
 /book/book
 .DS_Store
+benchmark/**/*.jar
+benchmark/**/*.jar.sha1
+benchmark/m3.6/orders/
