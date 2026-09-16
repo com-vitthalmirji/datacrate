@@ -79,7 +79,8 @@ async fn run() -> Result<(), CliError> {
         .unwrap_or(1);
     // HashJoinExec's build side has no disk-spill fallback (collects the
     // whole build side or fails); SortMergeJoinExec does spill, so force it
-    // for a build side too large to fit in the memory pool.
+    // for a build side too large to fit in the memory pool. See
+    // docs/adr/0007.1-hash-join-build-side-spill-gap.md.
     let config = SessionConfig::new()
         .with_target_partitions(target_partitions)
         .set_bool("datafusion.optimizer.prefer_hash_join", false);

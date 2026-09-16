@@ -16,4 +16,5 @@ supersedes it, and mark the old one's Status as `Superseded by ADR-XXXX`.
   - [0005.1. Stream object-store I/O in chunks](0005.1-stream-object-store-io-in-chunks.md)
 - [0006. DataFusion query parity and pushdown proof](0006-datafusion-query-parity-and-pushdown-proof.md)
 - [0007. DataFusion resource control](0007-datafusion-resource-control.md)
+  - [0007.1. Hash-join build-side spill gap](0007.1-hash-join-build-side-spill-gap.md)
 - [0008. Ballista and Comet benchmark engines](0008-ballista-and-comet-benchmark-engines.md)

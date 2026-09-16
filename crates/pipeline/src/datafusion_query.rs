@@ -1238,7 +1238,8 @@ mod tests {
         let err = result.expect_err("query must fail under this memory limit");
         assert!(
             matches!(err.find_root(), DataFusionError::ResourcesExhausted(_)),
-            "hash join build side has no spill fallback in datafusion 55.1.0 - \
+            "hash join build side has no spill fallback in datafusion 55.1.0 \
+             (see docs/adr/0007.1-hash-join-build-side-spill-gap.md) - \
              expected ResourcesExhausted at the root, got: {err:?}"
         );
     }
