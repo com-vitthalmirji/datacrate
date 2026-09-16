@@ -5,3 +5,4 @@ services:
     volumes:
       - ./benchmark/spark-comet:/spark-comet
       - ./benchmark/join-shuffle:/join-shuffle
+      - ./benchmark/m3.6:/m3.6

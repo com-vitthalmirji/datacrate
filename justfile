@@ -135,3 +135,43 @@ join-shuffle-ballista:
     cargo run --release -p pipeline --bin join-shuffle-ballista -- \
         --orders benchmark/join-shuffle/orders_join.parquet \
         --shipments benchmark/join-shuffle/shipments_join.parquet
+
+# M3.6 scale comparison — Spark-vs-Rust-ecosystem retest + DataFusion-vs-Polars.
+# See docs/internals/notes/decisions.md, 2026-09-15 "M3.6 scoped" entry.
+# Small first pass for correctness-proving before the ~100GB timed run.
+m36-dataset:
+    cargo run --release -p pipeline --example scale_benchmark_dataset -- \
+        --output benchmark/m3.6/orders --rows 5000000 --partitions 8
+
+# Row count derived from m36-dataset's measured 16.18 bytes/row
+# (5M rows -> 80922363 bytes), not guessed, targeting ~100GB on disk —
+# see docs/internals/notes/decisions.md, "M3.6 scoped" entry.
+m36-dataset-full:
+    cargo run --release -p pipeline --example scale_benchmark_dataset -- \
+        --output benchmark/m3.6/orders --rows 6600000000 --partitions 8
+
+m36-datafusion:
+    cargo run --release -p pipeline --bin scale-aggregate-datafusion -- --input benchmark/m3.6/orders
+
+# Reuses the existing 2-executor local cluster (just ballista-scheduler /
+# ballista-executor-1 / ballista-executor-2 must already be running).
+m36-ballista:
+    cargo run --release -p pipeline --bin scale-aggregate-ballista -- --input benchmark/m3.6/orders
+
+m36-polars:
+    cargo run --release -p pipeline --bin scale-aggregate-polars -- --input benchmark/m3.6/orders
+
+m36-vanilla:
+    docker compose -f docker-compose.spark-comet.yml exec spark \
+        bash -c 'time /opt/spark/bin/spark-sql -f /m3.6/query.sql'
+
+m36-accelerated:
+    docker compose -f docker-compose.spark-comet.yml exec spark \
+        bash -c 'time /opt/spark/bin/spark-sql \
+        --jars /spark-comet/{{comet-jar-file}} \
+        --conf spark.plugins=org.apache.spark.CometPlugin \
+        --conf spark.comet.enabled=true \
+        --conf spark.memory.offHeap.enabled=true \
+        --conf spark.memory.offHeap.size=2g \
+        --conf spark.shuffle.manager=org.apache.spark.sql.comet.execution.shuffle.CometShuffleManager \
+        -f /m3.6/query.sql'
