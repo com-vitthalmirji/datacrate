@@ -48,6 +48,8 @@ jobs:
           toolchain: "1.97.1"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # ballista-core's build script shells out to protoc; not preinstalled on ubuntu-latest.
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
@@ -56,11 +58,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      # arrow/parquet/datafusion/ballista + trybuild's temp compiles exceed the
+      # runner's ~14GB free disk; reclaim space from toolchains this repo doesn't use.
+      - run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97.1"
           components: rust-src
       - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - run: cargo test --all-targets --all-features --locked
 
   release-build:
@@ -68,11 +74,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --locked
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      # fat LTO across arrow/datafusion/ballista is memory-heavy; pipeline builds
+      # four binaries, and linking them concurrently OOM-killed the runner.
+      - run: cargo build --release --locked --jobs 1
 
   semver-checks:
     needs: checks

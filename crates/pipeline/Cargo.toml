@@ -10,6 +10,11 @@ workspace = true
 
 [dependencies]
 arrow = "59"
+# Ballista has no crates.io release compatible with datafusion 55.1.0 yet
+# (last release, 54.1.0, pins datafusion ^54); main tracks datafusion "55"
+# as of this commit. Pinned by rev, not branch, for reproducible builds —
+# see docs/internals/notes/decisions.md, 2026-09-15 entry.
+ballista = { git = "https://github.com/apache/datafusion-ballista", rev = "ae9bff026ffd18b256d39b10890a2ca96e1fc836" }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 clap = { version = "4", features = ["derive"] }
 csv = "1"
