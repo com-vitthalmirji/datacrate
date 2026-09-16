@@ -80,9 +80,10 @@ jobs:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      # fat LTO across arrow/datafusion/ballista is memory-heavy; pipeline builds
-      # four binaries, and linking them concurrently OOM-killed the runner.
-      - run: cargo build --release --locked --jobs 1
+      # ci-release uses thin LTO (see root Cargo.toml) — fat LTO across
+      # arrow/datafusion/ballista linking pipeline's four binaries concurrently
+      # OOM-killed the runner; thin LTO avoids that without serializing jobs.
+      - run: cargo build --profile ci-release --locked
 
   semver-checks:
     needs: checks

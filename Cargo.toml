@@ -23,3 +23,11 @@ missing_safety_doc = "warn"
 lto = "fat"
 codegen-units = 1
 strip = true
+
+# CI-only: same as `release` but thin LTO, so PR checks don't pay fat LTO's
+# link time on every push. Fat LTO stays reserved for the artifacts actually
+# shipped (see binaries.yml) — this profile is never what ships.
+[profile.ci-release]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
