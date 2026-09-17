@@ -9,8 +9,11 @@ lint:
 test:
     cargo test --all-targets --all-features --locked
 
+# Uses ci-release (thin LTO) to match what CI actually gates on — fat LTO
+# is reserved for the real shipped artifact (see binaries.yml), not local/CI
+# verification. See docs/internals/notes/decisions.md, 2026-09-17 entry.
 release:
-    cargo build --release --locked
+    cargo build --profile ci-release --locked
 
 docs:
     RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p dtl-core -p csv-select-cli
