@@ -4,13 +4,13 @@
 query engine: `bounded.rs` runs a bounded CSV → Parquet pipeline with
 cancellation and crash-safe output, `datafusion_query.rs` runs real SQL
 through DataFusion under a configurable memory limit. This chapter walks
-both, live-test by live-test — code first, then the misconception a
+both, live-test by live-test - code first, then the misconception a
 Scala/Spark background invites, then the correction, then the bridge back to
 something you already know.
 
 ## Cancellation leaves no partial output behind
 
-**Claim**: cancelling before output is published leaves no partial output —
+**Claim**: cancelling before output is published leaves no partial output -
 the pipeline either finishes cleanly or leaves nothing.
 
 **Code**: `crates/pipeline/src/bounded.rs`, the `CancellationToken` type and
@@ -24,27 +24,83 @@ $ cargo test -p pipeline a_pre_cancelled_token_stops_the_pipeline_before_any_out
 
 The test creates a `CancellationToken`, calls `.cancel()` on it *before*
 calling `run_bounded_pipeline`, then asserts three things: the call returns
-`Err`, the error matches `PipelineError::Cancelled`, and — the part worth
-pausing on — **both** `!output.exists()` **and**
+`Err`, the error matches `PipelineError::Cancelled`, and - the part worth
+pausing on - **both** `!output.exists()` **and**
 `!staging_path_for(&output).exists()`. Not just "no final file," but "no
 final file *and* no leftover staging file either." The writer stages its
 output under a separate temp path and only renames it into place after every
-batch has been consumed successfully — cancellation short-circuits before
+batch has been consumed successfully - cancellation short-circuits before
 that rename happens, so neither path is ever left behind.
 
 **Scala/Spark bridge**: `CancellationToken` is the same idea as checking
 `TaskContext.get().isInterrupted()` inside a long-running Spark task, or
-racing a fiber against a `Deferred`/cancel signal in Cats Effect — a
+racing a fiber against a `Deferred`/cancel signal in Cats Effect - a
 cooperative flag that owning code must check at safe points, not a
 preemptive kill. The more interesting difference is the stage-then-rename
 pattern: Spark's own output committers (`FileOutputCommitter` et al.) solve
 the same "don't publish a partial file" problem at the *job/task* level via
 a two-phase commit (write to a task-attempt directory, promote to the final
 path only once the task/job commits). `run_bounded_pipeline` does the same
-two-phase idea — stage under a temp path, rename into place only after
-success — at the scale of a single process's single output file, with no
+two-phase idea - stage under a temp path, rename into place only after
+success - at the scale of a single process's single output file, with no
 separate commit coordinator needed because there's no distributed set of
 tasks to reconcile.
+
+## A rename alone doesn't survive a crash - `fsync` does
+
+**Claim**: staging-then-renaming (above) is enough to stop a *reader* from
+ever seeing a partial file. It is not, by itself, enough to stop a *power
+loss or OS crash* from losing the bytes entirely - that guarantee comes from
+two explicit `fsync` calls, added directly for this reason.
+
+**Code**: `bounded.rs:218-228` (inside `consume_batches`) and
+`bounded.rs:283-298` (inside `run_bounded_pipeline`):
+
+```rust
+// 1. Force the Parquet bytes themselves out of the OS page cache and
+//    onto disk, before the rename below can make the file visible.
+let file = writer.into_inner()?;
+file.sync_all()?;
+
+// 2. Publish atomically.
+std::fs::rename(&staging_path, output)?;
+
+// 3. A rename is itself a metadata change to the *directory*, not the
+//    file - fsync the directory too, so that change also survives a crash.
+let dir = File::open(parent)?;
+dir.sync_all()?;
+```
+
+The reason two syncs are needed, not one: on Linux/macOS, a normal
+`write()` only lands in the OS page cache by default - other processes on
+the same machine see the new bytes immediately, but the kernel is free to
+delay writing them to the physical disk. If the machine loses power right
+after the `rename()` call returns but before the kernel has flushed its
+caches, you could end up with a file at the *final* path whose *directory
+entry* exists but whose *content* is stale, truncated, or (on some
+filesystems) not yet on disk at all - `rename()` on its own has no opinion
+about the durability of either the file's bytes or its own directory
+update. `file.sync_all()` forces step 1 (the content) to disk *before* the
+rename runs; `dir.sync_all()` forces step 3 (the fact that the rename
+happened) to disk afterward. This only applies to `run_bounded_pipeline`'s
+local-disk path - the S3 variant (`run_bounded_pipeline_s3`, see
+[The object-store edge](object-store.md)) has no matching `fsync` call
+because S3 (and every object store `object_store` targets) already
+durability-guarantees an object the moment a `PUT` succeeds; there is no
+local page cache for datacrate to be responsible for.
+
+**Scala/Spark bridge**: Spark jobs essentially never write this code,
+because Spark's output committers write through HDFS or an object store -
+systems that durability their own bytes server-side, so "the file is
+visible" already implies "the bytes are safe." `run_bounded_pipeline`
+writes to the *local* filesystem instead, so it's on the hook for a
+guarantee HDFS/S3 give a Spark job for free. The closer analogue isn't
+Spark at all - it's why Kafka calls `fsync` on its log segments before
+acknowledging a produce request under `acks=all`, or why Postgres `fsync`s
+its write-ahead log before acknowledging a `COMMIT`: the moment you own
+local disk I/O directly instead of delegating it to a distributed storage
+layer, "renamed" and "durable" become two separate guarantees you have to
+ask for individually, not one you get automatically.
 
 ## A failed writer publishes nothing, not a truncated file
 
@@ -64,14 +120,14 @@ The assertion: `err` matches
 `PipelineError::Io(PipelineIoError::OpenOutput { .. })` and
 `!output.exists()`. Contrast this with a naive `File::create(output_path)` +
 write-as-you-go implementation, which would leave a partial file at exactly
-the path callers expect complete output to be — dangerous specifically
+the path callers expect complete output to be - dangerous specifically
 because a downstream job polling for the output path existing would pick up
 a truncated file and silently process incomplete data. The staged-then-
 renamed pattern makes "the file exists at the final path" and "the file is
 complete" the same guarantee.
 
 **Scala/Spark bridge**: this is exactly the failure mode Spark's output
-committers exist to prevent — a job that crashes mid-write without a commit
+committers exist to prevent - a job that crashes mid-write without a commit
 protocol can leave a partial part-file in the output directory, which is why
 `_SUCCESS` marker files exist: not a log line, but the one signal a
 downstream job should poll for instead of trusting "the directory has files
@@ -79,10 +135,10 @@ in it." `!output.exists()` here is the same idea taken one step further:
 there's no stray part-file left behind *at all*, even for a caller that
 doesn't check for a marker.
 
-## Slicing shares the buffer — provably, not just by claim
+## Slicing shares the buffer - provably, not just by claim
 
 **Claim**: slicing an Arrow array/batch shares the underlying allocation
-instead of copying it — the reason the pipeline can stream large inputs
+instead of copying it - the reason the pipeline can stream large inputs
 without multiplying memory use per stage.
 
 **Code**: `crates/pipeline/src/lib.rs:541`,
@@ -107,7 +163,7 @@ $ cargo test -p pipeline slicing_shares_the_underlying_buffer_instead_of_copying
 ```
 
 The deliberate choice is `data_ptr()` over `as_ptr()`. `ids.slice(1, 3)`
-doesn't copy — it creates a *view* into the same allocation starting at a
+doesn't copy - it creates a *view* into the same allocation starting at a
 different logical offset. `as_ptr()` on the two arrays would differ, because
 it accounts for each array's own offset; comparing those would make two
 views of the same buffer look like different buffers. `data_ptr()` points at
@@ -118,12 +174,12 @@ so it correctly proves "these two arrays share one buffer" rather than
 **Scala/Spark bridge**: Spark's own in-memory columnar format (Tungsten's
 off-heap `UnsafeRow`/`ColumnVector`, itself Arrow-influenced) makes the same
 zero-copy claim for `.limit()` or a partition-local `.filter()`, but you
-can't *prove* it from Scala the way this test proves it from Rust — the JVM
+can't *prove* it from Scala the way this test proves it from Rust - the JVM
 gives you no `data_ptr()`-equivalent, no legal way to compare two object
 references for "do these share the same backing array" short of
 `sun.misc.Unsafe` or a heap dump. In Rust it's an ordinary, safe assertion in
 a unit test, because `Int64Array::slice` returns an owned Rust value whose
-fields (an `Arc`-backed buffer plus an offset/length) are fully inspectable —
+fields (an `Arc`-backed buffer plus an offset/length) are fully inspectable -
 the JVM's object model treats reference identity as something you're not
 meant to introspect from safe code.
 
@@ -145,18 +201,18 @@ pub fn context_with_memory_limit(
 (`datafusion_query.rs:436`)
 
 **Misconception**: that `.with_temp_file_path(spill_dir)` is what *enables*
-spilling — that without it, DataFusion refuses to write temp files and just
+spilling - that without it, DataFusion refuses to write temp files and just
 fails outright under memory pressure.
 
 **Correction**, sourced against the pinned `datafusion-execution = 55.1.0`
 source, not assumed from docs: `DiskManagerBuilder::default()` sets
-`mode: DiskManagerMode::OsTmpDirectory` — spilling is on by default,
+`mode: DiskManagerMode::OsTmpDirectory` - spilling is on by default,
 everywhere, no config needed. The `"temporary files are not enabled"` error
 only fires under `DiskManagerMode::Disabled`, which nothing here sets.
 `.with_temp_file_path(spill_dir)` exists purely so tests (and this chapter)
 can point at a known, inspectable directory instead of the shared OS temp
 dir. What `.with_memory_limit(max_bytes, 1.0)` actually gates is how much
-memory an operator may reserve *before it must either spill or fail* — the
+memory an operator may reserve *before it must either spill or fail* - the
 memory limit doesn't cause spilling on its own, and spilling doesn't require
 a memory limit to be configured. They're independent knobs that happen to
 interact: a low `max_bytes` is just the fastest way to *force* an operator
@@ -164,7 +220,7 @@ that already knows how to spill into actually doing it, instead of waiting
 for a multi-gigabyte dataset to trigger the same path.
 
 **Spark bridge**: the same trap as assuming `spark.local.dir` being set is
-what makes shuffle spill possible. It isn't — shuffle spills to local disk
+what makes shuffle spill possible. It isn't - shuffle spills to local disk
 by default under memory pressure regardless; `spark.local.dir` just tells
 Spark *where*. Same shape here: `with_temp_file_path` tells DataFusion
 where, not whether.
@@ -172,7 +228,7 @@ where, not whether.
 ## A memory limit doesn't mean everything spills the same way
 
 Given one `context_with_memory_limit(1200, spill_dir)`, you'd expect a
-constrained aggregate and a constrained join to fail — or succeed — the same
+constrained aggregate and a constrained join to fail - or succeed - the same
 way. **They don't.** Run both:
 
 ```console
@@ -209,9 +265,9 @@ sourced directly from
 `datafusion-physical-plan-55.1.0/src/joins/hash_join/exec.rs`,
 `collect_left_input`, ~line 2265: the hash-join build side has a comment
 `// Decide if we spill or not` immediately followed by
-`state.reservation.try_grow(batch_size)?` — **with no spill branch**. A
+`state.reservation.try_grow(batch_size)?` - **with no spill branch**. A
 failed `try_grow` just propagates `ResourcesExhausted` straight through `?`.
-Hash-aggregation, by contrast, is mature/GA spillable — since the v27-28
+Hash-aggregation, by contrast, is mature/GA spillable - since the v27-28
 vectorized rework it groups values into a single Arrow-Row-format
 allocation with a hash table storing indexes, and that structure has a real
 spill-to-disk path. Two distinct demos, not an inconsistency: one operator
@@ -219,7 +275,7 @@ in this DataFusion version can spill, the other genuinely can't.
 
 **Scala bridge**: `err.find_root()` (used in the join test) matters for the
 same reason unwrapping a chained `Throwable`'s `getCause()` matters on the
-JVM — the join's `ORDER BY` adds a sort stage after the hash join, so
+JVM - the join's `ORDER BY` adds a sort stage after the hash join, so
 DataFusion may wrap the underlying `ResourcesExhausted` in a `Context(..)`
 error from that later stage. `find_root()` is the Rust-side equivalent of
 walking `getCause()` until you hit the actual failure instead of asserting
@@ -229,7 +285,7 @@ against whatever wrapper happened to be outermost.
 
 It's tempting, once you've internalized "Rust has no GC," to overcorrect
 into "so a DataFusion query never blocks or pauses for memory bookkeeping."
-Both tests above disprove this — a memory-limited aggregate *does* pause: it
+Both tests above disprove this - a memory-limited aggregate *does* pause: it
 stops, spills, and resumes.
 
 **Correction**: Spark's `UnifiedMemoryManager` shares one JVM heap between
@@ -237,20 +293,20 @@ execution and storage regions elastically, execution given priority, storage
 evicted LRU-first when execution needs space; both regions can spill.
 DataFusion's `MemoryPool` trait (`GreedyMemoryPool`, `FairSpillPool`,
 `TrackConsumersPool`) is a pluggable **per-query/per-operator reservation
-strategy**, not a single shared heap region — a different design, not "Rust
+strategy**, not a single shared heap region - a different design, not "Rust
 doesn't need memory management." The precise, defensible claim about GC is
 narrower: DataFusion's memory accounting doesn't stop-the-world across
 unrelated queries the way a tracing GC pause can; it's explicit reservation
 and explicit spill logic per operator. "No tracing GC" ≠ "queries can't
-pause" — they can, deliberately, for exactly the reason you'd expect (not
+pause" - they can, deliberately, for exactly the reason you'd expect (not
 enough memory for the current step), and you can watch it happen via
 `spilling_progress()`.
 
-## Dropping a stream cleans up — no separate `Resource` API needed
+## Dropping a stream cleans up - no separate `Resource` API needed
 
 The temptation from a Cats Effect background is to look for something like
-DataFusion's own `Resource`/`bracket` — a `.use { }` block, an explicit
-cancel-and-cleanup API — and be surprised there isn't one.
+DataFusion's own `Resource`/`bracket` - a `.use { }` block, an explicit
+cancel-and-cleanup API - and be surprised there isn't one.
 
 ```rust
 let mut stream = ctx.sql(GROUP_BY_NOTE_SQL).await?.execute_stream().await?;
@@ -266,7 +322,7 @@ $ cargo test -p pipeline dropping_stream_early_cleans_up_spill_files -- --nocapt
 
 **Correction**: there's no separate cleanup step to look for, because
 there's no separate `Resource` type in the first place. This is Rust's
-ordinary `Drop` semantics on the stream value itself — pull one batch, then
+ordinary `Drop` semantics on the stream value itself - pull one batch, then
 `drop(stream)`, and whatever temp-file guards the streaming execution was
 holding (`RefCountedTempFile`) run their `Drop` impl the moment the stream
 goes out of scope, deterministically. The test polls rather than asserting
@@ -286,15 +342,15 @@ Why: the aggregation's spilling runs on a spawned task that observes the
 dropped receiver *asynchronously*, not synchronously on drop. Cleanup is
 deterministic in the "it will definitely happen, via ordinary scope exit"
 sense, but not synchronous in the "happens on the exact line `drop(stream)`
-runs" sense — don't mix up the two.
+runs" sense - don't mix up the two.
 
 **Cats Effect bridge**: this is the same guarantee `Resource`/`bracket`
-gives at runtime — acquire, use, release, release runs even on early exit or
-failure — except the borrow checker enforces the *shape* of it at compile
+gives at runtime - acquire, use, release, release runs even on early exit or
+failure - except the borrow checker enforces the *shape* of it at compile
 time instead of a runtime interpreter running a release action on your
 behalf. A struct that owns a file handle or spill directory releases it the
 moment it goes out of scope. No `.use { }` block, because there's nothing to
-opt into — it's the default behavior of every owned value in Rust, not a
+opt into - it's the default behavior of every owned value in Rust, not a
 library feature layered on top.
 
 ## Run the whole chapter live
@@ -306,5 +362,5 @@ $ cargo test -p pipeline
 ```
 
 `context_with_memory_limit` is `#[tracing::instrument(...)]`
-(`datafusion_query.rs:435`) — with `RUST_LOG=pipeline=debug` and
+(`datafusion_query.rs:435`) - with `RUST_LOG=pipeline=debug` and
 `--nocapture`, the span prints the spill directory actually in use.
