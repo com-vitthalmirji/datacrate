@@ -1,6 +1,7 @@
 # cargo-deny config. See https://embarkstudios.github.io/cargo-deny/
 # cargo-audit (already running) covers known CVEs; this adds license policy,
 # banned/duplicate-dependency checks, and source allow-listing.
+# See docs/adr/0009-supply-chain-policy-gate.md.
 
 [graph]
 all-features = false
