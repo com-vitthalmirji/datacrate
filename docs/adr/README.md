@@ -18,3 +18,4 @@ supersedes it, and mark the old one's Status as `Superseded by ADR-XXXX`.
 - [0007. DataFusion resource control](0007-datafusion-resource-control.md)
   - [0007.1. Hash-join build-side spill gap](0007.1-hash-join-build-side-spill-gap.md)
 - [0008. Ballista and Comet benchmark engines](0008-ballista-and-comet-benchmark-engines.md)
+  - [0008.1. DataFusion/Polars comparison is scale-dependent](0008.1-datafusion-polars-comparison-is-scale-dependent.md)
