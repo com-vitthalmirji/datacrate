@@ -1,0 +1,73 @@
+# cargo-deny config. See https://embarkstudios.github.io/cargo-deny/
+# Closes risks.md row 22 (supply-chain policy gate beyond known-CVE scanning).
+# cargo-audit (already running) covers known CVEs; this adds license policy,
+# banned/duplicate-dependency checks, and source allow-listing.
+
+[graph]
+all-features = false
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+[advisories]
+ignore = [
+    # Mirrors the 2026-09-16 decision in docs/internals/notes/decisions.md:
+    # object_store pulls quick-xml 0.38/0.39 for S3 XML response parsing.
+    # Input is trusted infra responses, not attacker/participant-controlled,
+    # and `cargo update` can't reach the fix without an upstream object_store bump.
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml DoS via object_store's S3 XML parsing; trusted infra input, no upstream fix available yet" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml DoS via object_store's S3 XML parsing; trusted infra input, no upstream fix available yet" },
+    # bincode is an internal serialization detail of polars-utils (transitive,
+    # not called directly by this repo's code); unmaintained flag, not a CVE.
+    { id = "RUSTSEC-2025-0141", reason = "unmaintained flag on transitive polars-utils dependency, not a vulnerability; no direct usage in this repo" },
+]
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "0BSD",
+    "Unlicense",
+    "BSL-1.0",
+    "CC0-1.0",
+    "MIT-0",
+    "CDLA-Permissive-2.0",
+    "bzip2-1.0.6",
+]
+confidence-threshold = 0.8
+
+[[licenses.exceptions]]
+# LGPL only appears as one arm of an OR license expression (MIT OR Apache-2.0
+# OR LGPL-2.1-or-later); the permissive arms satisfy the requirement, but the
+# crate needs naming explicitly since LGPL itself isn't in the allow list.
+allow = ["MIT", "Apache-2.0", "LGPL-2.1-or-later"]
+crate = "r-efi"
+
+[licenses.private]
+# This workspace's own crates (contracts, contracts-derive, pipeline,
+# rusty-ready, typestate) aren't published and have no `license` field.
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow-workspace = false
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+
+[sources.allow-org]
+github = ["apache"]
