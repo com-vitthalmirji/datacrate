@@ -344,3 +344,17 @@ m38-accelerated-join:
         --conf spark.shuffle.manager=org.apache.spark.sql.comet.execution.shuffle.CometShuffleManager \
         --conf spark.sql.autoBroadcastJoinThreshold=-1 \
         -f /m3.8/query-join.sql'
+
+# M3-gate parity probe: timestamp/null/ordering/window semantics, Spark vs. DataFusion.
+# Small fixture (fixtures/m3/orders.csv, 8 rows) - a correctness proof, not a scale benchmark.
+parity-dataset:
+    cargo run --release -p pipeline --example parity_fixture -- \
+        --input fixtures/m3/orders.csv --output benchmark/parity/orders.parquet
+
+parity-datafusion:
+    cargo run --release -p pipeline --bin parity-datafusion -- \
+        --input benchmark/parity/orders.parquet
+
+parity-spark:
+    docker compose -f docker-compose.spark-comet.yml exec spark \
+        bash -c '/opt/spark/bin/spark-sql -f /parity/query.sql'

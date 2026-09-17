@@ -8,3 +8,4 @@ benchmark/**/*.jar.sha1
 benchmark/m3.6/orders/
 benchmark/m3.8/
 benchmark/m3.9-single-node/
+benchmark/parity/*.parquet
