@@ -215,9 +215,17 @@ fn consume_batches(
         return Err(PipelineError::Cancelled);
     }
 
-    writer
-        .close()
+    let file = writer
+        .into_inner()
         .map_err(|source| PipelineIoError::WriteParquet { source })?;
+    // Durability: the rename in `run_bounded_pipeline` only makes the staged
+    // file visible atomically, it doesn't guarantee the file's bytes survive
+    // a crash. fsync here forces them to disk before that rename happens.
+    file.sync_all()
+        .map_err(|source| PipelineIoError::OpenOutput {
+            path: staging_path.to_path_buf(),
+            source,
+        })?;
     Ok(report)
 }
 
@@ -272,6 +280,22 @@ pub fn run_bounded_pipeline(
                     source,
                 }
             })?;
+            // Durability: fsync the directory entry so the rename itself
+            // survives a crash, not just the file contents synced above.
+            if let Some(parent) = output
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
+                let dir = File::open(parent).map_err(|source| PipelineIoError::OpenOutput {
+                    path: parent.to_path_buf(),
+                    source,
+                })?;
+                dir.sync_all()
+                    .map_err(|source| PipelineIoError::OpenOutput {
+                        path: parent.to_path_buf(),
+                        source,
+                    })?;
+            }
             Ok(report)
         }
         Err(err) => {
