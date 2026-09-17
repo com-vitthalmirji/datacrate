@@ -21,4 +21,5 @@ supersedes it, and mark the old one's Status as `Superseded by ADR-XXXX`.
 - [0008. Ballista and Comet benchmark engines](0008-ballista-and-comet-benchmark-engines.md)
   - [0008.1. DataFusion/Polars comparison is scale-dependent](0008.1-datafusion-polars-comparison-is-scale-dependent.md)
 - [0009. Supply-chain policy gate](0009-supply-chain-policy-gate.md)
+- [0010. Optional Cargo features for benchmark engines](0010-optional-cargo-features-for-benchmark-engines.md)
 - [0011. Align local and CI build profiles](0011-align-local-and-ci-build-profiles.md)

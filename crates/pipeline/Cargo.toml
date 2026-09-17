@@ -14,6 +14,7 @@ workspace = true
 # — evidence-gathering for the talk, not workshop participant code. Off by
 # default so `cargo build`/`just release` don't pay for tonic/arrow-flight's
 # dependency tree on the path participants actually take.
+# See docs/adr/0010-optional-cargo-features-for-benchmark-engines.md.
 ballista = ["dep:ballista", "dep:ballista-core", "dep:ballista-executor"]
 # scale-aggregate-polars only (Spark/DataFusion/Polars parity benchmark).
 polars = ["dep:polars"]
