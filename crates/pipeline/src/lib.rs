@@ -185,14 +185,22 @@ pub(crate) struct Row {
     note: Option<String>,
 }
 
+/// Parses column 0 of an already-read CSV record as an integer id, given the
+/// row's zero-based index (used only for [`PipelineIoError::InvalidId`]'s
+/// message). Shared by every fixture schema in this crate whose first column
+/// is an id.
+pub(crate) fn parse_id(row: usize, record: &csv::StringRecord) -> Result<i64, PipelineIoError> {
+    let id_field = record.get(0).unwrap_or_default();
+    id_field.parse().map_err(|_| PipelineIoError::InvalidId {
+        row,
+        value: id_field.to_string(),
+    })
+}
+
 /// Parses one already-read CSV record into a [`Row`], given its zero-based
 /// row index (used only for [`PipelineIoError::InvalidId`]'s message).
 pub(crate) fn parse_row(row: usize, record: &csv::StringRecord) -> Result<Row, PipelineIoError> {
-    let id_field = record.get(0).unwrap_or_default();
-    let id: i64 = id_field.parse().map_err(|_| PipelineIoError::InvalidId {
-        row,
-        value: id_field.to_string(),
-    })?;
+    let id = parse_id(row, record)?;
     let name = record.get(1).unwrap_or_default().to_string();
     let note = match record.get(2).unwrap_or_default() {
         "" => None,
@@ -201,7 +209,14 @@ pub(crate) fn parse_row(row: usize, record: &csv::StringRecord) -> Result<Row, P
     Ok(Row { id, name, note })
 }
 
-fn parse_rows(path: &Path) -> Result<Vec<Row>, PipelineIoError> {
+/// Opens `path` as a headered CSV file and parses every record with
+/// `parse_row`, in order, given each record's zero-based row index. Shared by
+/// every `fixture_to_*_batch` function in this crate so the open/read/error
+/// plumbing is written once regardless of the target schema.
+pub(crate) fn read_csv_rows<T>(
+    path: &Path,
+    mut parse_row: impl FnMut(usize, &csv::StringRecord) -> Result<T, PipelineIoError>,
+) -> Result<Vec<T>, PipelineIoError> {
     let file = File::open(path).map_err(|source| PipelineIoError::OpenInput {
         path: path.to_path_buf(),
         source,
@@ -214,6 +229,10 @@ fn parse_rows(path: &Path) -> Result<Vec<Row>, PipelineIoError> {
         rows.push(parse_row(row, &record)?);
     }
     Ok(rows)
+}
+
+fn parse_rows(path: &Path) -> Result<Vec<Row>, PipelineIoError> {
+    read_csv_rows(path, parse_row)
 }
 
 pub(crate) fn batch_from_rows(rows: &[Row]) -> Result<RecordBatch, PipelineIoError> {
