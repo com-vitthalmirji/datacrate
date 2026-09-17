@@ -1180,8 +1180,20 @@ mod tests {
     const GROUP_BY_NOTE_SQL: &str =
         "SELECT note, COUNT(*) AS cnt, SUM(amount) AS total FROM orders GROUP BY note";
 
+    /// Installs a `tracing` subscriber so `context_with_memory_limit`'s span
+    /// is visible under `RUST_LOG=pipeline=debug cargo test -- --nocapture`
+    /// during the Week 9 resource-control lab. `try_init` is idempotent
+    /// across the three tests below that call it.
+    fn init_lab_tracing() {
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .try_init();
+    }
+
     #[tokio::test]
     async fn memory_limited_aggregate_spills_and_still_completes() {
+        init_lab_tracing();
         let spill_dir = tempfile::tempdir().expect("temp spill dir");
         let ctx = context_with_memory_limit(AGGREGATE_SPILL_MAX_BYTES, spill_dir.path())
             .expect("build memory-limited context");
@@ -1212,6 +1224,7 @@ mod tests {
 
     #[tokio::test]
     async fn memory_limited_join_fails_with_resources_exhausted() {
+        init_lab_tracing();
         let spill_dir = tempfile::tempdir().expect("temp spill dir");
         let ctx = context_with_memory_limit(AGGREGATE_SPILL_MAX_BYTES, spill_dir.path())
             .expect("build memory-limited context");
@@ -1237,6 +1250,7 @@ mod tests {
     async fn dropping_stream_early_cleans_up_spill_files() {
         use futures_util::StreamExt;
 
+        init_lab_tracing();
         let spill_dir = tempfile::tempdir().expect("temp spill dir");
         let ctx = context_with_memory_limit(AGGREGATE_SPILL_MAX_BYTES, spill_dir.path())
             .expect("build memory-limited context");
