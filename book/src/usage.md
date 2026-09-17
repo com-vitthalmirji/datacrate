@@ -37,5 +37,5 @@ from those comments and published at
 [alongside this guide](api/dtl_core/index.html) (or locally via
 `cargo doc -p dtl-core --open`).
 
-This guide narrates the shape of the crate; the doc comments in the source
+This guide describes the shape of the crate; the doc comments in the source
 are the source of truth for exact signatures and behavior.

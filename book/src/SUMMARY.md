@@ -1,7 +1,15 @@
 # Summary
 
+- [The story](story.md)
 - [Getting started](getting-started.md)
+- [Rust fundamentals for JVM & Python engineers](rust-fundamentals.md)
 - [Usage](usage.md)
+- [Ownership and streaming: `csv-select` walked through](ownership.md)
 - [Typestate pipeline builder](typestate.md)
+- [The DataFusion pipeline: from CSV to a running query](datafusion-basics.md)
+- [The DataFusion pipeline: failure paths and resource control](datafusion.md)
+- [The object-store edge: bridging sync and async without a sandwich](object-store.md)
+- [Beyond one process: distributing DataFusion, and accelerating Spark with it](distributed-and-acceleration.md)
+- [Proving it at scale: 91GB, joins, and SQL parity against Spark](scale-and-parity.md)
 - [Compile-time schema contracts](contracts.md)
 - [About & contributing](about.md)

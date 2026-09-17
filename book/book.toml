@@ -7,3 +7,5 @@ src = "src"
 
 [output.html]
 git-repository-url = "https://github.com/com-vitthalmirji/datacrate"
+additional-js = ["theme/mermaid-init.js"]
+additional-css = ["theme/mermaid-zoom.css"]
