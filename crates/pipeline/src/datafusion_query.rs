@@ -23,7 +23,7 @@ use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::logical_expr::{ColumnarValue, JoinType, Volatility, col, create_udf};
 use datafusion::prelude::{SessionConfig, SessionContext, lit};
 
-use crate::PipelineIoError;
+use crate::{PipelineIoError, parse_id, read_csv_rows};
 
 /// The fixed four-column schema (`id: Int64`, `amount: Decimal128(10, 2)`,
 /// `placed_at: Timestamp(Microsecond)`, `note: Utf8`, nullable) every
@@ -41,11 +41,19 @@ pub fn orders_schema() -> SchemaRef {
     ]))
 }
 
+/// An order's `id` (`orders_schema`'s primary key) and a shipment's
+/// `order_id` (`shipments_schema`'s foreign key) are the same domain value —
+/// this newtype keeps that value distinct from every other bare `i64` in
+/// `OrderRow`/`ShipmentRow` (`amount`, `placed_at`, `shipped_at`) so a future
+/// call site can't pass one where another is expected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OrderId(i64);
+
 /// One parsed `id,amount,placed_at,note` row. `amount` is stored as an
 /// unscaled `i128` (matching `Decimal128(10, 2)`'s scale of 2), `placed_at`
 /// as microseconds since the Unix epoch.
 struct OrderRow {
-    id: i64,
+    id: OrderId,
     amount: i128,
     placed_at: i64,
     note: Option<String>,
@@ -65,12 +73,11 @@ fn parse_amount(row: usize, value: &str) -> Result<i128, PipelineIoError> {
     }
     let whole: i128 = whole.parse().map_err(|_| invalid())?;
     let frac: i128 = frac.parse().map_err(|_| invalid())?;
-    let sign = if whole < 0 || value.starts_with('-') {
-        -1
-    } else {
-        1
-    };
-    Ok(whole * 100 + sign * frac)
+    let sign = if value.starts_with('-') { -1 } else { 1 };
+    whole
+        .checked_mul(100)
+        .and_then(|scaled| scaled.checked_add(sign * frac))
+        .ok_or_else(invalid)
 }
 
 fn parse_timestamp(row: usize, value: &str) -> Result<i64, PipelineIoError> {
@@ -84,11 +91,7 @@ fn parse_timestamp(row: usize, value: &str) -> Result<i64, PipelineIoError> {
 }
 
 fn parse_order_row(row: usize, record: &csv::StringRecord) -> Result<OrderRow, PipelineIoError> {
-    let id_field = record.get(0).unwrap_or_default();
-    let id: i64 = id_field.parse().map_err(|_| PipelineIoError::InvalidId {
-        row,
-        value: id_field.to_string(),
-    })?;
+    let id = parse_id(row, record)?;
     let amount = parse_amount(row, record.get(1).unwrap_or_default())?;
     let placed_at = parse_timestamp(row, record.get(2).unwrap_or_default())?;
     let note = match record.get(3).unwrap_or_default() {
@@ -96,7 +99,7 @@ fn parse_order_row(row: usize, record: &csv::StringRecord) -> Result<OrderRow, P
         note => Some(note.to_string()),
     };
     Ok(OrderRow {
-        id,
+        id: OrderId(id),
         amount,
         placed_at,
         note,
@@ -114,18 +117,9 @@ fn parse_order_row(row: usize, record: &csv::StringRecord) -> Result<OrderRow, P
 /// decimal, `placed_at` is not a valid `YYYY-MM-DDTHH:MM:SS` timestamp, or
 /// the resulting arrays cannot be assembled into a `RecordBatch`.
 pub fn fixture_to_orders_batch(path: &Path) -> Result<RecordBatch, PipelineIoError> {
-    let file = std::fs::File::open(path).map_err(|source| PipelineIoError::OpenInput {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    let mut reader = csv::Reader::from_reader(file);
-    let mut rows = Vec::new();
-    for (row, record) in reader.records().enumerate() {
-        let record = record.map_err(|source| PipelineIoError::ReadRecord { source })?;
-        rows.push(parse_order_row(row, &record)?);
-    }
+    let rows = read_csv_rows(path, parse_order_row)?;
 
-    let ids: Int64Array = rows.iter().map(|r| r.id).collect();
+    let ids: Int64Array = rows.iter().map(|r| r.id.0).collect();
     let amounts = Decimal128Array::from_iter_values(rows.iter().map(|r| r.amount))
         .with_precision_and_scale(10, 2)
         .map_err(|source| PipelineIoError::BuildBatch { source })?;
@@ -175,7 +169,7 @@ pub fn shipments_schema() -> SchemaRef {
 }
 
 struct ShipmentRow {
-    order_id: i64,
+    order_id: OrderId,
     carrier: String,
     shipped_at: i64,
 }
@@ -184,17 +178,11 @@ fn parse_shipment_row(
     row: usize,
     record: &csv::StringRecord,
 ) -> Result<ShipmentRow, PipelineIoError> {
-    let order_id_field = record.get(0).unwrap_or_default();
-    let order_id = order_id_field
-        .parse()
-        .map_err(|_| PipelineIoError::InvalidId {
-            row,
-            value: order_id_field.to_string(),
-        })?;
+    let order_id = parse_id(row, record)?;
     let carrier = record.get(1).unwrap_or_default().to_string();
     let shipped_at = parse_timestamp(row, record.get(2).unwrap_or_default())?;
     Ok(ShipmentRow {
-        order_id,
+        order_id: OrderId(order_id),
         carrier,
         shipped_at,
     })
@@ -211,21 +199,12 @@ fn parse_shipment_row(
 /// `YYYY-MM-DDTHH:MM:SS` timestamp, or the resulting arrays cannot be
 /// assembled into a `RecordBatch`.
 pub fn fixture_to_shipments_batch(path: &Path) -> Result<RecordBatch, PipelineIoError> {
-    let file = std::fs::File::open(path).map_err(|source| PipelineIoError::OpenInput {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    let mut reader = csv::Reader::from_reader(file);
-    let mut rows = Vec::new();
-    for (row, record) in reader.records().enumerate() {
-        let record = record.map_err(|source| PipelineIoError::ReadRecord { source })?;
-        rows.push(parse_shipment_row(row, &record)?);
-    }
+    let rows = read_csv_rows(path, parse_shipment_row)?;
 
-    let order_ids: Int64Array = rows.iter().map(|r| r.order_id).collect();
+    let order_ids: Int64Array = rows.iter().map(|r| r.order_id.0).collect();
     let carriers: StringArray = rows.iter().map(|r| Some(r.carrier.as_str())).collect();
-    let shipped_ats: TimestampMicrosecondArray =
-        rows.iter().map(|r| r.shipped_at).collect::<Vec<_>>().into();
+    let shipped_ats =
+        TimestampMicrosecondArray::from_iter_values(rows.iter().map(|r| r.shipped_at));
 
     RecordBatch::try_new(
         shipments_schema(),
@@ -453,10 +432,12 @@ pub fn context_with_filter_pushdown() -> SessionContext {
 /// # Errors
 ///
 /// Returns a [`DataFusionError`] if the `RuntimeEnv` cannot be built.
+#[tracing::instrument(fields(spill_dir = %spill_dir.display()))]
 pub fn context_with_memory_limit(
     max_bytes: usize,
     spill_dir: &Path,
 ) -> Result<SessionContext, DataFusionError> {
+    tracing::debug!("building memory-limited SessionContext");
     let runtime = RuntimeEnvBuilder::new()
         .with_memory_limit(max_bytes, 1.0)
         .with_temp_file_path(spill_dir)

@@ -34,4 +34,5 @@ parquet = { version = "59.3.0", default-features = false, features = ["arrow", "
 polars = { version = "0.51", default-features = false, features = ["lazy", "parquet", "dtype-decimal", "fmt"] }
 tempfile = "3.27.0"
 tokio = { version = "1", default-features = false, features = ["rt", "macros"] }
+tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
