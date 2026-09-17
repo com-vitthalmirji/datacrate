@@ -8,20 +8,31 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+# Distributed-execution benchmark bins only (ballista-aggregate,
+# ballista-executor-scale, join-shuffle-ballista[-scale], scale-aggregate-ballista)
+# — evidence-gathering for the talk, not workshop participant code. Off by
+# default so `cargo build`/`just release` don't pay for tonic/arrow-flight's
+# dependency tree on the path participants actually take.
+# See docs/internals/notes/decisions.md, 2026-09-17 entry.
+ballista = ["dep:ballista", "dep:ballista-core", "dep:ballista-executor"]
+# scale-aggregate-polars only (Spark/DataFusion/Polars parity benchmark).
+polars = ["dep:polars"]
+
 [dependencies]
 arrow = "59"
 # Ballista has no crates.io release compatible with datafusion 55.1.0 yet
 # (last release, 54.1.0, pins datafusion ^54); main tracks datafusion "55"
 # as of this commit. Pinned by rev, not branch, for reproducible builds —
 # see docs/internals/notes/decisions.md, 2026-09-15 entry.
-ballista = { git = "https://github.com/apache/datafusion-ballista", rev = "ae9bff026ffd18b256d39b10890a2ca96e1fc836" }
+ballista = { git = "https://github.com/apache/datafusion-ballista", rev = "ae9bff026ffd18b256d39b10890a2ca96e1fc836", optional = true }
 # Same pin as `ballista` above. Needed for a custom executor binary
 # (ballista-executor-scale) that overrides RuntimeEnv construction to raise
 # datafusion.runtime.max_temp_directory_size, which neither the prebuilt
 # ballista-executor CLI nor --memory-pool-size expose — see
 # docs/internals/notes/decisions.md, M3.8 disk-spill-limit entry.
-ballista-core = { git = "https://github.com/apache/datafusion-ballista", rev = "ae9bff026ffd18b256d39b10890a2ca96e1fc836" }
-ballista-executor = { git = "https://github.com/apache/datafusion-ballista", rev = "ae9bff026ffd18b256d39b10890a2ca96e1fc836" }
+ballista-core = { git = "https://github.com/apache/datafusion-ballista", rev = "ae9bff026ffd18b256d39b10890a2ca96e1fc836", optional = true }
+ballista-executor = { git = "https://github.com/apache/datafusion-ballista", rev = "ae9bff026ffd18b256d39b10890a2ca96e1fc836", optional = true }
 bytesize = "2"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 clap = { version = "4", features = ["derive"] }
@@ -31,8 +42,32 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 log = "0.4"
 object_store = { version = "0.14", features = ["aws"] }
 parquet = { version = "59.3.0", default-features = false, features = ["arrow", "snap", "zstd"] }
-polars = { version = "0.51", default-features = false, features = ["lazy", "parquet", "dtype-decimal", "fmt"] }
+polars = { version = "0.51", default-features = false, features = ["lazy", "parquet", "dtype-decimal", "fmt"], optional = true }
 tempfile = "3.27.0"
-tokio = { version = "1", default-features = false, features = ["rt", "macros"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[[bin]]
+name = "ballista-aggregate"
+required-features = ["ballista"]
+
+[[bin]]
+name = "ballista-executor-scale"
+required-features = ["ballista"]
+
+[[bin]]
+name = "join-shuffle-ballista"
+required-features = ["ballista"]
+
+[[bin]]
+name = "join-shuffle-ballista-scale"
+required-features = ["ballista"]
+
+[[bin]]
+name = "scale-aggregate-ballista"
+required-features = ["ballista"]
+
+[[bin]]
+name = "scale-aggregate-polars"
+required-features = ["polars"]

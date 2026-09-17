@@ -62,10 +62,10 @@ ballista-executor-2:
 # on this box after the ~140GB M3.8 dataset. See
 # docs/internals/notes/decisions.md, M3.8 disk-spill-limit entry.
 ballista-executor-1-scale:
-    cargo run --release -p pipeline --bin ballista-executor-scale -- --scheduler-port 50050 --bind-port 50061 --bind-grpc-port 50062 --bind-health-port 50063 --work-dir /tmp/ballista-executor-1 --memory-pool-size 24GB --max-temp-directory-size 150GB
+    cargo run --release -p pipeline --bin ballista-executor-scale --features ballista -- --scheduler-port 50050 --bind-port 50061 --bind-grpc-port 50062 --bind-health-port 50063 --work-dir /tmp/ballista-executor-1 --memory-pool-size 24GB --max-temp-directory-size 150GB
 
 ballista-executor-2-scale:
-    cargo run --release -p pipeline --bin ballista-executor-scale -- --scheduler-port 50050 --bind-port 50071 --bind-grpc-port 50072 --bind-health-port 50073 --work-dir /tmp/ballista-executor-2 --memory-pool-size 24GB --max-temp-directory-size 150GB
+    cargo run --release -p pipeline --bin ballista-executor-scale --features ballista -- --scheduler-port 50050 --bind-port 50071 --bind-grpc-port 50072 --bind-health-port 50073 --work-dir /tmp/ballista-executor-2 --memory-pool-size 24GB --max-temp-directory-size 150GB
 
 # One executor per physical core (12 on this machine) — M3.8 local[*]-equivalent
 # topology, see docs/internals/notes/decisions.md, "M3.8 Ballista local[*]" entry.
@@ -184,7 +184,7 @@ join-shuffle-datafusion:
 # existing 2-executor cluster (just ballista-scheduler/-executor-1/-executor-2
 # must already be running). See docs/internals/notes/risks.md row 25.
 join-shuffle-ballista:
-    cargo run --release -p pipeline --bin join-shuffle-ballista -- \
+    cargo run --release -p pipeline --bin join-shuffle-ballista --features ballista -- \
         --orders benchmark/join-shuffle/orders_join.parquet \
         --shipments benchmark/join-shuffle/shipments_join.parquet
 
@@ -208,10 +208,10 @@ m36-datafusion:
 # Reuses the existing 2-executor local cluster (just ballista-scheduler /
 # ballista-executor-1 / ballista-executor-2 must already be running).
 m36-ballista:
-    cargo run --release -p pipeline --bin scale-aggregate-ballista -- --input benchmark/m3.6/orders
+    cargo run --release -p pipeline --bin scale-aggregate-ballista --features ballista -- --input benchmark/m3.6/orders
 
 m36-polars:
-    cargo run --release -p pipeline --bin scale-aggregate-polars -- --input benchmark/m3.6/orders
+    cargo run --release -p pipeline --bin scale-aggregate-polars --features polars -- --input benchmark/m3.6/orders
 
 m36-vanilla:
     docker compose -f docker-compose.spark-comet.yml exec spark \
@@ -264,15 +264,15 @@ m38-datafusion-filter:
 # Reuses the existing 2-executor local cluster (just ballista-scheduler /
 # ballista-executor-1 / ballista-executor-2 must already be running).
 m38-ballista-aggregate:
-    cargo run --release -p pipeline --bin scale-aggregate-ballista -- \
+    cargo run --release -p pipeline --bin scale-aggregate-ballista --features ballista -- \
         --input benchmark/m3.8/orders --query aggregate
 
 m38-ballista-groupby:
-    cargo run --release -p pipeline --bin scale-aggregate-ballista -- \
+    cargo run --release -p pipeline --bin scale-aggregate-ballista --features ballista -- \
         --input benchmark/m3.8/orders --query group-by-bucket
 
 m38-ballista-filter:
-    cargo run --release -p pipeline --bin scale-aggregate-ballista -- \
+    cargo run --release -p pipeline --bin scale-aggregate-ballista --features ballista -- \
         --input benchmark/m3.8/orders --query multi-predicate
 
 m38-vanilla-aggregate:
@@ -327,7 +327,7 @@ m38-datafusion-join:
 # Requires ballista-scheduler + ballista-executor-1-scale + ballista-executor-2-scale
 # running (not the plain ballista-executor-1/-2), so the raised spill quota is in effect.
 m38-ballista-join:
-    cargo run --release -p pipeline --bin join-shuffle-ballista-scale -- \
+    cargo run --release -p pipeline --bin join-shuffle-ballista-scale --features ballista -- \
         --orders benchmark/m3.8/orders --shipments benchmark/m3.8/shipments
 
 m38-vanilla-join:
