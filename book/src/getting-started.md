@@ -20,7 +20,8 @@ contracts today, growing toward a fuller Arrow/Parquet/DataFusion pipeline.
 crates/
 ├── dtl-core/          lib   — ownership/borrowing/slices fundamentals, zero-copy CSV batching
 ├── csv-cli/           bin   — streaming CSV column-selection CLI (csv-select)
-├── pipeline/          lib   — CSV fixture → Arrow RecordBatch conversion
+├── pipeline/          lib   — Arrow/Parquet/DataFusion pipeline, object-store I/O,
+│                              Ballista distribution, Comet acceleration
 ├── typestate/         lib   — typestate pipeline builder (source/transform/sink)
 ├── contracts/         lib   — compile-time schema-conformance checking
 ├── contracts-derive/  lib   — `#[derive(Contract)]` proc macro backing `contracts`
@@ -44,6 +45,10 @@ cargo run -p csv-select-cli --bin csv-select -- fixtures/m1/headers.csv --column
 ```
 
 Continue to [Usage](usage.md) for a walkthrough of `csv-select` and the
-`dtl-core` library, or jump straight to the
-[typestate pipeline builder](typestate.md) and
-[compile-time schema contracts](contracts.md) pages.
+`dtl-core` library, or jump straight to any other chapter: the deep dive on
+[ownership and streaming](ownership.md), the
+[typestate pipeline builder](typestate.md), the
+[DataFusion pipeline](datafusion.md), the
+[object-store edge](object-store.md),
+[distributing DataFusion and accelerating Spark](distributed-and-acceleration.md),
+or [compile-time schema contracts](contracts.md).

@@ -1,28 +1,43 @@
-//! M3.6 scale comparison, DataFusion leg: runs the same aggregation as
-//! [`pipeline::datafusion_query::aggregate_query_sql`]
-//! (`SELECT COUNT(*), SUM(amount) FROM orders WHERE amount > 50.00`) against
-//! the Parquet file or partitioned directory produced by the
+//! M3.6/M3.8 scale comparison, DataFusion leg: runs one of three aggregation
+//! shapes over the Parquet file or partitioned directory produced by the
 //! `scale_benchmark_dataset` example, timed with `std::time::Instant`. This
-//! is the correctness oracle every other M3.6 leg (Ballista, Polars, Spark,
+//! is the correctness reference every other leg (Ballista, Polars, Spark,
 //! Spark+Comet) is diffed against before any wall-clock number is trusted.
+//! `--query` defaults to `aggregate` (M3.6's original single-shape leg);
+//! `group-by-bucket` and `multi-predicate` are the M3.8 additions
+//! (`docs/internals/notes/decisions.md`, "M3.8 scoped" entry) — same table,
+//! same binary, since all three are variations of one benchmark leg rather
+//! than independently-evolving legs.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use datafusion::prelude::SessionContext;
-use pipeline::datafusion_query::{aggregate_query_sql, register_orders};
+use pipeline::datafusion_query::{
+    aggregate_query_sql, group_by_bucket_query_sql, multi_predicate_query_sql, register_orders,
+};
+
+#[derive(Clone, Copy, ValueEnum)]
+enum QueryShape {
+    Aggregate,
+    GroupByBucket,
+    MultiPredicate,
+}
 
 #[derive(Parser)]
 #[command(
     name = "scale-aggregate-datafusion",
-    about = "Run the M3.6 scale aggregation against a Parquet file or directory via DataFusion"
+    about = "Run an M3.6/M3.8 scale query against a Parquet file or directory via DataFusion"
 )]
 struct Args {
-    /// Path to the orders Parquet file or partitioned directory to aggregate.
+    /// Path to the orders Parquet file or partitioned directory to query.
     #[arg(long)]
     input: PathBuf,
+    /// Which query shape to run.
+    #[arg(long, value_enum, default_value = "aggregate")]
+    query: QueryShape,
 }
 
 #[derive(Debug)]
@@ -61,7 +76,12 @@ async fn run() -> Result<(), CliError> {
         .map_err(CliError::Register)?;
 
     let start = Instant::now();
-    let batches = aggregate_query_sql(&ctx).await.map_err(CliError::Query)?;
+    let batches = match args.query {
+        QueryShape::Aggregate => aggregate_query_sql(&ctx).await,
+        QueryShape::GroupByBucket => group_by_bucket_query_sql(&ctx).await,
+        QueryShape::MultiPredicate => multi_predicate_query_sql(&ctx).await,
+    }
+    .map_err(CliError::Query)?;
     let elapsed = start.elapsed();
 
     println!(
