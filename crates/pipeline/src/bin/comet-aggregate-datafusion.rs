@@ -2,7 +2,7 @@
 //! [`pipeline::datafusion_query::aggregate_query_sql`]
 //! (`SELECT COUNT(*), SUM(amount) FROM orders WHERE amount > 50.00`) against
 //! the Parquet fixture produced by the `comet_benchmark_dataset` example,
-//! timed with `std::time::Instant`. This is the correctness oracle and
+//! timed with `std::time::Instant`. This is the correctness reference and
 //! DataFusion timing leg of the three-way Spark / Spark+Comet / DataFusion
 //! comparison — `benchmark/spark-comet/query.sql` runs the Spark-SQL
 //! equivalent over the same file.

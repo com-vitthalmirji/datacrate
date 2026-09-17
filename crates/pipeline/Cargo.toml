@@ -15,13 +15,23 @@ arrow = "59"
 # as of this commit. Pinned by rev, not branch, for reproducible builds —
 # see docs/internals/notes/decisions.md, 2026-09-15 entry.
 ballista = { git = "https://github.com/apache/datafusion-ballista", rev = "ae9bff026ffd18b256d39b10890a2ca96e1fc836" }
+# Same pin as `ballista` above. Needed for a custom executor binary
+# (ballista-executor-scale) that overrides RuntimeEnv construction to raise
+# datafusion.runtime.max_temp_directory_size, which neither the prebuilt
+# ballista-executor CLI nor --memory-pool-size expose — see
+# docs/internals/notes/decisions.md, M3.8 disk-spill-limit entry.
+ballista-core = { git = "https://github.com/apache/datafusion-ballista", rev = "ae9bff026ffd18b256d39b10890a2ca96e1fc836" }
+ballista-executor = { git = "https://github.com/apache/datafusion-ballista", rev = "ae9bff026ffd18b256d39b10890a2ca96e1fc836" }
+bytesize = "2"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 clap = { version = "4", features = ["derive"] }
 csv = "1"
 datafusion = "55.1.0"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+log = "0.4"
 object_store = { version = "0.14", features = ["aws"] }
 parquet = { version = "59.3.0", default-features = false, features = ["arrow", "snap", "zstd"] }
 polars = { version = "0.51", default-features = false, features = ["lazy", "parquet", "dtype-decimal", "fmt"] }
 tempfile = "3.27.0"
 tokio = { version = "1", default-features = false, features = ["rt", "macros"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

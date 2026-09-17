@@ -1,9 +1,12 @@
-//! M3.6 scale comparison, Ballista leg: runs the same aggregation as
-//! [`pipeline::datafusion_query::aggregate_query_sql`] against a Parquet
-//! directory produced by the `scale_benchmark_dataset` example, over a live
-//! Ballista cluster instead of a single-node `SessionContext`. Output is
-//! diffed against `scale-aggregate-datafusion`'s result before any
-//! wall-clock number is trusted (same oracle discipline as M3.5).
+//! M3.6/M3.8 scale comparison, Ballista leg: runs one of three query shapes
+//! against a Parquet directory produced by the `scale_benchmark_dataset`
+//! example, over a live Ballista cluster instead of a single-node
+//! `SessionContext`. Output is diffed against `scale-aggregate-datafusion`'s
+//! result before any wall-clock number is trusted (same correctness-reference
+//! discipline as M3.5). `--query` defaults to `aggregate` (M3.6's original shape);
+//! `group-by-bucket` and `multi-predicate` are the M3.8 additions, SQL text
+//! matching [`pipeline::datafusion_query::group_by_bucket_query_sql`] and
+//! [`pipeline::datafusion_query::multi_predicate_query_sql`] exactly.
 //!
 //! Requires a scheduler and at least two executors already running (see
 //! `just ballista-scheduler`, `just ballista-executor-1`, `just
@@ -20,17 +23,46 @@ use std::time::Instant;
 use ballista::datafusion::execution::SessionStateBuilder;
 use ballista::datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
 use ballista::prelude::*;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
+
+#[derive(Clone, Copy, ValueEnum)]
+enum QueryShape {
+    Aggregate,
+    GroupByBucket,
+    MultiPredicate,
+}
+
+impl QueryShape {
+    fn sql(self) -> &'static str {
+        match self {
+            Self::Aggregate => {
+                "SELECT COUNT(*) AS order_count, SUM(amount) AS total_amount \
+                 FROM orders WHERE amount > 50.00"
+            }
+            Self::GroupByBucket => {
+                "SELECT id % 1000 AS bucket, COUNT(*) AS order_count, SUM(amount) AS total_amount \
+                 FROM orders GROUP BY bucket ORDER BY bucket"
+            }
+            Self::MultiPredicate => {
+                "SELECT COUNT(*) AS order_count, SUM(amount) AS total_amount \
+                 FROM orders WHERE amount > 50.00 AND note IS NOT NULL"
+            }
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(
     name = "scale-aggregate-ballista",
-    about = "Run the M3.6 scale aggregation against a partitioned Parquet directory over Ballista"
+    about = "Run an M3.6/M3.8 scale query against a partitioned Parquet directory over Ballista"
 )]
 struct Args {
-    /// Path to the orders Parquet directory to aggregate.
+    /// Path to the orders Parquet directory to query.
     #[arg(long)]
     input: PathBuf,
+    /// Which query shape to run.
+    #[arg(long, value_enum, default_value = "aggregate")]
+    query: QueryShape,
 }
 
 #[derive(Debug)]
@@ -91,11 +123,7 @@ async fn run() -> Result<(), CliError> {
     .await?;
 
     let start = Instant::now();
-    let batches = ctx
-        .sql("SELECT COUNT(*) AS order_count, SUM(amount) AS total_amount FROM orders WHERE amount > 50.00")
-        .await?
-        .collect()
-        .await?;
+    let batches = ctx.sql(args.query.sql()).await?.collect().await?;
     let elapsed = start.elapsed();
 
     println!("{}", arrow::util::pretty::pretty_format_batches(&batches)?);

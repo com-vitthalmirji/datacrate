@@ -575,6 +575,104 @@ pub async fn aggregate_query_dataframe(
         .await
 }
 
+/// Runs a high-cardinality grouped aggregation (`id % 1000` buckets,
+/// `COUNT(*)`/`SUM(amount)` per bucket) over `orders`, via the SQL API. Unlike
+/// [`aggregate_query_sql`]'s single-row reduction, this exercises a
+/// grouped-aggregation physical plan (M3.8's group-by-shape leg).
+///
+/// # Errors
+///
+/// Returns a [`DataFusionError`] if the query cannot be planned or executed.
+pub async fn group_by_bucket_query_sql(
+    ctx: &SessionContext,
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    ctx.sql(
+        "SELECT id % 1000 AS bucket, COUNT(*) AS order_count, SUM(amount) AS total_amount \
+         FROM orders GROUP BY bucket ORDER BY bucket",
+    )
+    .await?
+    .collect()
+    .await
+}
+
+/// Runs the same grouped aggregation as [`group_by_bucket_query_sql`] via the
+/// DataFrame API.
+///
+/// # Errors
+///
+/// Returns a [`DataFusionError`] if the query cannot be planned or executed.
+pub async fn group_by_bucket_query_dataframe(
+    ctx: &SessionContext,
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    use datafusion::functions_aggregate::count::count;
+    use datafusion::functions_aggregate::sum::sum;
+
+    ctx.table("orders")
+        .await?
+        .with_column("bucket", col("id") % lit(1000_i64))?
+        .aggregate(
+            vec![col("bucket")],
+            vec![
+                count(lit(1)).alias("order_count"),
+                sum(col("amount")).alias("total_amount"),
+            ],
+        )?
+        .sort(vec![col("bucket").sort(true, false)])?
+        .collect()
+        .await
+}
+
+/// Runs a multi-predicate filter (`amount > 50.00 AND note IS NOT NULL`) over
+/// `orders`, collapsed to a single `COUNT(*)`/`SUM(amount)` row, via the SQL
+/// API. Exercises the fixture's `note` column (nullable, ~1-in-7 rows null at
+/// M3.8 scale) alongside the existing `amount` filter, testing
+/// predicate-pushdown/selectivity with two conditions instead of one.
+///
+/// # Errors
+///
+/// Returns a [`DataFusionError`] if the query cannot be planned or executed.
+pub async fn multi_predicate_query_sql(
+    ctx: &SessionContext,
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    ctx.sql(
+        "SELECT COUNT(*) AS order_count, SUM(amount) AS total_amount \
+         FROM orders WHERE amount > 50.00 AND note IS NOT NULL",
+    )
+    .await?
+    .collect()
+    .await
+}
+
+/// Runs the same multi-predicate filter as [`multi_predicate_query_sql`] via
+/// the DataFrame API.
+///
+/// # Errors
+///
+/// Returns a [`DataFusionError`] if the query cannot be planned or executed.
+pub async fn multi_predicate_query_dataframe(
+    ctx: &SessionContext,
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    use datafusion::functions_aggregate::count::count;
+    use datafusion::functions_aggregate::sum::sum;
+
+    ctx.table("orders")
+        .await?
+        .filter(
+            col("amount")
+                .gt(lit(50.0_f64))
+                .and(col("note").is_not_null()),
+        )?
+        .aggregate(
+            vec![],
+            vec![
+                count(lit(1)).alias("order_count"),
+                sum(col("amount")).alias("total_amount"),
+            ],
+        )?
+        .collect()
+        .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -647,6 +745,30 @@ mod tests {
 
         let sql_batches = aggregate_query_sql(&ctx).await.expect("sql query");
         let df_batches = aggregate_query_dataframe(&ctx)
+            .await
+            .expect("dataframe query");
+
+        assert_eq!(sql_batches, df_batches);
+    }
+
+    #[tokio::test]
+    async fn group_by_bucket_query_sql_and_dataframe_paths_agree() {
+        let (ctx, _parquet) = context_over_fixture().await;
+
+        let sql_batches = group_by_bucket_query_sql(&ctx).await.expect("sql query");
+        let df_batches = group_by_bucket_query_dataframe(&ctx)
+            .await
+            .expect("dataframe query");
+
+        assert_eq!(sql_batches, df_batches);
+    }
+
+    #[tokio::test]
+    async fn multi_predicate_query_sql_and_dataframe_paths_agree() {
+        let (ctx, _parquet) = context_over_fixture().await;
+
+        let sql_batches = multi_predicate_query_sql(&ctx).await.expect("sql query");
+        let df_batches = multi_predicate_query_dataframe(&ctx)
             .await
             .expect("dataframe query");
 

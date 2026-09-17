@@ -6,3 +6,4 @@ services:
       - ./benchmark/spark-comet:/spark-comet
       - ./benchmark/join-shuffle:/join-shuffle
       - ./benchmark/m3.6:/m3.6
+      - ./benchmark/m3.8:/m3.8
