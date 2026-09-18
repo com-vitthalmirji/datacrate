@@ -13,22 +13,12 @@
 
 A Rust Cargo workspace for building a typed data pipeline: streaming CSV
 tooling, a typestate pipeline builder, and compile-time schema contracts
-today, growing toward a fuller Arrow/Parquet/DataFusion pipeline.
+today, growing toward a fuller Arrow/Parquet/DataFusion pipeline. The goal is
+a schema mismatch that fails to compile, not one that fails three hours into
+a run.
 
-## Workspace layout
-
-```
-crates/
-├── dtl-core/          lib   — ownership/borrowing/slices fundamentals, zero-copy CSV batching
-├── csv-cli/           bin   — streaming CSV column-selection CLI (csv-select)
-├── pipeline/          lib   — CSV fixture → Arrow RecordBatch conversion
-├── typestate/         lib   — typestate pipeline builder (source/transform/sink)
-├── contracts/         lib   — compile-time schema-conformance checking
-├── contracts-derive/  lib   — `#[derive(Contract)]` proc macro backing `contracts`
-└── rusty-ready/       lib   — DSA-in-Rust practice, isolated from the other crates
-│                              (exercises/ subdir: workshop compiler-error drills)
-fixtures/         deterministic test data, committed
-```
+See [Getting Started](https://com-vitthalmirji.github.io/datacrate/getting-started.html)
+for the current crate layout.
 
 ## Prerequisites
 
