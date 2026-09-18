@@ -27,7 +27,7 @@
 //! with full heap/`String`/`List` access. Rust's stable `const fn`
 //! evaluator has no heap: no `Vec`, no runtime `String` building. This
 //! crate's diagnostics are therefore, by necessity, both **bounded**
-//! ([`MAX_DIFFS`] diffs, [`MAX_PATH_DEPTH`] path segments each — a diff or
+//! (`MAX_DIFFS` diffs, `MAX_PATH_DEPTH` path segments each — a diff or
 //! path segment beyond either bound still fails the check, it just isn't
 //! individually named in the message) and **composed from fixed static
 //! strings** rather than freely formatted: each diff's optional/default
@@ -354,7 +354,7 @@ const fn mismatch_diff_labeled(
 
 /// A bounded accumulator of [`Diff`]s, standing in for CTDC's unbounded
 /// `List[Diff]` — `const fn` can't allocate, so this is a fixed-size array
-/// plus a count, exactly like [`MAX_PATH_DEPTH`]'s existing precedent.
+/// plus a count, exactly like `MAX_PATH_DEPTH`'s existing precedent.
 #[derive(Debug, Clone, Copy)]
 struct Diffs {
     items: [Option<Diff>; MAX_DIFFS],
@@ -369,7 +369,7 @@ impl Diffs {
         }
     }
 
-    /// Records `diff`, silently dropping it once [`MAX_DIFFS`] has already
+    /// Records `diff`, silently dropping it once `MAX_DIFFS` has already
     /// been reached — the check still fails, this only bounds how many
     /// diffs get individually named.
     const fn push(&mut self, diff: Diff) {
@@ -426,7 +426,7 @@ const fn policy_mode(policy: SchemaPolicy) -> Mode {
 }
 
 /// Compares `producer` against `contract` under `policy`, returning every
-/// diff the traversal finds (bounded by [`MAX_DIFFS`]), already filtered per
+/// diff the traversal finds (bounded by `MAX_DIFFS`), already filtered per
 /// `policy`'s CTDC-matching rules. `conforms` is defined in terms of this
 /// function's result being empty, so the two can never disagree.
 const fn diagnose_all(producer: TypeShape, contract: TypeShape, policy: SchemaPolicy) -> Diffs {
@@ -694,7 +694,7 @@ const fn compare_shapes(
 }
 
 /// Appends `seg` to `path` at `depth`, returning the (possibly unchanged)
-/// path and the next depth. Once `depth` reaches [`MAX_PATH_DEPTH`], further
+/// path and the next depth. Once `depth` reaches `MAX_PATH_DEPTH`, further
 /// segments are silently dropped — the same disclosed truncation
 /// `MAX_PATH_DEPTH` has always documented.
 const fn append_segment(
@@ -928,7 +928,7 @@ where
     Policy: SchemaPolicyMarker,
 {
     /// Panics at compile time if `Producer` does not conform to `ContractT`
-    /// under `Policy`, naming up to [`MAX_DIFFS`] mismatched/missing/extra
+    /// under `Policy`, naming up to `MAX_DIFFS` mismatched/missing/extra
     /// fields (dotted path, e.g. `shipTo.zip`) in the panic message.
     ///
     /// Built with `const_panic::concat_panic!` rather than
@@ -938,7 +938,7 @@ where
     /// it's given, so each diff's fixed-size path segments are passed as
     /// individual arguments (with per-slot separators) rather than
     /// pre-joined into a string — no string-building dependency needed for
-    /// a fixed number of slots. Hand-unrolled per [`MAX_DIFFS`] slot, the
+    /// a fixed number of slots. Hand-unrolled per `MAX_DIFFS` slot, the
     /// same acceptable tradeoff already used for `MAX_PATH_DEPTH`.
     pub const CHECK: () = {
         let diffs = diagnose_all(Producer::SHAPE, ContractT::SHAPE, Policy::POLICY);

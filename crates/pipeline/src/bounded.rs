@@ -240,7 +240,7 @@ fn consume_batches(
 /// file.
 ///
 /// `thread::scope` only returns once the producer thread has observed
-/// [`consume_batches`]'s receiver drop (as a `SendError`, if it was blocked
+/// `consume_batches`'s receiver drop (as a `SendError`, if it was blocked
 /// on `send()`) and returned, so the rename/cleanup step below never races
 /// a still-running producer.
 ///

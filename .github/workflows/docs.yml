@@ -34,8 +34,7 @@ jobs:
         with:
           filters: |
             docs:
-              - 'crates/dtl-core/**'
-              - 'crates/csv-cli/**'
+              - 'crates/**'
               - 'book/**'
               - '.github/workflows/docs.yml'
 
@@ -52,7 +51,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: mdbook@0.5.4
-      - run: cargo doc --no-deps -p dtl-core -p csv-select-cli
+      - run: cargo doc --workspace --no-deps
       - run: mdbook build book
 
   deploy:
@@ -73,7 +72,7 @@ jobs:
         with:
           tool: mdbook@0.5.4
       - run: mdbook build book
-      - run: cargo doc --no-deps -p dtl-core -p csv-select-cli
+      - run: cargo doc --workspace --no-deps
       - run: |
           mkdir -p book/book/api
           cp -r target/doc/* book/book/api/
