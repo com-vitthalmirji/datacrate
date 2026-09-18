@@ -8,7 +8,7 @@ Accepted
 
 `crates/contracts` checks schema conformance inside a `const fn`, evaluated at
 compile time, so a mismatch is a real `rustc` compile error anchored at the
-call site. This has no heap available, which gives it two limits: only the
+call site. Without heap access, this imposes two limits: only the
 first 8 diffs in a mismatch are named, and each diff's wording comes from
 fixed string literals, not free-form formatting.
 
