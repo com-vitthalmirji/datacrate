@@ -27,7 +27,7 @@ configuration.
 ## Consequences
 The dependency tree is checked on two axes (known vulnerabilities, and license/source/duplication
 policy) instead of one, and every suppressed advisory has a written justification attached to it
-rather than existing only as an unexplained ignore line — anyone auditing the policy later can see
+rather than existing only as an unexplained ignore line - anyone auditing the policy later can see
 why each one was judged safe. The tradeoff is that these ignore entries need periodic revisiting:
 an advisory judged safe under "trusted infrastructure input only" stops being safe if the pipeline
 ever starts parsing object-store responses from an untrusted source.

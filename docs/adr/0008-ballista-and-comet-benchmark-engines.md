@@ -8,7 +8,7 @@ Demonstrating DataFusion's story credibly needs more than a single-node benchmar
 distributed-execution comparison (does a DataFusion-based query engine scale across machines the
 way Spark does?) and a real Spark-acceleration comparison (how much of Spark's cost is JVM/shuffle
 overhead that a Rust-based execution engine removes even without replacing Spark?). Ballista answers
-the first question — it's a distributed query engine built on DataFusion. Comet answers the second —
+the first question - it's a distributed query engine built on DataFusion. Comet answers the second -
 it's a native acceleration layer that runs *inside* Spark, speeding up Spark's own execution and
 shuffle stages without replacing the Spark driver.
 

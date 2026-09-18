@@ -6,8 +6,8 @@ Accepted
 ## Context
 Ballista and Polars (see [0008](0008-ballista-and-comet-benchmark-engines.md) for why Ballista is
 here) were unconditional dependencies of the pipeline crate, even though only a handful of
-benchmark-only binaries used either of them. Every default `cargo build` of the pipeline crate —
-including builds needing only the core CSV/Arrow/Parquet/DataFusion path — compiled a full
+benchmark-only binaries used either of them. Every default `cargo build` of the pipeline crate -
+including builds needing only the core CSV/Arrow/Parquet/DataFusion path - compiled a full
 distributed-execution stack and a separate DataFrame engine it never touches.
 
 ## Decision
@@ -20,8 +20,8 @@ declaring it directly, since a dependency's transitive features shouldn't be loa
 crate's own direct usage.
 
 ## Consequences
-`cargo build -p pipeline` with no feature flags — the path every other crate in the workspace, and
-the default release build, actually takes — no longer compiles either Ballista or Polars. Anyone
+`cargo build -p pipeline` with no feature flags - the path every other crate in the workspace, and
+the default release build, actually takes - no longer compiles either Ballista or Polars. Anyone
 running the benchmark suite opts in explicitly with the relevant feature flag. The tradeoff is one
 more thing to remember when adding a new benchmark binary: it needs its own `required-features`
 entry, or it silently becomes part of the default build again.

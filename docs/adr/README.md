@@ -10,7 +10,7 @@ supersedes it, and mark the old one's Status as `Superseded by ADR-XXXX`.
 
 - [0001. Proc-macro build-script diagnostics](0001-proc-macro-build-script-diagnostics.md)
 - [0002. Cargo workspace restructure](0002-cargo-workspace-restructure.md)
-- [0003. DSA practice crate isolation](0003-dsa-practice-crate-isolation.md)
+- [0003. Rust practice crate isolation](0003-rust-practice-crate-isolation.md)
   - [0003.1. Workshop exercises placement](0003.1-workshop-exercises-placement.md)
 - [0004. Object-store I/O scope and async shim](0004-object-store-io-scope-and-async-shim.md)
 - [0005. Bounded pipeline backpressure](0005-bounded-pipeline-backpressure.md)

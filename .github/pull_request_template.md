@@ -4,7 +4,7 @@
 
 ## Why
 
-<!-- The motivation — what problem this solves or what it enables. -->
+<!-- The motivation - what problem this solves or what it enables. -->
 
 ## Checklist
 
