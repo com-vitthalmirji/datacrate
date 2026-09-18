@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -41,7 +42,7 @@ jobs:
   build:
     needs: changes
     runs-on: ubuntu-latest
-    if: "needs.changes.outputs.docs == 'true' && !contains(github.event.head_commit.message, '[skip ci]') && !contains(github.event.head_commit.message, '[skip release]')"
+    if: "(needs.changes.outputs.docs == 'true' || github.event_name == 'workflow_dispatch') && !contains(github.event.head_commit.message, '[skip ci]') && !contains(github.event.head_commit.message, '[skip release]')"
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
