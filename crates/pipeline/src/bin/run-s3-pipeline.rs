@@ -4,7 +4,7 @@
 //! (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_ENDPOINT_URL`,
 //! `AWS_REGION`, `AWS_ALLOW_HTTP`), picked up by
 //! [`object_store::aws::AmazonS3Builder::from_env`] — no MinIO-specific flag
-//! plumbing needed.
+//! plumbing needed. See docs/adr/0004-object-store-io-scope-and-async-shim.md.
 
 use std::process::ExitCode;
 

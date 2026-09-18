@@ -6,6 +6,8 @@
 //! output path and is renamed into place only after a full, successful
 //! close. Any error or cancellation removes the staged file instead of
 //! publishing partial output.
+//!
+//! See docs/adr/0005-bounded-pipeline-backpressure.md.
 
 use std::fs::File;
 use std::path::{Path, PathBuf};

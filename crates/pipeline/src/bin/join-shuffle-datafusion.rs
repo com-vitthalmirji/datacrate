@@ -20,7 +20,7 @@ use pipeline::datafusion_query::{join_aggregate_query_sql, register_orders, regi
 
 /// Bounds the in-memory `FairSpillPool` so the join spills to disk instead of
 /// growing unbounded and swap-thrashing the OS — the default `RuntimeEnv` has
-/// no memory limit at all.
+/// no memory limit at all. See docs/adr/0007-datafusion-resource-control.md.
 const MEMORY_POOL_SIZE_BYTES: usize = 40 * 1024 * 1024 * 1024;
 /// Disk quota for spilled data, matching the raised quota already used by
 /// `ballista-executor-scale` for the same 91GB dataset.
@@ -79,7 +79,8 @@ async fn run() -> Result<(), CliError> {
         .unwrap_or(1);
     // HashJoinExec's build side has no disk-spill fallback (collects the
     // whole build side or fails); SortMergeJoinExec does spill, so force it
-    // for a build side too large to fit in the memory pool.
+    // for a build side too large to fit in the memory pool. See
+    // docs/adr/0007.1-hash-join-build-side-spill-gap.md.
     let config = SessionConfig::new()
         .with_target_partitions(target_partitions)
         .set_bool("datafusion.optimizer.prefer_hash_join", false);

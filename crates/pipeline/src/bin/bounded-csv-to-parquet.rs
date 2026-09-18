@@ -2,7 +2,8 @@
 //! batched, bounded-memory [`pipeline::bounded::run_bounded_pipeline`]
 //! directly against local files (no object store), so its peak memory can be
 //! compared against the naive whole-file-in-a-`Vec` approach on identical
-//! input, with S3 I/O excluded from both sides.
+//! input, with S3 I/O excluded from both sides. See
+//! docs/adr/0005.1-stream-object-store-io-in-chunks.md.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
