@@ -8,7 +8,7 @@
 //! execution via `DataFrame::execute_stream`, aggregate spilling, the
 //! hash-join build-side failure path, and stream-drop cleanup - all proven
 //! directly against the pinned `datafusion = "55.1.0"` source, not assumed
-//! from docs (see the Week 9 correction in `docs/internals/workshop/M3.md`).
+//! from docs.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -424,10 +424,9 @@ pub fn context_with_filter_pushdown() -> SessionContext {
 /// memory limit and spills to `spill_dir`.
 ///
 /// `with_temp_file_path(spill_dir)` is set even though the default
-/// `DiskManager` already spills to the OS temp directory (see the Week 9
-/// correction in `docs/internals/workshop/M3.md`) - it exists here purely so
-/// tests can point at a known, inspectable directory rather than the shared
-/// OS temp dir.
+/// `DiskManager` already spills to the OS temp directory - it exists here
+/// purely so tests can point at a known, inspectable directory rather than
+/// the shared OS temp dir.
 ///
 /// # Errors
 ///
@@ -1137,14 +1136,12 @@ mod tests {
         let ctx = SessionContext::new();
 
         // Re-verified 2026-09-14 against datafusion 55.1.0 (this crate's
-        // pinned version) - M3.md's Week 8 CAST bullet, sourced against
-        // DataFusion Comet's older Spark-parity tracking, is stale for this
-        // version: DataFusion no longer returns NULL for malformed
-        // string-to-decimal casts. Only a well-formed integer-looking string
+        // pinned version): DataFusion no longer returns NULL for malformed
+        // string-to-decimal casts, diverging from DataFusion Comet's older
+        // Spark-parity tracking. Only a well-formed integer-looking string
         // ("0") succeeds; every other malformed case errors out of the
         // `simplify_expressions` optimizer rule instead of producing a NULL
-        // or a 0.0. See docs/internals/notes/decisions.md for the Week 8
-        // entry recording this correction.
+        // or a 0.0.
         let well_formed = ctx
             .sql("SELECT CAST('0' AS DECIMAL(10,2)) AS d")
             .await
@@ -1240,9 +1237,8 @@ mod tests {
         let err = result.expect_err("query must fail under this memory limit");
         assert!(
             matches!(err.find_root(), DataFusionError::ResourcesExhausted(_)),
-            "hash join build side has no spill fallback in datafusion 55.1.0 (see \
-             docs/internals/workshop/M3.md's Week 9 correction) - expected \
-             ResourcesExhausted at the root, got: {err:?}"
+            "hash join build side has no spill fallback in datafusion 55.1.0 - \
+             expected ResourcesExhausted at the root, got: {err:?}"
         );
     }
 

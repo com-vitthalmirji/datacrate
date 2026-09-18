@@ -6,9 +6,8 @@
 //! Deterministic, no RNG, same convention as the orders generator: each
 //! order id's shipment count is `id % 3` (0, 1, or 2 shipments), matching
 //! `fixtures/m3/shipments.csv`'s established 0/1/2-shipments-per-order mix
-//! (`docs/internals/notes/decisions.md`, 2026-09-16 "M3.8 scoped" entry) so
-//! `join_aggregate_query_sql`'s inner join has the same shape at scale as it
-//! does at M3.7's small-fixture scale, just with a real row count behind it.
+//! so `join_aggregate_query_sql`'s inner join has the same shape at scale
+//! as it does at small-fixture scale, just with a real row count behind it.
 //!
 //! Run: `cargo run --release --package pipeline --example scale_benchmark_shipments -- \
 //!   --output benchmark/m3.8/shipments.parquet --order-rows 5000000`

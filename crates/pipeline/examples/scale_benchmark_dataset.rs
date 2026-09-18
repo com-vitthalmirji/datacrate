@@ -2,8 +2,7 @@
 //! `--partitions N > 1`, a directory of N Parquet files) at whatever row
 //! count is requested, streaming row-group by row-group so the total size
 //! isn't bounded by RAM (the M3.5/M3.7 generators build one in-memory batch,
-//! which doesn't scale to the ~100GB candidate M3.6 targets - see
-//! `docs/internals/notes/decisions.md`, 2026-09-15 "M3.6 scoped" entry).
+//! which doesn't scale to ~100GB targets).
 //! Partitioning lets every M3.6 engine (DataFusion, Ballista, Polars, Spark)
 //! register the output as one table without a post-hoc file-splitting step.
 //!

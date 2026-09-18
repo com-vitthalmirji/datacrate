@@ -4,8 +4,7 @@
 //! is the correctness reference every other leg (Ballista, Polars, Spark,
 //! Spark+Comet) is diffed against before any wall-clock number is trusted.
 //! `--query` defaults to `aggregate` (M3.6's original single-shape leg);
-//! `group-by-bucket` and `multi-predicate` are the M3.8 additions
-//! (`docs/internals/notes/decisions.md`, "M3.8 scoped" entry) — same table,
+//! `group-by-bucket` and `multi-predicate` are later additions — same table,
 //! same binary, since all three are variations of one benchmark leg rather
 //! than independently-evolving legs.
 

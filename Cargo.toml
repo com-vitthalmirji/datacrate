@@ -3,9 +3,9 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.lints.clippy]
-# No unwrap() anywhere — matches this project's "no unwrap on any reachable
-# path" rule (CLAUDE.md); combined with `-D warnings` in `just lint`/CI, this
-# turns any unwrap() into a hard build failure, not just a style nit.
+# No unwrap() anywhere reachable from user/file/participant input. Combined
+# with `-D warnings` in `just lint`/CI, this turns any unwrap() into a hard
+# build failure, not just a style nit.
 unwrap_used = "warn"
 # Catch stray debugging leftovers before they ship.
 dbg_macro = "warn"

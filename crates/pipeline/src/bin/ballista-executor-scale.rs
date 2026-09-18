@@ -5,8 +5,7 @@
 //! nor `--memory-pool-size` reach this setting: `--memory-pool-size` sizes
 //! the in-memory `FairSpillPool` that decides *when* a query starts
 //! spilling, not the on-disk quota for how much spilled data may
-//! accumulate. See docs/internals/notes/decisions.md, M3.8 disk-spill-limit
-//! entry.
+//! accumulate.
 //!
 //! Accepts every `ballista-executor` flag (via `#[command(flatten)]`) plus
 //! `--max-temp-directory-size`.
