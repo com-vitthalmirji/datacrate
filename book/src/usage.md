@@ -31,7 +31,7 @@ stdout before the error is detected and the process exits non-zero.
 `dtl-core` is a hands-on Rust fundamentals library, organized by topic:
 `ownership`, `borrowing`, `references`, `slices`, and `csv_zero_copy` (a
 lifetime-bound, zero-copy CSV row splitter). Each module and public item has
-rustdoc comments with runnable examples — the full API reference is generated
+rustdoc comments with runnable examples - the full API reference is generated
 from those comments and published at
 [docs.rs/dtl-core](https://docs.rs/dtl-core) and
 [alongside this guide](api/dtl_core/index.html) (or locally via
