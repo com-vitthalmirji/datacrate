@@ -6,6 +6,8 @@ services:
       - "9000:9000"   # S3 API — this is the port run-s3-pipeline talks to
       - "9001:9001"   # web console — open this one in a browser
     environment:
+      # MinIO's own well-known local-dev default, not a leaked credential.
+      # This container only ever runs on localhost.
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
     volumes:

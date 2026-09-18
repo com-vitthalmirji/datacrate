@@ -1,9 +1,8 @@
-//! M4 pulled forward (`decisions.md`, 2026-09-13): the minimal object-store
-//! edge the M2 smoke test needs. `object_store::ObjectStore`'s API is
-//! `async fn`-only, so each function here owns a short-lived, single-thread
-//! Tokio runtime just for its own `block_on` — no async spreads past this
-//! module. [`crate::bounded::run_bounded_pipeline`] itself stays fully
-//! synchronous.
+//! The minimal object-store edge the M2 smoke test needs, pulled forward
+//! from M4. `object_store::ObjectStore`'s API is `async fn`-only, so each
+//! function here owns a short-lived, single-thread Tokio runtime just for
+//! its own `block_on` — no async spreads past this module.
+//! [`crate::bounded::run_bounded_pipeline`] itself stays fully synchronous.
 //!
 //! This only stays sound as long as nothing calls into this module from
 //! inside an already-running Tokio runtime: nesting `block_on` inside async
@@ -11,9 +10,9 @@
 //! against, and it panics deep inside Tokio's internals rather than at this
 //! module's boundary. `block_on` below asserts that invariant explicitly so
 //! a violation fails immediately and points at the fix, instead of surfacing
-//! as an unexplained panic somewhere else. `decisions.md`'s 2026-09-14 entry
-//! has the M3 migration plan (switch to `tokio::task::spawn_blocking` once
-//! this module is reached from async code).
+//! as an unexplained panic somewhere else. The migration plan is to switch
+//! to `tokio::task::spawn_blocking` once this module is reached from async
+//! code.
 
 use std::fs::File;
 use std::io::{Read, Write};

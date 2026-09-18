@@ -10,7 +10,8 @@ supersedes it, and mark the old one's Status as `Superseded by ADR-XXXX`.
 
 - [0001. Proc-macro build-script diagnostics](0001-proc-macro-build-script-diagnostics.md)
 - [0002. Cargo workspace restructure](0002-cargo-workspace-restructure.md)
-- [0003. DSA practice crate isolation](0003-dsa-practice-crate-isolation.md)
+- [0003. Rust practice crate isolation](0003-rust-practice-crate-isolation.md)
+  - [0003.1. Workshop exercises placement](0003.1-workshop-exercises-placement.md)
 - [0004. Object-store I/O scope and async shim](0004-object-store-io-scope-and-async-shim.md)
 - [0005. Bounded pipeline backpressure](0005-bounded-pipeline-backpressure.md)
   - [0005.1. Stream object-store I/O in chunks](0005.1-stream-object-store-io-in-chunks.md)
@@ -20,3 +21,6 @@ supersedes it, and mark the old one's Status as `Superseded by ADR-XXXX`.
   - [0007.1. Hash-join build-side spill gap](0007.1-hash-join-build-side-spill-gap.md)
 - [0008. Ballista and Comet benchmark engines](0008-ballista-and-comet-benchmark-engines.md)
   - [0008.1. DataFusion/Polars comparison is scale-dependent](0008.1-datafusion-polars-comparison-is-scale-dependent.md)
+- [0009. Supply-chain policy gate](0009-supply-chain-policy-gate.md)
+- [0010. Optional Cargo features for benchmark engines](0010-optional-cargo-features-for-benchmark-engines.md)
+- [0011. Align local and CI build profiles](0011-align-local-and-ci-build-profiles.md)

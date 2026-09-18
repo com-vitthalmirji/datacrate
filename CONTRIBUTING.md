@@ -7,13 +7,13 @@ shared repo so history stays readable and CI stays trustworthy.
 
 1. `just verify` must pass on a clean checkout before you branch.
 2. Run `just install-hooks` once per clone to enable the pre-commit check
-   (`just verify` before every commit — see `.githooks/pre-commit`).
+   (`just verify` before every commit - see `.githooks/pre-commit`).
 
 ## Branching
 
 [Trunk-based / GitHub Flow](https://docs.aws.amazon.com/prescriptive-guidance/latest/choosing-git-branch-approach/git-branching-strategies.html):
 short-lived branches off `main`, merged back once `just verify` passes. No
-long-lived `develop`/`release` branches — Git Flow's ceremony isn't earned
+long-lived `develop`/`release` branches - Git Flow's ceremony isn't earned
 by a project this size.
 
 - Branch names: `<type>/<short-description>`, e.g. `feat/csv-select-cli`,
@@ -43,19 +43,18 @@ a `BREAKING CHANGE:` footer explaining the impact.
 
 ## Pull requests
 
-Even reviewing your own PRs is useful — it's a second look before it lands on
+Even reviewing your own PRs is useful - it's a second look before it lands on
 `main`.
 
 - One logical change per PR. Don't bundle unrelated fixes.
 - PR description: what changed and why, not a restatement of the diff.
 - `just verify` (fmt, clippy with warnings denied, tests, release build, `git
   diff --check`) must pass locally and in CI before merging.
-- Squash-merge to keep `main` history one commit per logical change.
 
 ## Code style
 
 - Formatting and lint configuration live in `rustfmt.toml` and the
-  `[workspace.lints.clippy]` table in the root `Cargo.toml` — don't fight
+  `[workspace.lints.clippy]` table in the root `Cargo.toml` - don't fight
   them with inline `#[allow(...)]` unless the reason is commented.
 - No `unwrap()` on any reachable path (enforced by `clippy::unwrap_used` +
   `-D warnings`). `.expect()` is reserved for invariants that indicate bugs,

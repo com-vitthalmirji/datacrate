@@ -8,7 +8,7 @@ Accepted
 
 `crates/contracts` checks schema conformance inside a `const fn`, evaluated at
 compile time, so a mismatch is a real `rustc` compile error anchored at the
-call site. This has no heap available, which gives it two limits: only the
+call site. Without heap access, this imposes two limits: only the
 first 8 diffs in a mismatch are named, and each diff's wording comes from
 fixed string literals, not free-form formatting.
 
@@ -28,7 +28,7 @@ Keep the `const fn` compile-time gate as the only pass/fail check. Do not
 build a proc-macro or build-script replacement now. If a real schema someday
 needs diagnostics beyond what fixed messages can say, add a `build.rs`
 pre-pass that prints a fuller message to stderr before the real compile error
-fires — additive output only, not a new source of truth, so it can't change
+fires - additive output only, not a new source of truth, so it can't change
 whether a build passes or fails.
 
 ## Consequences

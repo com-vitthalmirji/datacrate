@@ -11,7 +11,7 @@ test:
 
 # Uses ci-release (thin LTO) to match what CI actually gates on — fat LTO
 # is reserved for the real shipped artifact (see binaries.yml), not local/CI
-# verification. See docs/internals/notes/decisions.md, 2026-09-17 entry.
+# verification.
 release:
     cargo build --profile ci-release --locked
 
@@ -37,7 +37,8 @@ minio-down:
 minio-reset:
     docker compose -f docker-compose.minio.yml down -v
 
-# Pinned by commit, not branch — see docs/internals/notes/decisions.md, 2026-09-15 entry.
+# Pinned by commit: Ballista's last crates.io release pins an older datafusion
+# than this workspace uses, so the crate comes straight from main instead.
 ballista-install:
     cargo install --git https://github.com/apache/datafusion-ballista --rev ae9bff026ffd18b256d39b10890a2ca96e1fc836 ballista-scheduler ballista-executor
 
@@ -45,8 +46,7 @@ ballista-scheduler:
     ballista-scheduler --bind-port 50050
 
 # --memory-pool-size set explicitly (64GB host, 2 executors, ~16GB headroom
-# for OS/scheduler/client) — see docs/internals/notes/decisions.md, M3.8
-# executor-topology entry: unset defaults to 70% of host memory *per executor*
+# for OS/scheduler/client): unset defaults to 70% of host memory *per executor*
 # with vcores=all-cores, which oversubscribes a shared box badly once more
 # than one executor is running.
 ballista-executor-1:
@@ -59,8 +59,7 @@ ballista-executor-2:
 # ballista-executor-scale (crates/pipeline/src/bin/ballista-executor-scale.rs)
 # so the on-disk spill quota can be raised past the upstream 100GB default.
 # 150GB per executor (300GB combined) leaves headroom under the ~377GB free
-# on this box after the ~140GB M3.8 dataset. See
-# docs/internals/notes/decisions.md, M3.8 disk-spill-limit entry.
+# on this box after the ~140GB M3.8 dataset.
 ballista-executor-1-scale:
     cargo run --release -p pipeline --bin ballista-executor-scale --features ballista -- --scheduler-port 50050 --bind-port 50061 --bind-grpc-port 50062 --bind-health-port 50063 --work-dir /tmp/ballista-executor-1 --memory-pool-size 24GB --max-temp-directory-size 150GB
 
@@ -68,7 +67,7 @@ ballista-executor-2-scale:
     cargo run --release -p pipeline --bin ballista-executor-scale --features ballista -- --scheduler-port 50050 --bind-port 50071 --bind-grpc-port 50072 --bind-health-port 50073 --work-dir /tmp/ballista-executor-2 --memory-pool-size 24GB --max-temp-directory-size 150GB
 
 # One executor per physical core (12 on this machine) — M3.8 local[*]-equivalent
-# topology, see docs/internals/notes/decisions.md, "M3.8 Ballista local[*]" entry.
+# topology.
 ballista-executor-3:
     ballista-executor --scheduler-port 50050 --bind-port 50081 --bind-grpc-port 50082 --bind-health-port 50083 --work-dir /tmp/ballista-executor-3
 
@@ -99,8 +98,7 @@ ballista-executor-11:
 ballista-executor-12:
     ballista-executor --scheduler-port 50050 --bind-port 50171 --bind-grpc-port 50172 --bind-health-port 50173 --work-dir /tmp/ballista-executor-12
 
-# Pinned by version, checksum-verified against Maven Central — see
-# docs/internals/notes/decisions.md for the M3.5 Comet entry.
+# Pinned by version, checksum-verified against Maven Central.
 comet-jar-file := "comet-spark-spark4.1_2.13-0.16.0.jar"
 comet-maven-path := "org/apache/datafusion/comet-spark-spark4.1_2.13/0.16.0/comet-spark-spark4.1_2.13-0.16.0.jar"
 
@@ -150,8 +148,7 @@ comet-accelerated:
 comet-datafusion:
     cargo run --release -p pipeline --bin comet-aggregate-datafusion -- --input benchmark/spark-comet/orders.parquet
 
-# M3.7 joins/shuffle comparison — see docs/internals/notes/decisions.md
-# and docs/internals/notes/risks.md for scope. autoBroadcastJoinThreshold=-1
+# M3.7 joins/shuffle comparison. autoBroadcastJoinThreshold=-1
 # forces a real shuffle (sort-merge/shuffle-hash) join on both Spark legs
 # instead of silently broadcasting the smaller side.
 join-shuffle-dataset:
@@ -182,22 +179,20 @@ join-shuffle-datafusion:
 
 # Deferred Ballista shuffle leg of M3.7 — reuses the same dataset and the
 # existing 2-executor cluster (just ballista-scheduler/-executor-1/-executor-2
-# must already be running). See docs/internals/notes/risks.md row 25.
+# must already be running).
 join-shuffle-ballista:
     cargo run --release -p pipeline --bin join-shuffle-ballista --features ballista -- \
         --orders benchmark/join-shuffle/orders_join.parquet \
         --shipments benchmark/join-shuffle/shipments_join.parquet
 
 # M3.6 scale comparison — Spark-vs-Rust-ecosystem retest + DataFusion-vs-Polars.
-# See docs/internals/notes/decisions.md, 2026-09-15 "M3.6 scoped" entry.
 # Small first pass for correctness-proving before the ~100GB timed run.
 m36-dataset:
     cargo run --release -p pipeline --example scale_benchmark_dataset -- \
         --output benchmark/m3.6/orders --rows 5000000 --partitions 8
 
 # Row count derived from m36-dataset's measured 16.18 bytes/row
-# (5M rows -> 80922363 bytes), not guessed, targeting ~100GB on disk —
-# see docs/internals/notes/decisions.md, "M3.6 scoped" entry.
+# (5M rows -> 80922363 bytes), not guessed, targeting ~100GB on disk.
 m36-dataset-full:
     cargo run --release -p pipeline --example scale_benchmark_dataset -- \
         --output benchmark/m3.6/orders --rows 6600000000 --partitions 8
@@ -230,9 +225,7 @@ m36-accelerated:
 
 # M3.8 — join-at-scale + high-cardinality group-by + multi-predicate filter,
 # built in parallel with the M3 rehearsal checklist per explicit exception.
-# See docs/internals/notes/decisions.md, "M3.8 scoped" entry, and
-# docs/internals/notes/risks.md row 26. Polars is excluded from the join leg
-# (comet_ballista_framing house rule: Polars comparisons stay DataFusion-
+# Polars is excluded from the join leg (Polars comparisons stay DataFusion-
 # internal, never against Spark). Small first pass for correctness-proving
 # before the 91GB-scale timed run.
 m38-dataset:

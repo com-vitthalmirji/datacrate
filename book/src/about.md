@@ -1,8 +1,28 @@
 # About & contributing
 
-`datacrate` is a Rust Cargo workspace for building a typed data pipeline:
-streaming CSV tooling, a typestate pipeline builder, and compile-time schema
-contracts today, growing toward a fuller Arrow/Parquet/DataFusion pipeline.
+`datacrate` is an end-to-end data engineering platform in Rust: one typed
+Cargo workspace spanning the whole pipeline lifecycle - streaming ingestion,
+compile-time schema contracts, typed transforms, columnar storage (Parquet),
+a SQL/DataFrame query engine (DataFusion), distributed execution (Ballista),
+and cloud object storage - the same ground a JVM data stack covers, without
+the JVM.
+
+Schema contracts are the anchor: declare what a dataset's columns and types
+must be once, and every stage that reads or writes it is checked against
+that declaration at compile time. A schema mismatch fails `cargo build`,
+not a pipeline run three hours in.
+
+JVM data stacks pay for GC pauses and schema drift you only discover at
+runtime - this proves the same job gets done without either. Rust's
+ownership model and compile-time schema contracts catch memory and schema
+bugs before a job ever runs, with Arrow, DataFusion, and Ballista supplying
+the columnar engine and distributed execution - all in one Cargo workspace
+covering ingestion, transforms, storage, query, and distributed execution
+end to end.
+
+Using Ballista or Comet feels just like Spark, so that part is easy. Rust
+itself is the hard part - once you go past using the pipeline and start
+building your own handlers and pieces.
 
 ## Contributing
 
