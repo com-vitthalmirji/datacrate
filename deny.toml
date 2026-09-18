@@ -1,5 +1,4 @@
 # cargo-deny config. See https://embarkstudios.github.io/cargo-deny/
-# Closes risks.md row 22 (supply-chain policy gate beyond known-CVE scanning).
 # cargo-audit (already running) covers known CVEs; this adds license policy,
 # banned/duplicate-dependency checks, and source allow-listing.
 
@@ -12,7 +11,6 @@ feature-depth = 1
 
 [advisories]
 ignore = [
-    # Mirrors the 2026-09-16 decision in docs/internals/notes/decisions.md:
     # object_store pulls quick-xml 0.38/0.39 for S3 XML response parsing.
     # Input is trusted infra responses, not attacker/participant-controlled,
     # and `cargo update` can't reach the fix without an upstream object_store bump.

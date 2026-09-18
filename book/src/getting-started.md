@@ -26,8 +26,8 @@ crates/
 ├── contracts/         lib   - compile-time schema-conformance checking
 ├── contracts-derive/  lib   - `#[derive(Contract)]` proc macro backing `contracts`
 └── rusty-ready/       lib   - DSA-in-Rust practice, isolated from the other crates
+│                              (exercises/ subdir: workshop compiler-error drills)
 fixtures/         deterministic test data, committed
-exercises/        ownership/compiler exercises
 ```
 
 Why `dtl-core` and not just `core`: Rust ships its own built-in `core`

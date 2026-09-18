@@ -65,9 +65,8 @@ impl From<std::io::Error> for DownloadStepError {
 /// Downloads `key` from `store` and writes it to `dest`, overwriting any
 /// existing file. Streams the object in `CHUNK_BYTES`-sized ranges rather
 /// than materializing it whole in memory, so peak RSS stays flat as the
-/// object grows (see `docs/internals/notes/decisions.md`, 2026-09-14
-/// streaming follow-up — a whole-file `get`/`bytes()` here was measured to
-/// scale peak memory linearly with input size).
+/// object grows — a whole-file `get`/`bytes()` here was measured to scale
+/// peak memory linearly with input size.
 ///
 /// # Errors
 ///

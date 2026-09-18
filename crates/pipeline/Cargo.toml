@@ -14,7 +14,6 @@ workspace = true
 # — evidence-gathering for the talk, not workshop participant code. Off by
 # default so `cargo build`/`just release` don't pay for tonic/arrow-flight's
 # dependency tree on the path participants actually take.
-# See docs/internals/notes/decisions.md, 2026-09-17 entry.
 ballista = ["dep:ballista", "dep:ballista-core", "dep:ballista-executor"]
 # scale-aggregate-polars only (Spark/DataFusion/Polars parity benchmark).
 polars = ["dep:polars"]
@@ -23,14 +22,12 @@ polars = ["dep:polars"]
 arrow = "59"
 # Ballista has no crates.io release compatible with datafusion 55.1.0 yet
 # (last release, 54.1.0, pins datafusion ^54); main tracks datafusion "55"
-# as of this commit. Pinned by rev, not branch, for reproducible builds —
-# see docs/internals/notes/decisions.md, 2026-09-15 entry.
+# as of this commit. Pinned by rev, not branch, for reproducible builds.
 ballista = { git = "https://github.com/apache/datafusion-ballista", rev = "ae9bff026ffd18b256d39b10890a2ca96e1fc836", optional = true }
 # Same pin as `ballista` above. Needed for a custom executor binary
 # (ballista-executor-scale) that overrides RuntimeEnv construction to raise
 # datafusion.runtime.max_temp_directory_size, which neither the prebuilt
-# ballista-executor CLI nor --memory-pool-size expose — see
-# docs/internals/notes/decisions.md, M3.8 disk-spill-limit entry.
+# ballista-executor CLI nor --memory-pool-size expose.
 ballista-core = { git = "https://github.com/apache/datafusion-ballista", rev = "ae9bff026ffd18b256d39b10890a2ca96e1fc836", optional = true }
 ballista-executor = { git = "https://github.com/apache/datafusion-ballista", rev = "ae9bff026ffd18b256d39b10890a2ca96e1fc836", optional = true }
 bytesize = "2"

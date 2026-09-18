@@ -4,7 +4,7 @@
 //! (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_ENDPOINT_URL`,
 //! `AWS_REGION`, `AWS_ALLOW_HTTP`), picked up by
 //! [`object_store::aws::AmazonS3Builder::from_env`] — no MinIO-specific flag
-//! plumbing needed. See `docs/internals/workshop/m2-smoke-test-tutorial.md`.
+//! plumbing needed.
 
 use std::process::ExitCode;
 

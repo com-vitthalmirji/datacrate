@@ -19,5 +19,5 @@ jobs:
           # RUSTSEC-2026-0194/0195: quick-xml DoS advisories, pulled in transitively via
           # object_store's S3 XML parsing (polars dependency). Not reachable by workshop
           # participant input. object_store pins quick-xml ^0.38, so the fixed 0.41 can't
-          # land via lockfile update alone. See docs/internals/notes/decisions.md.
+          # land via lockfile update alone.
           ignore: RUSTSEC-2026-0194,RUSTSEC-2026-0195

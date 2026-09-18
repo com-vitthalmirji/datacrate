@@ -1,6 +1,5 @@
-//! Week 6 build contract: a bounded input -> Arrow transform -> Parquet
-//! output pipeline. Synchronous by design (`CLAUDE.md`: no async until M3
-//! creates the need) — backpressure and bounded memory come from a bounded
+//! A bounded input -> Arrow transform -> Parquet output pipeline. Synchronous
+//! by design — backpressure and bounded memory come from a bounded
 //! `mpsc::sync_channel`, not from an executor.
 //!
 //! Output is staged: the writer targets a `.tmp` sibling of the requested

@@ -3,8 +3,7 @@
 //! building one giant `RecordBatch` and writing it as Parquet in a single
 //! shot — no batching, no streaming. Local files only, no object store, so
 //! the comparison against `bounded-csv-to-parquet` isolates CSV-parse/batch
-//! memory behaviour rather than S3 I/O (already fixed on both sides). See
-//! `docs/internals/notes/decisions.md`'s 2026-09-14 streaming follow-up.
+//! memory behaviour rather than S3 I/O (already fixed on both sides).
 
 use std::path::PathBuf;
 use std::process::ExitCode;
