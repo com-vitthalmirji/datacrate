@@ -35,22 +35,6 @@ Using Ballista or Comet feels just like Spark, so that part is easy. Rust
 itself is the hard part - once you go past using the pipeline and start
 building your own handlers and pieces.
 
-## Workspace layout
-
-```
-crates/
-├── dtl-core/          lib   - ownership/borrowing/slices fundamentals, zero-copy CSV batching
-├── csv-cli/           bin   - streaming CSV column-selection CLI (csv-select)
-├── pipeline/          lib   - Arrow/Parquet/DataFusion pipeline, object-store I/O,
-│                              Ballista distribution, Comet acceleration
-├── typestate/         lib   - typestate pipeline builder (source/transform/sink)
-├── contracts/         lib   - compile-time schema-conformance checking
-├── contracts-derive/  lib   - `#[derive(Contract)]` proc macro backing `contracts`
-└── rusty-ready/       lib   - general Rust practice and playground, isolated from the other crates
-│                              (exercises/ subdir: workshop compiler-error drills)
-fixtures/         deterministic test data, committed
-```
-
 See [Getting Started](https://com-vitthalmirji.github.io/datacrate/getting-started.html)
 for a walkthrough of the workspace and each chapter.
 
@@ -78,13 +62,13 @@ cargo run -p csv-select-cli --bin csv-select -- fixtures/m1/headers.csv --column
 
 ## Development
 
-| Command        | What it does                                              |
+| Command        | What it does                                               |
 |----------------|------------------------------------------------------------|
 | `just fmt`     | `cargo fmt --all --check`                                  |
 | `just lint`    | `cargo clippy --all-targets --all-features -- -D warnings` |
 | `just test`    | `cargo test --all-targets --all-features --locked`         |
-| `just release` | `cargo build --release --locked`                            |
-| `just verify`  | all of the above, plus `git diff --check`                   |
+| `just release` | `cargo build --release --locked`                           |
+| `just verify`  | all of the above, plus `git diff --check`                  |
 
 Run `just verify` before opening a pull request - it is the same check CI runs.
 
@@ -94,6 +78,22 @@ Enable the repo's pre-commit hook (runs `just verify` before each commit) once p
 
 ```sh
 git config core.hooksPath .githooks
+```
+
+## Workspace layout
+
+```
+crates/
+├── dtl-core/          lib   - ownership/borrowing/slices fundamentals, zero-copy CSV batching
+├── csv-cli/           bin   - streaming CSV column-selection CLI (csv-select)
+├── pipeline/          lib   - Arrow/Parquet/DataFusion pipeline, object-store I/O,
+│                              Ballista distribution, Comet acceleration
+├── typestate/         lib   - typestate pipeline builder (source/transform/sink)
+├── contracts/         lib   - compile-time schema-conformance checking
+├── contracts-derive/  lib   - `#[derive(Contract)]` proc macro backing `contracts`
+└── rusty-ready/       lib   - general Rust practice and playground, isolated from the other crates
+│                              (exercises/ subdir: workshop compiler-error drills)
+fixtures/         deterministic test data, committed
 ```
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for commit message conventions,

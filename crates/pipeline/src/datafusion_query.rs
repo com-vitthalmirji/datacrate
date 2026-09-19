@@ -11,6 +11,7 @@
 //! from docs. See docs/adr/0006-datafusion-query-parity-and-pushdown-proof.md
 //! and docs/adr/0007-datafusion-resource-control.md.
 
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -20,6 +21,7 @@ use arrow::array::{
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use chrono::NaiveDateTime;
 use datafusion::error::DataFusionError;
+use datafusion::execution::memory_pool::{FairSpillPool, TrackConsumersPool};
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::logical_expr::{ColumnarValue, JoinType, Volatility, col, create_udf};
 use datafusion::prelude::{SessionConfig, SessionContext, lit};
@@ -424,10 +426,22 @@ pub fn context_with_filter_pushdown() -> SessionContext {
 /// Builds a [`SessionContext`] whose `RuntimeEnv` enforces a `max_bytes`
 /// memory limit and spills to `spill_dir`.
 ///
+/// Uses [`FairSpillPool`] rather than the `with_memory_limit` builder
+/// method's default `GreedyMemoryPool`, and pins `target_partitions` to `1`
+/// rather than leaving it at the host's CPU count. Both are required,
+/// together, for the memory-limited aggregate to spill deterministically:
+/// `FairSpillPool` divides `max_bytes` evenly across however many
+/// spillable streams are running concurrently, so at 2+ partitions on a
+/// tight budget each stream's share can be smaller than the few hundred
+/// bytes one post-spill aggregate batch needs - not host-CPU-count flaky,
+/// but partition-count flaky in the same way. Pinning to 1 partition gives
+/// the single aggregate stream the whole budget. See
+/// docs/adr/0007-datafusion-resource-control.md.
+///
 /// `with_temp_file_path(spill_dir)` is set even though the default
 /// `DiskManager` already spills to the OS temp directory - it exists here
 /// purely so tests can point at a known, inspectable directory rather than
-/// the shared OS temp dir. See docs/adr/0007-datafusion-resource-control.md.
+/// the shared OS temp dir.
 ///
 /// # Errors
 ///
@@ -437,15 +451,16 @@ pub fn context_with_memory_limit(
     max_bytes: usize,
     spill_dir: &Path,
 ) -> Result<SessionContext, DataFusionError> {
+    const TRACKED_CONSUMERS: NonZeroUsize = NonZeroUsize::new(5).expect("5 is nonzero");
+
     tracing::debug!("building memory-limited SessionContext");
+    let pool = TrackConsumersPool::new(FairSpillPool::new(max_bytes), TRACKED_CONSUMERS);
     let runtime = RuntimeEnvBuilder::new()
-        .with_memory_limit(max_bytes, 1.0)
+        .with_memory_pool(Arc::new(pool))
         .with_temp_file_path(spill_dir)
         .build_arc()?;
-    Ok(SessionContext::new_with_config_rt(
-        SessionConfig::new(),
-        runtime,
-    ))
+    let config = SessionConfig::new().with_target_partitions(1);
+    Ok(SessionContext::new_with_config_rt(config, runtime))
 }
 
 /// Runs the row-level filter/projection/ordering query (`amount > 50.00`,
