@@ -119,9 +119,11 @@ impl From<PipelineIoError> for PipelineError {
     }
 }
 
-fn accumulate_batch_stats(report: &mut PipelineReport, batch: &RecordBatch) {
-    report.batches_written += 1;
-    report.rows_written += batch.num_rows();
+fn accumulate_batch_stats(report: PipelineReport, batch: &RecordBatch) -> PipelineReport {
+    PipelineReport {
+        batches_written: report.batches_written + 1,
+        rows_written: report.rows_written + batch.num_rows(),
+    }
 }
 
 fn staging_path_for(output: &Path) -> PathBuf {
@@ -213,7 +215,7 @@ fn consume_batches(
         writer
             .write(&batch)
             .map_err(|source| PipelineIoError::WriteParquet { source })?;
-        accumulate_batch_stats(&mut report, &batch);
+        report = accumulate_batch_stats(report, &batch);
     }
 
     if cancel.is_cancelled() {
@@ -378,10 +380,10 @@ mod tests {
         let record = csv::StringRecord::from(vec!["1", "name-1", "note-1"]);
         let row = crate::parse_row(0, &record).expect("row should parse");
         let batch = crate::batch_from_rows(&[row]).expect("single-row batch should build");
-        let mut report = PipelineReport::default();
+        let report = PipelineReport::default();
 
-        accumulate_batch_stats(&mut report, &batch);
-        accumulate_batch_stats(&mut report, &batch);
+        let report = accumulate_batch_stats(report, &batch);
+        let report = accumulate_batch_stats(report, &batch);
 
         assert_eq!(report.batches_written, 2);
         assert_eq!(report.rows_written, 2);
