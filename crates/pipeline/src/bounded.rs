@@ -126,6 +126,14 @@ impl From<PipelineIoError> for PipelineError {
     }
 }
 
+fn accumulate_batch_stats(report: PipelineReport, batch: &RecordBatch) -> PipelineReport {
+    PipelineReport {
+        batches_written: report.batches_written + 1,
+        rows_written: report.rows_written + batch.num_rows(),
+        content_digest: manifest::accumulate_batch_digest(report.content_digest, batch),
+    }
+}
+
 fn staging_path_for(output: &Path) -> PathBuf {
     let mut staging = output.as_os_str().to_owned();
     staging.push(".tmp");
@@ -228,9 +236,7 @@ fn consume_batches(
         writer
             .write(&batch)
             .map_err(|source| PipelineIoError::WriteParquet { source })?;
-        report.batches_written += 1;
-        report.rows_written += batch.num_rows();
-        report.content_digest = manifest::accumulate_batch_digest(report.content_digest, &batch);
+        report = accumulate_batch_stats(report, &batch);
     }
 
     if cancel.is_cancelled() {
@@ -426,6 +432,20 @@ mod tests {
             writeln!(file, "{i},name-{i},note-{i}").expect("row should write");
         }
         (dir, path)
+    }
+
+    #[test]
+    fn accumulate_batch_stats_updates_counters() {
+        let record = csv::StringRecord::from(vec!["1", "name-1", "note-1"]);
+        let row = crate::parse_row(0, &record).expect("row should parse");
+        let batch = crate::batch_from_rows(&[row]).expect("single-row batch should build");
+        let report = PipelineReport::default();
+
+        let report = accumulate_batch_stats(report, &batch);
+        let report = accumulate_batch_stats(report, &batch);
+
+        assert_eq!(report.batches_written, 2);
+        assert_eq!(report.rows_written, 2);
     }
 
     #[test]
