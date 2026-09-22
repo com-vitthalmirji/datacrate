@@ -10,6 +10,9 @@
 
 pub mod bounded;
 pub mod datafusion_query;
+pub mod manifest;
+#[cfg(test)]
+pub(crate) mod minio_test_support;
 pub mod object_store_io;
 
 use std::fs::File;
@@ -98,6 +101,19 @@ pub enum PipelineIoError {
         /// The underlying `object_store` error.
         source: object_store::Error,
     },
+    /// An object's metadata could not be read from an
+    /// [`object_store::ObjectStore`].
+    HeadObject {
+        /// The object key whose metadata could not be read.
+        key: object_store::path::Path,
+        /// The underlying `object_store` error.
+        source: object_store::Error,
+    },
+    /// A [`manifest::CompletionManifest`] could not be serialized to JSON.
+    WriteManifest {
+        /// The underlying `serde_json` error.
+        source: serde_json::Error,
+    },
 }
 
 impl std::fmt::Display for PipelineIoError {
@@ -142,6 +158,12 @@ impl std::fmt::Display for PipelineIoError {
             PipelineIoError::UploadObject { key, source } => {
                 write!(f, "failed to upload {key}: {source}")
             }
+            PipelineIoError::HeadObject { key, source } => {
+                write!(f, "failed to read metadata for {key}: {source}")
+            }
+            PipelineIoError::WriteManifest { source } => {
+                write!(f, "failed to serialize completion manifest: {source}")
+            }
         }
     }
 }
@@ -160,7 +182,9 @@ impl std::error::Error for PipelineIoError {
                 Some(source)
             }
             PipelineIoError::DownloadObject { source, .. }
-            | PipelineIoError::UploadObject { source, .. } => Some(source),
+            | PipelineIoError::UploadObject { source, .. }
+            | PipelineIoError::HeadObject { source, .. } => Some(source),
+            PipelineIoError::WriteManifest { source } => Some(source),
         }
     }
 }
@@ -352,6 +376,20 @@ pub fn read_parquet(path: &Path) -> Result<RecordBatch, PipelineIoError> {
             .map_err(|source| PipelineIoError::ReadParquet {
                 source: ParquetError::from(source),
             })?;
+    // `concat_batches` indexes into each batch's columns by the target
+    // schema's field position without checking field count first, so it
+    // panics (rather than returning an `Err`) on a batch with fewer columns
+    // than expected. A Parquet file downloaded from object storage is
+    // untrusted input, so that mismatch must be caught here first.
+    if let Some(drifted) = batches.iter().find(|batch| batch.schema() != schema()) {
+        return Err(PipelineIoError::BuildBatch {
+            source: arrow::error::ArrowError::SchemaError(format!(
+                "expected schema {:?}, found {:?}",
+                schema(),
+                drifted.schema()
+            )),
+        });
+    }
     arrow::compute::concat_batches(&schema(), &batches)
         .map_err(|source| PipelineIoError::BuildBatch { source })
 }

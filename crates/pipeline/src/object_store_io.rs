@@ -19,9 +19,10 @@ use std::io::{Read, Write};
 use std::path::Path;
 
 use object_store::path::Path as ObjectPath;
-use object_store::{ObjectStore, ObjectStoreExt, WriteMultipart};
+use object_store::{ObjectMeta, ObjectStore, ObjectStoreExt, WriteMultipart};
 
 use crate::PipelineIoError;
+use crate::manifest::CompletionManifest;
 
 /// Chunk size for both directions: how much of the object/file is held in
 /// memory at once. Comfortably above `object_store`'s 5 MiB multipart-part
@@ -162,6 +163,70 @@ pub fn upload_from_temp(
     })
 }
 
+/// Reads `key`'s metadata from `store`, without downloading its contents —
+/// the input snapshot recorded in a [`CompletionManifest`].
+///
+/// # Errors
+///
+/// Returns [`PipelineIoError::HeadObject`] if `key`'s metadata cannot be read.
+pub fn head_object(
+    store: &dyn ObjectStore,
+    key: &ObjectPath,
+) -> Result<ObjectMeta, PipelineIoError> {
+    block_on(store.head(key)).map_err(|source| PipelineIoError::HeadObject {
+        key: key.clone(),
+        source,
+    })
+}
+
+/// Serializes `manifest` to JSON and writes it to `key` in `store`.
+///
+/// # Errors
+///
+/// Returns [`PipelineIoError::WriteManifest`] if `manifest` cannot be
+/// serialized, or [`PipelineIoError::UploadObject`] if the write to `store`
+/// fails.
+pub fn put_manifest(
+    store: &dyn ObjectStore,
+    manifest: &CompletionManifest,
+    key: &ObjectPath,
+) -> Result<(), PipelineIoError> {
+    let body =
+        serde_json::to_vec(manifest).map_err(|source| PipelineIoError::WriteManifest { source })?;
+    block_on(store.put(key, body.into())).map_err(|source| PipelineIoError::UploadObject {
+        key: key.clone(),
+        source,
+    })?;
+    Ok(())
+}
+
+/// Publishes a staged object by renaming it to its final key. `object_store`
+/// guarantees `rename` on every backend, falling back to copy-then-delete
+/// where the backend has no atomic rename (e.g. S3) — the object-store-side
+/// counterpart to [`crate::bounded::run_bounded_pipeline`]'s local
+/// staging-path-then-`fs::rename` pattern.
+///
+/// # Errors
+///
+/// Returns [`PipelineIoError::UploadObject`] if the rename fails.
+pub fn publish_staged_object(
+    store: &dyn ObjectStore,
+    from: &ObjectPath,
+    to: &ObjectPath,
+) -> Result<(), PipelineIoError> {
+    block_on(store.rename(from, to)).map_err(|source| PipelineIoError::UploadObject {
+        key: to.clone(),
+        source,
+    })
+}
+
+/// Deletes `key` from `store`, ignoring the result. For cleanup after a
+/// failure that has already been reported — a missing object at this point
+/// isn't a new error worth surfacing.
+pub fn best_effort_delete(store: &dyn ObjectStore, key: &ObjectPath) {
+    let _ = block_on(store.delete(key));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,5 +282,106 @@ mod tests {
         let dest = dir.path().join("dest.csv");
 
         let _ = download_to_temp(&store, &key, &dest);
+    }
+
+    #[test]
+    fn download_of_a_missing_key_against_a_real_backend_reports_download_object() {
+        let minio = crate::minio_test_support::MinioContainer::start(
+            "download-of-a-missing-key-against-a-real-backend",
+        );
+        let store = minio.store();
+        let key = ObjectPath::from("missing.csv");
+        let dir = tempfile::tempdir().expect("temp dir should be creatable");
+        let dest = dir.path().join("dest.csv");
+
+        let err = download_to_temp(store.as_ref(), &key, &dest)
+            .expect_err("a missing key on a real S3-compatible backend must fail, not panic");
+        assert!(matches!(err, PipelineIoError::DownloadObject { .. }));
+    }
+
+    #[test]
+    fn download_with_invalid_credentials_against_a_real_backend_reports_download_object() {
+        let minio = crate::minio_test_support::MinioContainer::start(
+            "download-with-invalid-credentials-against-a-real-backend",
+        );
+        block_on(minio.store().put(
+            &ObjectPath::from("input.csv"),
+            PutPayload::from(b"id,name,note\n1,Ada,\n".to_vec()),
+        ))
+        .expect("seeding the real backend should succeed with valid credentials");
+
+        let store = minio.store_with_credentials("minioadmin", "wrong-secret-key");
+        let key = ObjectPath::from("input.csv");
+        let dir = tempfile::tempdir().expect("temp dir should be creatable");
+        let dest = dir.path().join("dest.csv");
+
+        let err = download_to_temp(store.as_ref(), &key, &dest)
+            .expect_err("wrong credentials against a real backend must fail, not panic");
+        assert!(matches!(err, PipelineIoError::DownloadObject { .. }));
+    }
+
+    #[test]
+    fn download_with_a_near_zero_timeout_against_a_real_backend_reports_download_object() {
+        let minio = crate::minio_test_support::MinioContainer::start(
+            "download-with-a-near-zero-timeout-against-a-real-backend",
+        );
+        block_on(minio.store().put(
+            &ObjectPath::from("input.csv"),
+            PutPayload::from(b"id,name,note\n1,Ada,\n".to_vec()),
+        ))
+        .expect("seeding the real backend should succeed with a normal store");
+
+        let store = minio.store_with_timeout(std::time::Duration::from_nanos(1));
+        let key = ObjectPath::from("input.csv");
+        let dir = tempfile::tempdir().expect("temp dir should be creatable");
+        let dest = dir.path().join("dest.csv");
+
+        let err = download_to_temp(store.as_ref(), &key, &dest)
+            .expect_err("a near-zero timeout with retries exhausted must fail, not panic or hang");
+        assert!(matches!(err, PipelineIoError::DownloadObject { .. }));
+    }
+
+    #[test]
+    fn a_parquet_object_written_with_a_drifted_schema_is_rejected_after_a_real_download() {
+        use arrow::array::{ArrayRef, Int64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use parquet::basic::Compression;
+        use std::sync::Arc;
+
+        // A schema with only two of the three columns the pipeline expects —
+        // the kind of drift a real upstream writer could introduce between
+        // when an object was written and when this pipeline reads it back.
+        let drifted_schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8, false),
+        ]));
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(Int64Array::from(vec![1])),
+            Arc::new(StringArray::from(vec!["Ada"])),
+        ];
+        let drifted_batch = RecordBatch::try_new(drifted_schema, columns)
+            .expect("a batch matching its own schema should build");
+
+        let local_dir = tempfile::tempdir().expect("temp dir should be creatable");
+        let local_drifted = local_dir.path().join("drifted.parquet");
+        crate::write_parquet(&drifted_batch, &local_drifted, Compression::SNAPPY)
+            .expect("writing the drifted batch locally should succeed");
+
+        let minio = crate::minio_test_support::MinioContainer::start(
+            "a-parquet-object-written-with-a-drifted-schema",
+        );
+        let store = minio.store();
+        let key = ObjectPath::from("drifted.parquet");
+        upload_from_temp(store.as_ref(), &local_drifted, &key)
+            .expect("uploading the drifted parquet to a real backend should succeed");
+
+        let downloaded = local_dir.path().join("downloaded.parquet");
+        download_to_temp(store.as_ref(), &key, &downloaded)
+            .expect("downloading the drifted parquet from a real backend should succeed");
+
+        let err = crate::read_parquet(&downloaded)
+            .expect_err("a schema-drifted object must be rejected, not silently coerced");
+        assert!(matches!(err, PipelineIoError::BuildBatch { .. }));
     }
 }

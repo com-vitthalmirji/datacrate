@@ -34,4 +34,8 @@ echo "== pipeline build =="
 cargo build -p pipeline --locked --quiet || fail "pipeline crate does not build"
 echo "ok: pipeline builds"
 
+echo "== Docker (object-store tests need it) =="
+docker info >/dev/null 2>&1 || fail "Docker daemon is not reachable; the object_store_io failure-path tests start their own MinIO container via testcontainers and will fail with a cryptic error, not this one"
+echo "ok: Docker daemon is reachable"
+
 echo "PREFLIGHT PASSED"

@@ -34,4 +34,6 @@
   - [0009. Supply-chain policy gate](adr/0009-supply-chain-policy-gate.md)
   - [0010. Optional Cargo features for benchmark engines](adr/0010-optional-cargo-features-for-benchmark-engines.md)
   - [0011. Align local and CI build profiles](adr/0011-align-local-and-ci-build-profiles.md)
+  - [0012. Completion manifest for S3 output](adr/0012-completion-manifest-for-s3-output.md)
+  - [0013. Real MinIO container for failure-path tests](adr/0013-real-minio-container-for-failure-path-tests.md)
   - [ADR template](adr/TEMPLATE.md)

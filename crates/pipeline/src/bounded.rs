@@ -21,7 +21,11 @@ use object_store::ObjectStore;
 use object_store::path::Path as ObjectPath;
 use parquet::basic::Compression;
 
-use crate::object_store_io::{download_to_temp, upload_from_temp};
+use crate::manifest::{self, CompletionManifest};
+use crate::object_store_io::{
+    best_effort_delete, download_to_temp, head_object, publish_staged_object, put_manifest,
+    upload_from_temp,
+};
 use crate::{PipelineIoError, Row, batch_from_rows, open_parquet_writer, parse_row, schema};
 
 /// Tuning for [`run_bounded_pipeline`]: how many rows make one `RecordBatch`,
@@ -80,6 +84,9 @@ pub struct PipelineReport {
     pub batches_written: usize,
     /// Total rows written across all batches.
     pub rows_written: usize,
+    /// `manifest::accumulate_batch_digest`'s final value over every row
+    /// written — order- and batch-boundary-independent.
+    pub content_digest: u64,
 }
 
 /// Errors from [`run_bounded_pipeline`].
@@ -123,6 +130,12 @@ fn staging_path_for(output: &Path) -> PathBuf {
     let mut staging = output.as_os_str().to_owned();
     staging.push(".tmp");
     PathBuf::from(staging)
+}
+
+/// The object-store-side counterpart to [`staging_path_for`]: a `.staging`
+/// sibling key, published to `output_key` only after the upload succeeds.
+fn staging_key_for(output_key: &ObjectPath) -> ObjectPath {
+    ObjectPath::from(format!("{output_key}.staging"))
 }
 
 /// Reads `path` row by row, grouping every `batch_size` rows into a
@@ -210,6 +223,7 @@ fn consume_batches(
             .map_err(|source| PipelineIoError::WriteParquet { source })?;
         report.batches_written += 1;
         report.rows_written += batch.num_rows();
+        report.content_digest = manifest::accumulate_batch_digest(report.content_digest, &batch);
     }
 
     if cancel.is_cancelled() {
@@ -308,15 +322,27 @@ pub fn run_bounded_pipeline(
 
 /// Runs [`run_bounded_pipeline`] against objects in `store` instead of local
 /// paths: downloads `input_key` to a local temp CSV, runs the unmodified
-/// local pipeline, then uploads the resulting Parquet to `output_key`. Local
-/// disk staging keeps the bounded pipeline's memory envelope unchanged from
-/// the local-file case — only the two ends of the pipe move.
+/// local pipeline, then publishes the resulting Parquet to `output_key`.
+/// Local disk staging keeps the bounded pipeline's memory envelope unchanged
+/// from the local-file case — only the two ends of the pipe move.
+///
+/// Publishing mirrors [`run_bounded_pipeline`]'s local staging pattern on the
+/// object-store side: the upload lands at a `.staging` sibling key first,
+/// then [`publish_staged_object`] renames it to `output_key` — so a reader
+/// never observes a partially-uploaded object at the final key. Only once
+/// that rename succeeds is a [`CompletionManifest`] (row count and an
+/// order-independent content digest) written to `output_key`'s
+/// `.manifest.json` sibling; its presence is the completion signal a reader
+/// should wait for. If the manifest write fails, the published output is
+/// removed (best-effort) rather than left behind without a valid completion
+/// signal.
 ///
 /// # Errors
 ///
-/// Returns [`PipelineError::Io`] if the download, the local pipeline run, or
-/// the upload fails, or [`PipelineError::Cancelled`] if `cancel` was set
-/// before output could be published.
+/// Returns [`PipelineError::Io`] if the download, the local pipeline run, the
+/// input's metadata read, the publish, or the manifest write fails, or
+/// [`PipelineError::Cancelled`] if `cancel` was set before output could be
+/// published.
 ///
 /// # Panics
 ///
@@ -335,9 +361,27 @@ pub fn run_bounded_pipeline_s3(
     let local_input = staging_dir.path().join("input.csv");
     let local_output = staging_dir.path().join("output.parquet");
 
+    let input_meta = head_object(store, input_key)?;
     download_to_temp(store, input_key, &local_input)?;
     let report = run_bounded_pipeline(&local_input, &local_output, config, cancel)?;
-    upload_from_temp(store, &local_output, output_key)?;
+
+    let staging_key = staging_key_for(output_key);
+    upload_from_temp(store, &local_output, &staging_key)?;
+    if let Err(err) = publish_staged_object(store, &staging_key, output_key) {
+        best_effort_delete(store, &staging_key);
+        return Err(err.into());
+    }
+
+    let manifest = CompletionManifest::new(
+        input_key,
+        &input_meta,
+        report.rows_written,
+        report.content_digest,
+    );
+    if let Err(err) = put_manifest(store, &manifest, &CompletionManifest::key_for(output_key)) {
+        best_effort_delete(store, output_key);
+        return Err(err.into());
+    }
 
     Ok(report)
 }
@@ -569,5 +613,126 @@ mod tests {
                 .expect("output object bytes should be readable")
         });
         assert!(!uploaded.is_empty());
+    }
+
+    #[test]
+    fn s3_pipeline_publishes_a_manifest_and_leaves_no_staging_key_behind() {
+        use object_store::PutPayload;
+        use object_store::memory::InMemory;
+        use object_store::path::Path as ObjectPath;
+
+        let store = InMemory::new();
+        let input_key = ObjectPath::from("input.csv");
+        let output_key = ObjectPath::from("output.parquet");
+
+        let csv = std::fs::read(fixture_path("headers.csv")).expect("fixture should be readable");
+        test_block_on(store.put(&input_key, PutPayload::from(csv)))
+            .expect("seeding the in-memory store should succeed");
+
+        let report = run_bounded_pipeline_s3(
+            &store,
+            &input_key,
+            &output_key,
+            &PipelineConfig::default(),
+            &CancellationToken::new(),
+        )
+        .expect("s3 pipeline should succeed against an in-memory store");
+
+        let manifest_key = CompletionManifest::key_for(&output_key);
+        let manifest_bytes = test_block_on(async {
+            store
+                .get(&manifest_key)
+                .await
+                .expect("manifest object should exist at the .manifest.json sibling key")
+                .bytes()
+                .await
+                .expect("manifest object bytes should be readable")
+        });
+        let manifest: CompletionManifest =
+            serde_json::from_slice(&manifest_bytes).expect("manifest should be valid JSON");
+
+        assert_eq!(manifest.input_key, input_key.to_string());
+        assert_eq!(manifest.row_count, report.rows_written);
+        assert_eq!(
+            manifest.content_digest,
+            format!("{:016x}", report.content_digest)
+        );
+
+        let staging_key = staging_key_for(&output_key);
+        let staging_result = test_block_on(store.head(&staging_key));
+        assert!(
+            staging_result.is_err(),
+            "the staging key should be renamed away, not left behind after a successful publish"
+        );
+    }
+
+    #[test]
+    fn s3_pipeline_reports_head_object_when_the_input_key_is_missing_on_a_real_backend() {
+        use object_store::path::Path as ObjectPath;
+
+        let minio = crate::minio_test_support::MinioContainer::start(
+            "s3-pipeline-reports-head-object-when-the-input-key-is-missing",
+        );
+        let store = minio.store();
+        let input_key = ObjectPath::from("missing-input.csv");
+        let output_key = ObjectPath::from("output.parquet");
+
+        let err = run_bounded_pipeline_s3(
+            store.as_ref(),
+            &input_key,
+            &output_key,
+            &PipelineConfig::default(),
+            &CancellationToken::new(),
+        )
+        .expect_err("a missing input key on a real backend must fail, not panic");
+
+        assert!(matches!(
+            err,
+            PipelineError::Io(PipelineIoError::HeadObject { .. })
+        ));
+    }
+
+    #[test]
+    fn s3_pipeline_leaves_no_partial_output_on_a_real_backend_when_local_processing_fails() {
+        use object_store::PutPayload;
+        use object_store::path::Path as ObjectPath;
+
+        let minio = crate::minio_test_support::MinioContainer::start(
+            "s3-pipeline-leaves-no-partial-output-on-a-real-backend",
+        );
+        let store = minio.store();
+        let input_key = ObjectPath::from("malformed.csv");
+        let output_key = ObjectPath::from("output.parquet");
+
+        let malformed =
+            std::fs::read(fixture_path("malformed.csv")).expect("fixture should be readable");
+        test_block_on(store.put(&input_key, PutPayload::from(malformed)))
+            .expect("seeding the real backend should succeed");
+
+        let err = run_bounded_pipeline_s3(
+            store.as_ref(),
+            &input_key,
+            &output_key,
+            &PipelineConfig::default(),
+            &CancellationToken::new(),
+        )
+        .expect_err("malformed input on a real backend must fail, not publish partial output");
+
+        assert!(matches!(
+            err,
+            PipelineError::Io(PipelineIoError::ReadRecord { .. })
+        ));
+
+        let output_result = test_block_on(store.head(&output_key));
+        assert!(
+            output_result.is_err(),
+            "the final key must not exist after a run that failed before any upload"
+        );
+
+        let staging_result = test_block_on(store.head(&staging_key_for(&output_key)));
+        assert!(
+            staging_result.is_err(),
+            "no staging key should be left behind after a failed run"
+        );
     }
 }

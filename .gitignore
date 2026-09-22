@@ -9,3 +9,6 @@ benchmark/m3.6/orders/
 benchmark/m3.8/
 benchmark/m3.9-single-node/
 benchmark/parity/*.parquet
+benchmark/join-shuffle/*.parquet
+benchmark/spark-comet/*.parquet
+benchmark/reports/

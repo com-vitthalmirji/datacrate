@@ -25,6 +25,8 @@ use datafusion::execution::memory_pool::{FairSpillPool, TrackConsumersPool};
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::logical_expr::{ColumnarValue, JoinType, Volatility, col, create_udf};
 use datafusion::prelude::{SessionConfig, SessionContext, lit};
+use object_store::ObjectStore;
+use url::Url;
 
 use crate::{PipelineIoError, parse_id, read_csv_rows};
 
@@ -229,6 +231,41 @@ pub async fn register_shipments(ctx: &SessionContext, path: &Path) -> Result<(),
     ctx.register_parquet(
         "shipments",
         path.to_string_lossy().as_ref(),
+        datafusion::prelude::ParquetReadOptions::default(),
+    )
+    .await
+}
+
+/// Registers `store` on `ctx`'s `RuntimeEnv` for the `s3://<bucket>` scheme
+/// and host, then registers the Parquet object at `s3://<bucket>/<key>` as a
+/// table named `table_name`. `store`'s own bucket configuration (set via
+/// `AmazonS3Builder::with_bucket_name`) and `bucket` must agree, since
+/// DataFusion dispatches every query against this table to `store` purely by
+/// matching the URL's scheme and host — it never inspects `store` itself.
+/// This lets `ctx.sql(...)`/`ctx.table(...)` read Parquet directly from
+/// object storage, instead of the `download_to_temp`-then-register-local-path
+/// pattern [`object_store_io`](crate::object_store_io) uses for the bounded
+/// pipeline.
+///
+/// # Errors
+///
+/// Returns a [`DataFusionError`] if `bucket` cannot be parsed into a
+/// `s3://<bucket>` URL, or if the Parquet object cannot be registered.
+pub async fn register_parquet_table_from_object_store(
+    ctx: &SessionContext,
+    table_name: &str,
+    store: Arc<dyn ObjectStore>,
+    bucket: &str,
+    key: &str,
+) -> Result<(), DataFusionError> {
+    let bucket_url = Url::parse(&format!("s3://{bucket}")).map_err(|source| {
+        DataFusionError::Configuration(format!("invalid bucket {bucket:?}: {source}"))
+    })?;
+    ctx.runtime_env().register_object_store(&bucket_url, store);
+
+    ctx.register_parquet(
+        table_name,
+        &format!("s3://{bucket}/{key}"),
         datafusion::prelude::ParquetReadOptions::default(),
     )
     .await
@@ -723,6 +760,47 @@ mod tests {
             .expect("register table");
 
         (ctx, orders_parquet, parquet)
+    }
+
+    #[tokio::test]
+    async fn registers_and_queries_a_parquet_table_via_object_store() {
+        use object_store::ObjectStoreExt;
+        use object_store::PutPayload;
+        use object_store::memory::InMemory;
+
+        let batch = fixture_to_orders_batch(&fixture_path()).expect("fixture parses");
+        let parquet = tempfile::Builder::new()
+            .suffix(".parquet")
+            .tempfile()
+            .expect("temp file");
+        write_parquet(&batch, parquet.path(), Compression::SNAPPY).expect("write parquet");
+        let bytes = std::fs::read(parquet.path()).expect("read parquet bytes");
+
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        store
+            .put(
+                &object_store::path::Path::from("orders.parquet"),
+                PutPayload::from(bytes),
+            )
+            .await
+            .expect("seed object store");
+
+        let ctx = SessionContext::new();
+        register_parquet_table_from_object_store(
+            &ctx,
+            "orders",
+            store,
+            "test-bucket",
+            "orders.parquet",
+        )
+        .await
+        .expect("register table from object store");
+
+        let expected = context_over_fixture().await;
+        let local_batches = row_query_sql(&expected.0).await.expect("local query");
+        let object_store_batches = row_query_sql(&ctx).await.expect("object-store query");
+
+        assert_eq!(local_batches, object_store_batches);
     }
 
     #[tokio::test]

@@ -293,6 +293,72 @@ sense, is `object_store`'s version of Hadoop's `FileSystem` trait: one
 interface, multiple backends, and application code that never needs to know
 which one it's talking to.
 
+## Atomic isn't durable: fsync before the rename
+
+The staged-write-then-rename pattern above (write to `.tmp`, rename into
+place) guarantees a reader never observes a half-written file - that's
+atomicity. It does not by itself guarantee durability: a crash right after
+the rename "succeeds" can still lose bytes that were buffered in the OS page
+cache but never flushed, or lose the directory-entry update the rename
+itself made, depending on filesystem behavior. Those are two different
+promises, and the local pipeline `run_bounded_pipeline_s3` reuses unchanged
+(see above) makes both of them explicit rather than assuming rename implies
+fsync.
+
+The fix is two `fsync` calls, not one. First, the Parquet writer is closed
+through the path that hands back its underlying file handle - not the
+convenience method that drops it - so `sync_all()` can flush all buffered
+data, including the Parquet footer, before the rename happens. Second,
+immediately after the rename, the output's *parent directory* is opened and
+`sync_all()`'d too - that second fsync is what makes the rename's own
+directory-entry update durable, not just atomic-looking. Skipping it would
+leave a window where the file's bytes are safely on disk but the directory
+still doesn't reliably point at them after a crash.
+
+**Scala/Spark bridge**: this is the same distinction Spark's
+`FileOutputCommitter` draws between writing task output to a staging path
+and the final commit that makes it visible - "visible" and "durable" are
+different guarantees, and a committer that only handles the rename without
+forcing the underlying writes to disk has the identical gap this pipeline
+closes by hand.
+
+## The completion manifest: proof of what was written, not just that something was
+
+`run_bounded_pipeline_s3` publishes one more object after the Parquet output
+lands: a `.manifest.json` sibling of the output key
+(`CompletionManifest::key_for`, `manifest.rs:128`), written through the same
+staging-then-rename step as the output itself. Before this existed, a caller
+polling the bucket after a run had no way to confirm *what* had been
+written - row count, or whether the output's content actually matched a
+known-good input - without re-downloading and re-parsing the Parquet file.
+The manifest is proof, delivered alongside the data, so a caller can check
+it cheaply instead.
+
+The manifest carries a snapshot of the input object (key, size, ETag,
+last-modified) plus the output's row count and a content digest. The digest
+is the interesting part: it has to answer "does this output's *content*
+match what I expect" without caring about row order or which batch a row
+landed in, since the bounded pipeline streams output in chunks and nothing
+about that chunking should leak into what "the same data" means. So each
+row is hashed individually with a fixed-seed `ahash::RandomState` - fixed,
+because `ahash`'s normal per-process-random seeding is built to resist
+hash-flooding attacks against hash maps, which is exactly wrong for a
+fingerprint that must be reproducible across runs of identical content - and
+the per-row hashes are combined with wrapping `u64` addition, not XOR.
+XOR was the obvious first choice and the wrong one: `x ^ x == 0`, so a run
+that silently dropped one of two duplicate rows would XOR-hash identically
+to the correct run. Wrapping addition doesn't cancel like that
+(`accumulate_batch_digest`, `manifest.rs:57`, and the
+`duplicate_rows_do_not_cancel_out` test that pins this down,
+`manifest.rs:188`). The whole computation runs one row at a time, so the
+digest never buffers more than a single row's hash regardless of how large
+the output is - it doesn't reopen the memory-envelope question the bounded
+pipeline already answered for the rest of this path.
+
+Worth naming what the digest is not: it's a content-drift fingerprint
+(dropped, duplicated, or reordered rows), not a security boundary. It
+doesn't detect adversarial tampering, and it isn't trying to.
+
 ## Try it yourself
 
 ```sh
