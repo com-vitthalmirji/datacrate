@@ -61,7 +61,7 @@ fn run() -> Result<(), CliError> {
     };
 
     let lf = LazyFrame::scan_parquet(
-        PlPath::new(scan_path.to_string_lossy().as_ref()),
+        PlRefPath::new(scan_path.to_string_lossy().as_ref().to_string()),
         ScanArgsParquet::default(),
     )
     .map_err(CliError::Scan)?
@@ -72,7 +72,7 @@ fn run() -> Result<(), CliError> {
         // column's own precision (10), which overflows once the aggregate
         // exceeds 8 integer digits; DataFusion widens automatically.
         col("amount")
-            .cast(DataType::Decimal(Some(38), Some(2)))
+            .cast(DataType::Decimal(38, 2))
             .sum()
             .alias("total_amount"),
     ]);

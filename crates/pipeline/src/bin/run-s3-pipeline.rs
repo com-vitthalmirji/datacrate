@@ -97,6 +97,7 @@ fn run(args: &Args) -> Result<(), CliError> {
         &ObjectPath::from(args.input_key.as_str()),
         &ObjectPath::from(args.output_key.as_str()),
         &config,
+        None,
         &CancellationToken::new(),
     )
     .map_err(|source| CliError::Pipeline { source })?;

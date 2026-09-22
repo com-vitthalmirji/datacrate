@@ -47,6 +47,7 @@ fn main() -> ExitCode {
         &args.input,
         &args.output,
         &config,
+        None,
         &CancellationToken::new(),
     ) {
         Ok(report) => {

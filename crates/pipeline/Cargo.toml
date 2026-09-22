@@ -20,6 +20,10 @@ ballista = ["dep:ballista", "dep:ballista-core", "dep:ballista-executor"]
 polars = ["dep:polars"]
 
 [dependencies]
+# Per-row hashing for the completion manifest's content digest
+# (manifest.rs). Already resolved transitively via datafusion, so this adds
+# no new crate to the dependency graph.
+ahash = "0.8"
 arrow = "59"
 # Ballista has no crates.io release compatible with datafusion 55.1.0 yet
 # (last release, 54.1.0, pins datafusion ^54); main tracks datafusion "55"
@@ -40,13 +44,23 @@ csv = "1"
 datafusion = "55.1.0"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 log = "0.4"
-object_store = { version = "0.14", features = ["aws"] }
+# Pinned to match datafusion 55.1.0's exact object_store dependency (also
+# 0.13.2) so an Arc<dyn ObjectStore> built here can be registered directly
+# with DataFusion's RuntimeEnv, instead of two incompatible trait-object
+# versions coexisting in the dependency tree.
+object_store = { version = "0.13.2", features = ["aws"] }
 parquet = { version = "59.3.0", default-features = false, features = ["arrow", "snap", "zstd"] }
-polars = { version = "0.51", default-features = false, features = ["lazy", "parquet", "dtype-decimal", "fmt"], optional = true }
+polars = { version = "0.55", default-features = false, features = ["lazy", "parquet", "dtype-decimal", "fmt"], optional = true }
+# Completion manifest serialization (manifest.rs). Already resolved
+# transitively via datafusion, so this adds no new crate to the dependency
+# graph.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tempfile = "3.27.0"
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
 
 [[bin]]
 name = "ballista-aggregate"
@@ -71,3 +85,11 @@ required-features = ["ballista"]
 [[bin]]
 name = "scale-aggregate-polars"
 required-features = ["polars"]
+
+[dev-dependencies]
+# Per-test MinIO container for failure-path tests that need real S3-compatible
+# error behavior (auth failures, missing objects) — object_store::memory::InMemory
+# can't produce those. "blocking" feature avoids spreading async into this
+# crate's synchronous test code; no new transitive dependency beyond
+# testcontainers's own core (Docker CLI/API, not aws-sdk-s3).
+testcontainers = { version = "0.28", features = ["blocking"] }
