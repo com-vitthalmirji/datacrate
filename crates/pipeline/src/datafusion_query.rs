@@ -120,8 +120,10 @@ fn parse_order_row(row: usize, record: &csv::StringRecord) -> Result<OrderRow, P
 /// decimal, `placed_at` is not a valid `YYYY-MM-DDTHH:MM:SS` timestamp, or
 /// the resulting arrays cannot be assembled into a `RecordBatch`.
 pub fn fixture_to_orders_batch(path: &Path) -> Result<RecordBatch, PipelineIoError> {
-    let rows = read_csv_rows(path, parse_order_row)?;
+    rows_to_orders_batch(read_csv_rows(path, parse_order_row)?)
+}
 
+fn rows_to_orders_batch(rows: Vec<OrderRow>) -> Result<RecordBatch, PipelineIoError> {
     let ids: Int64Array = rows.iter().map(|r| r.id.0).collect();
     let amounts = Decimal128Array::from_iter_values(rows.iter().map(|r| r.amount))
         .with_precision_and_scale(10, 2)
@@ -202,8 +204,10 @@ fn parse_shipment_row(
 /// `YYYY-MM-DDTHH:MM:SS` timestamp, or the resulting arrays cannot be
 /// assembled into a `RecordBatch`.
 pub fn fixture_to_shipments_batch(path: &Path) -> Result<RecordBatch, PipelineIoError> {
-    let rows = read_csv_rows(path, parse_shipment_row)?;
+    rows_to_shipments_batch(read_csv_rows(path, parse_shipment_row)?)
+}
 
+fn rows_to_shipments_batch(rows: Vec<ShipmentRow>) -> Result<RecordBatch, PipelineIoError> {
     let order_ids: Int64Array = rows.iter().map(|r| r.order_id.0).collect();
     let carriers: StringArray = rows.iter().map(|r| Some(r.carrier.as_str())).collect();
     let shipped_ats =
@@ -683,6 +687,69 @@ mod tests {
 
     fn shipments_fixture_path() -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/m3/shipments.csv")
+    }
+
+    #[test]
+    fn rows_to_orders_batch_builds_correct_schema_and_array_lengths() {
+        let rows = vec![
+            OrderRow {
+                id: OrderId(1),
+                amount: 10000,
+                placed_at: 0,
+                note: Some("first".to_string()),
+            },
+            OrderRow {
+                id: OrderId(2),
+                amount: 250,
+                placed_at: 1,
+                note: None,
+            },
+        ];
+
+        let batch = rows_to_orders_batch(rows).expect("rows should build a batch");
+
+        assert_eq!(batch.schema(), orders_schema());
+        assert_eq!(batch.num_rows(), 2);
+        let ids = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("id column is Int64");
+        assert_eq!(ids.value(0), 1);
+        assert_eq!(ids.value(1), 2);
+        let notes = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("note column is String");
+        assert_eq!(notes.value(0), "first");
+        assert!(notes.is_null(1));
+    }
+
+    #[test]
+    fn rows_to_shipments_batch_builds_correct_schema_and_array_lengths() {
+        let rows = vec![ShipmentRow {
+            order_id: OrderId(1),
+            carrier: "ups".to_string(),
+            shipped_at: 5,
+        }];
+
+        let batch = rows_to_shipments_batch(rows).expect("rows should build a batch");
+
+        assert_eq!(batch.schema(), shipments_schema());
+        assert_eq!(batch.num_rows(), 1);
+        let order_ids = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("order_id column is Int64");
+        assert_eq!(order_ids.value(0), 1);
+        let carriers = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("carrier column is String");
+        assert_eq!(carriers.value(0), "ups");
     }
 
     async fn context_over_fixture() -> (SessionContext, NamedTempFile) {

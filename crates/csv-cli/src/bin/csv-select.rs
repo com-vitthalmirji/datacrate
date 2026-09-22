@@ -97,16 +97,22 @@ fn run(args: &Args) -> Result<(), CliError> {
 }
 
 /// Looks up `column` in `record`, reporting [`CliError::ColumnOutOfRange`] if
-/// it's missing, then writes the selected field as a one-column record.
+/// it's missing.
+fn select_field(record: &csv::StringRecord, column: usize) -> Result<&str, CliError> {
+    record.get(column).ok_or(CliError::ColumnOutOfRange {
+        column,
+        available: record.len(),
+    })
+}
+
+/// Looks up `column` in `record` via [`select_field`], then writes it as a
+/// one-column record.
 fn select_and_write<W: std::io::Write>(
     writer: &mut csv::Writer<W>,
     record: &csv::StringRecord,
     column: usize,
 ) -> Result<(), CliError> {
-    let field = record.get(column).ok_or(CliError::ColumnOutOfRange {
-        column,
-        available: record.len(),
-    })?;
+    let field = select_field(record, column)?;
     writer
         .write_record([field])
         .map_err(|source| CliError::WriteOutput { source })
@@ -143,4 +149,31 @@ fn write_no_headers<R: std::io::Read, W: std::io::Write>(
         select_and_write(writer, &record, column)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn select_field_returns_correct_field_for_valid_index() {
+        let record = csv::StringRecord::from(vec!["a", "b", "c"]);
+
+        assert_eq!(select_field(&record, 1).expect("index 1 exists"), "b");
+    }
+
+    #[test]
+    fn select_field_errors_on_out_of_range_column() {
+        let record = csv::StringRecord::from(vec!["a", "b"]);
+
+        let err = select_field(&record, 5).expect_err("index 5 is out of range");
+
+        assert!(matches!(
+            err,
+            CliError::ColumnOutOfRange {
+                column: 5,
+                available: 2
+            }
+        ));
+    }
 }
