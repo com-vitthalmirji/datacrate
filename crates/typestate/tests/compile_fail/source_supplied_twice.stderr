@@ -1,0 +1,13 @@
+error[E0599]: no method named `source` found for struct `PipelineBuilder<Present<PathBuf>, Missing, Missing>` in the current scope
+  --> tests/compile_fail/source_supplied_twice.rs:12:10
+   |
+10 |       let _ = PipelineBuilder::new()
+   |               ----------------------
+   |               |
+   |  _____________method `source` is available on `PipelineBuilder<Missing, Missing, Missing>`
+   | |
+11 | |         .source(PathBuf::from("fixtures/m1/headers.csv"))
+12 | |         .source(PathBuf::from("fixtures/m1/headers.csv"))
+   | |         -^^^^^^ private field, not a method
+   | |_________|
+   |

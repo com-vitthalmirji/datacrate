@@ -1,0 +1,13 @@
+error[E0599]: no method named `build` found for struct `RemotePipelineBuilder<Missing, Present<Box<dyn Fn(arrow::array::RecordBatch) -> arrow::array::RecordBatch>>, Present<object_store::path::Path>>` in the current scope
+  --> tests/compile_fail/remote_missing_source.rs:16:10
+   |
+13 |       let _ = RemotePipelineBuilder::new(Arc::new(InMemory::new()), PipelineConfig::default())
+   |  _____________-
+14 | |         .transform(identity)
+15 | |         .sink(ObjectPath::from("output.parquet"))
+16 | |         .build(&pipeline::bounded::CancellationToken::new());
+   | |         -^^^^^ method not found in `RemotePipelineBuilder<Missing, Present<Box<dyn Fn(arrow::array::RecordBatch) -> arrow::array::RecordBatch>>, Present<object_store::path::Path>>`
+   | |_________|
+   |
+   |
+   = note: the method was found for `RemotePipelineBuilder<Present<object_store::path::Path>, Present<Box<(dyn Fn(arrow::array::RecordBatch) -> arrow::array::RecordBatch + 'static)>>, Present<object_store::path::Path>>`

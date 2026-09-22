@@ -6020,7 +6020,9 @@ name = "typestate"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "object_store",
  "pipeline",
+ "tokio",
  "trybuild",
 ]
 

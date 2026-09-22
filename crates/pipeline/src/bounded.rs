@@ -203,6 +203,7 @@ fn consume_batches(
     receiver: Receiver<Result<RecordBatch, PipelineIoError>>,
     staging_path: &Path,
     compression: Compression,
+    transform: Option<&dyn Fn(RecordBatch) -> RecordBatch>,
     cancel: &CancellationToken,
 ) -> Result<PipelineReport, PipelineError> {
     if cancel.is_cancelled() {
@@ -218,6 +219,12 @@ fn consume_batches(
             return Err(PipelineError::Cancelled);
         }
         let batch = received?;
+        // Applied before the digest, not after: the manifest must audit what
+        // was actually written, not the raw input.
+        let batch = match transform {
+            Some(f) => f(batch),
+            None => batch,
+        };
         writer
             .write(&batch)
             .map_err(|source| PipelineIoError::WriteParquet { source })?;
@@ -272,6 +279,7 @@ pub fn run_bounded_pipeline(
     input: &Path,
     output: &Path,
     config: &PipelineConfig,
+    transform: Option<&dyn Fn(RecordBatch) -> RecordBatch>,
     cancel: &CancellationToken,
 ) -> Result<PipelineReport, PipelineError> {
     assert!(
@@ -284,7 +292,13 @@ pub fn run_bounded_pipeline(
 
     let result = thread::scope(|scope| {
         scope.spawn(|| produce_batches(input, config.batch_size, cancel, sender));
-        consume_batches(receiver, &staging_path, config.compression, cancel)
+        consume_batches(
+            receiver,
+            &staging_path,
+            config.compression,
+            transform,
+            cancel,
+        )
     });
 
     match result {
@@ -352,6 +366,7 @@ pub fn run_bounded_pipeline_s3(
     input_key: &ObjectPath,
     output_key: &ObjectPath,
     config: &PipelineConfig,
+    transform: Option<&dyn Fn(RecordBatch) -> RecordBatch>,
     cancel: &CancellationToken,
 ) -> Result<PipelineReport, PipelineError> {
     let staging_dir = tempfile::tempdir().map_err(|source| PipelineIoError::OpenOutput {
@@ -363,7 +378,7 @@ pub fn run_bounded_pipeline_s3(
 
     let input_meta = head_object(store, input_key)?;
     download_to_temp(store, input_key, &local_input)?;
-    let report = run_bounded_pipeline(&local_input, &local_output, config, cancel)?;
+    let report = run_bounded_pipeline(&local_input, &local_output, config, transform, cancel)?;
 
     let staging_key = staging_key_for(output_key);
     upload_from_temp(store, &local_output, &staging_key)?;
@@ -422,6 +437,7 @@ mod tests {
             &fixture_path("headers.csv"),
             &output,
             &PipelineConfig::default(),
+            None,
             &CancellationToken::new(),
         )
         .expect("bounded pipeline should succeed on a clean fixture");
@@ -440,6 +456,7 @@ mod tests {
             &fixture_path("headers.csv"),
             &output,
             &PipelineConfig::default(),
+            None,
             &CancellationToken::new(),
         )
         .expect("bounded pipeline should succeed on a clean fixture");
@@ -471,8 +488,9 @@ mod tests {
             ..PipelineConfig::default()
         };
 
-        let report = run_bounded_pipeline(&csv_path, &output, &config, &CancellationToken::new())
-            .expect("bounded pipeline should succeed on a larger streamed input");
+        let report =
+            run_bounded_pipeline(&csv_path, &output, &config, None, &CancellationToken::new())
+                .expect("bounded pipeline should succeed on a larger streamed input");
 
         assert_eq!(report.rows_written, 20_000);
         assert_eq!(report.batches_written, 80);
@@ -490,6 +508,7 @@ mod tests {
             &fixture_path("malformed.csv"),
             &output,
             &PipelineConfig::default(),
+            None,
             &CancellationToken::new(),
         )
         .expect_err("a malformed row should fail the pipeline, not produce partial output");
@@ -513,6 +532,7 @@ mod tests {
             &fixture_path("headers.csv"),
             &output,
             &PipelineConfig::default(),
+            None,
             &cancel,
         )
         .expect_err("a pre-cancelled token must stop the pipeline");
@@ -533,6 +553,7 @@ mod tests {
             &fixture_path("headers.csv"),
             &output,
             &PipelineConfig::default(),
+            None,
             &CancellationToken::new(),
         )
         .expect_err("staging file creation should fail when the parent directory is missing");
@@ -566,6 +587,7 @@ mod tests {
             &fixture_path("headers.csv"),
             &output,
             &config,
+            None,
             &CancellationToken::new(),
         );
     }
@@ -597,6 +619,7 @@ mod tests {
             &input_key,
             &output_key,
             &PipelineConfig::default(),
+            None,
             &CancellationToken::new(),
         )
         .expect("s3 pipeline should succeed against an in-memory store");
@@ -634,6 +657,7 @@ mod tests {
             &input_key,
             &output_key,
             &PipelineConfig::default(),
+            None,
             &CancellationToken::new(),
         )
         .expect("s3 pipeline should succeed against an in-memory store");
@@ -682,6 +706,7 @@ mod tests {
             &input_key,
             &output_key,
             &PipelineConfig::default(),
+            None,
             &CancellationToken::new(),
         )
         .expect_err("a missing input key on a real backend must fail, not panic");
@@ -714,6 +739,7 @@ mod tests {
             &input_key,
             &output_key,
             &PipelineConfig::default(),
+            None,
             &CancellationToken::new(),
         )
         .expect_err("malformed input on a real backend must fail, not publish partial output");
