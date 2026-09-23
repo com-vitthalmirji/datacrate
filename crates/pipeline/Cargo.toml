@@ -49,7 +49,7 @@ log = "0.4"
 # with DataFusion's RuntimeEnv, instead of two incompatible trait-object
 # versions coexisting in the dependency tree.
 object_store = { version = "0.13.2", features = ["aws"] }
-parquet = { version = "59.3.0", default-features = false, features = ["arrow", "snap", "zstd"] }
+parquet = { version = "60.0.0", default-features = false, features = ["arrow", "snap", "zstd"] }
 polars = { version = "0.55", default-features = false, features = ["lazy", "parquet", "dtype-decimal", "fmt"], optional = true }
 # Completion manifest serialization (manifest.rs). Already resolved
 # transitively via datafusion, so this adds no new crate to the dependency
