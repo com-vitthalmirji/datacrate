@@ -10,7 +10,7 @@ workspace = true
 
 [dependencies]
 arrow = "59"
-object_store = "0.13.2"
+object_store = "0.14.2"
 pipeline = { path = "../pipeline" }
 
 [dev-dependencies]
