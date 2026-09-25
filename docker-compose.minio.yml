@@ -1,6 +1,8 @@
 services:
   minio:
-    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+    # Built from MinIO's source (quay.io/dl.min.io no longer distribute free
+    # images/binaries) and mirrored here, multi-arch. See minio_test_support.rs.
+    image: ghcr.io/vim89/datacrate-minio:RELEASE.2025-09-07T16-13-09Z-src@sha256:b991979de4d10283c6cd418f003530dec06618bb486f85ff61b42f6944bc38cb
     command: server /data --console-address ":9001"
     ports:
       - "9000:9000"   # S3 API — this is the port run-s3-pipeline talks to

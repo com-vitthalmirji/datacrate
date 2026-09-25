@@ -85,11 +85,7 @@ fn run(args: &Args) -> Result<(), CliError> {
 
     let mut writer = csv::WriterBuilder::new().from_writer(std::io::stdout());
 
-    if args.no_headers {
-        write_no_headers(&mut reader, &mut writer, args.column)?;
-    } else {
-        write_with_headers(&mut reader, &mut writer, args.column)?;
-    }
+    write_selected_column(&mut reader, &mut writer, args.column, !args.no_headers)?;
 
     writer.flush().map_err(|source| CliError::WriteOutput {
         source: csv::Error::from(source),
@@ -118,32 +114,23 @@ fn select_and_write<W: std::io::Write>(
         .map_err(|source| CliError::WriteOutput { source })
 }
 
-fn write_with_headers<R: std::io::Read, W: std::io::Write>(
+fn write_selected_column<R: std::io::Read, W: std::io::Write>(
     reader: &mut csv::Reader<R>,
     writer: &mut csv::Writer<W>,
     column: usize,
+    has_headers: bool,
 ) -> Result<(), CliError> {
-    // `reader.headers()` returns `&StringRecord` borrowed from `reader`. That
-    // borrow must end before `reader.records()` is called below (same `&mut
-    // reader`), so the header row is cloned here rather than held by reference.
-    let headers = reader
-        .headers()
-        .map_err(|source| CliError::ReadRecord { source })?
-        .clone();
-    select_and_write(writer, &headers, column)?;
-
-    for record in reader.records() {
-        let record = record.map_err(|source| CliError::ReadRecord { source })?;
-        select_and_write(writer, &record, column)?;
+    if has_headers {
+        // `reader.headers()` returns `&StringRecord` borrowed from `reader`. That
+        // borrow must end before `reader.records()` is called below (same `&mut
+        // reader`), so the header row is cloned here rather than held by reference.
+        let headers = reader
+            .headers()
+            .map_err(|source| CliError::ReadRecord { source })?
+            .clone();
+        select_and_write(writer, &headers, column)?;
     }
-    Ok(())
-}
 
-fn write_no_headers<R: std::io::Read, W: std::io::Write>(
-    reader: &mut csv::Reader<R>,
-    writer: &mut csv::Writer<W>,
-    column: usize,
-) -> Result<(), CliError> {
     for record in reader.records() {
         let record = record.map_err(|source| CliError::ReadRecord { source })?;
         select_and_write(writer, &record, column)?;
