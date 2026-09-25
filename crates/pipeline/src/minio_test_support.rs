@@ -17,8 +17,7 @@ use testcontainers::{Container, GenericImage, ImageExt};
 // Mirrored from quay.io/minio/minio, which now rejects anonymous pulls with
 // a 401 on every tag. Pinned by digest so this can't silently drift.
 const MINIO_IMAGE: &str = "ghcr.io/vim89/datacrate-minio";
-const MINIO_TAG: &str =
-    "RELEASE.2025-09-07T16-13-09Z@sha256:9966a92a734f9411e32f4f41d7d9d826fcdc0f68c4e20b70295bd4e7c11f8a2f";
+const MINIO_TAG: &str = "RELEASE.2025-09-07T16-13-09Z@sha256:9966a92a734f9411e32f4f41d7d9d826fcdc0f68c4e20b70295bd4e7c11f8a2f";
 const MINIO_ROOT_USER: &str = "minioadmin";
 const MINIO_ROOT_PASSWORD: &str = "minioadmin";
 
