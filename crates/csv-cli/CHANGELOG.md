@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/com-vitthalmirji/datacrate/compare/csv-select-cli-v0.1.2...csv-select-cli-v0.1.3) - 2026-09-25
+
+### Other
+
+- Merge header and no-header write paths in csv-select ([#72](https://github.com/com-vitthalmirji/datacrate/pull/72))
+- Split pure calculations out of batch-write and record-select loops ([#65](https://github.com/com-vitthalmirji/datacrate/pull/65))
+
 ## [0.1.2](https://github.com/com-vitthalmirji/datacrate/compare/csv-select-cli-v0.1.1...csv-select-cli-v0.1.2) - 2026-09-13
 
 ### Other
