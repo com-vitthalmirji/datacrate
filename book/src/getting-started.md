@@ -50,6 +50,25 @@ crates/
 fixtures/         deterministic test data, committed
 ```
 
+The directory tree above shows where the code lives, not which crates
+actually depend on which. The real dependency graph is much sparser - only
+two workspace crates have a path dependency on another workspace crate at
+all:
+
+```mermaid
+flowchart LR
+    dtl-core
+    csv-cli
+    pipeline
+    rusty-ready
+    typestate -->|path dependency| pipeline
+    contracts -->|path dependency| contracts-derive
+```
+
+`dtl-core`, `csv-cli`, `pipeline`, `contracts-derive`, and `rusty-ready` never
+depend on another workspace crate - each is a leaf you can build, test, and
+reason about on its own.
+
 Why `dtl-core` and not just `core`: Rust ships its own built-in `core`
 crate (the `#![no_std]`-compatible base of the standard library). Naming a
 workspace crate `core` would shadow it - any `use core::...` elsewhere in

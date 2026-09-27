@@ -4,6 +4,7 @@
 - [Getting started](getting-started.md)
 - [Coming from Spark/Scala](spark-concept-map.md)
 - [Rust fundamentals for JVM & Python engineers](rust-fundamentals.md)
+- [Rust internals: dispatch, generics, and closures](rust-internals.md)
 - [Usage](usage.md)
 - [Ownership and streaming: `csv-select` walked through](ownership.md)
 - [Typestate pipeline builder](typestate.md)

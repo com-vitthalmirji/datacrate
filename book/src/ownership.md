@@ -70,6 +70,32 @@ exclusive borrow of the same `reader` - the borrow checker rejects it, full
 stop, no lifetime annotation fixes it, because the two borrows genuinely
 overlap in time.
 
+```mermaid
+flowchart TB
+    subgraph Rejected["Rejected: the shared borrow is still alive when the exclusive one starts"]
+        direction TB
+        R1["reader.headers() -&gt; &amp;StringRecord"] --> R2["headers: &amp;StringRecord
+(shared borrow of reader)"]
+        R2 --> R3["select_and_write(writer, headers, column)"]
+        R3 --> R4["reader.records()
+needs &amp;mut reader"]
+        R4 --> R5["compile error:
+cannot borrow reader as mutable
+while borrowed as immutable"]
+    end
+
+    subgraph Fixed["Accepted: .clone() ends the borrow before the exclusive one starts"]
+        direction TB
+        F1["reader.headers() -&gt; &amp;StringRecord"] --> F2[".clone()
+headers: StringRecord (owned)"]
+        F2 --> F3["select_and_write(writer, &amp;headers, column)"]
+        F3 --> F4["reader.records()
+needs &amp;mut reader"]
+        F4 --> F5["compiles: no borrow of
+reader is still alive"]
+    end
+```
+
 What the real code does (`csv-select.rs:120-127`):
 
 ```rust
