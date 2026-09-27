@@ -82,7 +82,25 @@ filesystems) not yet on disk at all - `rename()` on its own has no opinion
 about the durability of either the file's bytes or its own directory
 update. `file.sync_all()` forces step 1 (the content) to disk *before* the
 rename runs; `dir.sync_all()` forces step 3 (the fact that the rename
-happened) to disk afterward. This only applies to `run_bounded_pipeline`'s
+happened) to disk afterward.
+
+```mermaid
+sequenceDiagram
+    participant W as consume_batches
+    participant PC as OS page cache
+    participant Disk as Physical disk
+    participant RP as run_bounded_pipeline
+
+    W->>PC: write Parquet bytes to staging file
+    W->>Disk: file.sync_all()
+    Note over Disk: staging file content durable
+    RP->>PC: std::fs::rename(staging, output)
+    Note over PC: rename visible to other readers immediately
+    RP->>Disk: dir.sync_all()
+    Note over Disk: the rename itself is now durable
+```
+
+This only applies to `run_bounded_pipeline`'s
 local-disk path - the S3 variant (`run_bounded_pipeline_s3`, see
 [The object-store edge](object-store.md)) has no matching `fsync` call
 because S3 (and every object store `object_store` targets) already
@@ -258,6 +276,26 @@ assert!(
     matches!(err.find_root(), DataFusionError::ResourcesExhausted(_)),
     "hash join build side has no spill fallback in datafusion 55.1.0 ..."
 );
+```
+
+```mermaid
+flowchart TB
+    Start["context_with_memory_limit(1200, spill_dir)"]
+    Start --> Agg["GROUP BY note
+(hash aggregate)"]
+    Start --> Join["ORDER BY ... JOIN
+(hash join build side)"]
+
+    Agg --> AggGrow["reservation.try_grow() fails"]
+    AggGrow --> AggSpill["Arrow-Row hash table
+has a spill-to-disk path"]
+    AggSpill --> AggOk["completes: all 7 groups present,
+spill files written"]
+
+    Join --> JoinGrow["reservation.try_grow() fails"]
+    JoinGrow --> JoinNoSpill["collect_left_input has
+no spill branch"]
+    JoinNoSpill --> JoinErr["ResourcesExhausted"]
 ```
 
 **Correction**: this is a real, documented asymmetry in DataFusion 55.1.0,

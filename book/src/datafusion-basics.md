@@ -152,6 +152,22 @@ does: both compile down to the same optimized plan before execution. The
 `SessionContext` itself is the `SparkSession` analogue - one per query
 context, tables registered against it by name.
 
+This SQL-vs-DataFrame pairing, both sides proven identical by a test, is not
+one-off to this query - it's the shape every query in this file follows:
+
+```mermaid
+flowchart LR
+    subgraph Frontends["Two front ends, same table"]
+        SQL["ctx.sql(&quot;SELECT ...&quot;)"]
+        DF["ctx.table(&quot;orders&quot;)
+.filter(...).select(...)"]
+    end
+    SQL --> Plan["same optimized logical plan"]
+    DF --> Plan
+    Plan --> Exec["execution: .collect().await"]
+    Plan -.->|asserted equal by a test| Plan
+```
+
 ## Aggregation and grouping
 
 `aggregate_query_sql` (`datafusion_query.rs:496`) collapses the filtered
