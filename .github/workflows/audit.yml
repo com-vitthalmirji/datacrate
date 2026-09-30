@@ -23,4 +23,8 @@ jobs:
           # object_store's S3 XML parsing (polars dependency). Not reachable by workshop
           # participant input. object_store pins quick-xml ^0.38, so the fixed 0.41 can't
           # land via lockfile update alone. See docs/adr/0009-supply-chain-policy-gate.md.
-          ignore: RUSTSEC-2026-0194,RUSTSEC-2026-0195
+          # RUSTSEC-2025-0141: bincode unmaintained flag, pulled in transitively via
+          # polars-utils (polars is an optional, non-default feature used only by the
+          # scale-aggregate-polars benchmark binary). Not a vulnerability, and not called
+          # directly by this repo. Already ignored in deny.toml; see docs/adr/0009.
+          ignore: RUSTSEC-2026-0194,RUSTSEC-2026-0195,RUSTSEC-2025-0141
