@@ -458,6 +458,10 @@ pub async fn explain_analyze(
 /// Builds a [`SessionContext`] whose `SessionConfig` has row-level Parquet
 /// filter pushdown explicitly enabled (`ParquetOptions::pushdown_filters`,
 /// off by default in DataFusion because of past performance regressions).
+///
+/// This only assembles configuration — no Parquet file is read, and no
+/// pushdown actually happens, until a query is planned and executed against
+/// the returned context.
 pub fn context_with_filter_pushdown() -> SessionContext {
     let mut config = SessionConfig::new();
     config.options_mut().execution.parquet.pushdown_filters = true;
@@ -483,6 +487,10 @@ pub fn context_with_filter_pushdown() -> SessionContext {
 /// `DiskManager` already spills to the OS temp directory - it exists here
 /// purely so tests can point at a known, inspectable directory rather than
 /// the shared OS temp dir.
+///
+/// Like [`context_with_filter_pushdown`], this only assembles configuration —
+/// no memory is reserved and no spilling occurs until a query runs against
+/// the returned context.
 ///
 /// # Errors
 ///
