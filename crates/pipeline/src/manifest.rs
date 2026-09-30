@@ -34,6 +34,14 @@ const DIGEST_SEED_2: u64 = 0x2545_f491_4f6c_dd1d;
 const DIGEST_SEED_3: u64 = 0x9e37_79b9_7f4a_7c15;
 const DIGEST_SEED_4: u64 = 0xbf58_476d_1ce4_e5b9;
 
+/// Hashes one row's columns into the running digest.
+///
+/// `id`, `name`, and `note` must come from the same row of the fixed
+/// 3-column schema `accumulate_batch_digest` reads (`Int64` id at column 0,
+/// `Utf8` name at column 1, nullable `Utf8` note at column 2) — `note`'s
+/// `Option` encodes that column's nullability. Callers derive these via
+/// `.expect()`-guarded `downcast_ref` at those fixed indices; this function
+/// itself has no way to check column order or identity.
 fn hash_row(id: i64, name: &str, note: Option<&str>) -> u64 {
     let build_hasher =
         RandomState::with_seeds(DIGEST_SEED_1, DIGEST_SEED_2, DIGEST_SEED_3, DIGEST_SEED_4);

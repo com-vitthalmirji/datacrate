@@ -572,6 +572,23 @@ argument type doesn't unify across calls - the compiler's suggested fix is
 almost always spelling out a `for<'a>` bound the elision rules would
 otherwise have inferred silently.
 
+**Scala/FP bridge**: Scala has nothing that plays quite the same role,
+because Scala has no lifetimes at all - a lifetime is a Rust-only concept,
+so there's nothing for a Scala type to be "higher-ranked" *over* in the same
+sense. The closest structural parallel is a generic *method* rather than a
+generic type: `trait Mapper { def apply[A](x: A): A }` requires every
+implementation to work for whichever `A` the caller happens to pick, decided
+fresh per call - the same "must work for every choice, not one fixed in
+advance" shape as `for<'a> Fn(&'a T) -> U` requiring the closure to work for
+whichever `'a` the caller picks. Scala 3's polymorphic function values
+(`[A] => (x: A) => x`) get closer still - a function value itself generic
+over a type parameter, instead of needing a whole trait to carry the
+`[A]` - but even that has no lifetime analogue, for the same reason NLL and
+MIR-based borrow checking don't above: the JVM garbage collector is exactly
+what makes tracking a reference's validity window unnecessary in the first
+place, so there was never a "for every lifetime" question for Scala to need
+an answer to.
+
 **Blanket impls.** `impl<T: Display> ToString for T` - one impl body that
 covers *every* type meeting a bound, instead of one impl per concrete type
 - is how the standard library hands you `.to_string()` on anything
@@ -776,6 +793,26 @@ automatically and makes its order predictable (declared order, always) so
 you don't have to write or reason about it by hand the way you would with
 manual `try/finally` cleanup.
 
+**Locals drop in reverse order; struct fields drop in the order you wrote
+them - these are not the same rule, and mixing them up is the actual
+gotcha.** Drop glue inside a struct always walks fields in *declaration*
+order, top to bottom, as above. Local variables in a function body do the
+opposite: they drop in the *reverse* of the order they were bound,
+mirroring a stack's LIFO discipline - the last local bound is the first one
+torn down. `crates/pipeline/src/datafusion_query.rs`'s
+`dropping_stream_early_cleans_up_spill_files` test leans on exactly this,
+not as a trivia fact but as a real safety property: `spill_dir` (a
+`tempfile::tempdir()`) is bound before `ctx`, and `ctx` before `stream` - so
+even if the test let all three run out to the end of the function instead
+of dropping `stream` explicitly, the *implicit* teardown order would still
+be safe: `stream` first, then `ctx`, then `spill_dir` last, because
+reverse-declaration order happens to match the actual dependency order (the
+spill directory has to outlive anything that might still write into it).
+The test's explicit `drop(stream)` mid-body isn't there because the
+implicit order is wrong - it's there because the test wants that cleanup to
+have *already happened* before its assertions run, not merely by the time
+the function returns.
+
 **Scala/FP bridge**: enum discriminant sizing has a rough parallel in a
 Scala `sealed trait` hierarchy, except the JVM version never has this
 tradeoff at all - every case class is a separate heap object behind a
@@ -789,7 +826,13 @@ glue's closest Scala analogue is `AutoCloseable`/`try-with-resources` or a
 `Resource`/bracket pattern from cats-effect - except those require you to
 opt in explicitly at every call site, where Rust's recursive drop glue runs
 unconditionally, for every value, whether or not any field actually
-implements `Drop`.
+implements `Drop`. The locals-drop-in-reverse rule has no JVM analogue at
+all - GC finalization order is deliberately unspecified, which is exactly
+why finalizers are considered a foot-gun and `try`-with-resources exists to
+sidestep them; the closest honest parallel is nested `try/finally` blocks,
+where the innermost resource closes first purely because that's how nested
+blocks unwind syntactically. Rust gives you that same LIFO guarantee for
+every local in a flat function body, with no nesting required to get it.
 
 ## Send/Sync, atomics, and Mutex: concurrency's compile-time and runtime halves
 
@@ -1224,6 +1267,88 @@ allocate on it - but nothing walks it: each allocation's owner calls the
 `Drop` runs (the same drop-glue action from the memory-layout section
 above), at a fixed, known point your code can reason about, instead of
 "sometime the collector gets around to it."
+
+**Where a value lives: stack vs. heap, decided at compile time.** On the
+JVM, a local of an `AnyVal` type (`Int`, `Boolean`, ...) gets a plain local
+slot, but a `case class` instance is, conceptually, always a heap
+allocation behind a reference - the JVM spec doesn't even distinguish "this
+one could live on the stack."
+
+```scala
+def foo(): Unit = {
+  val x: Int = 10       // JVM local slot - not heap, not GC'd
+  val e = Employee(30)  // case class - always heap; `e` is a reference to it
+}
+```
+
+Whatever stack-allocation an `Employee` gets in practice (never escaping
+`foo`, never observed outside it) is the JIT's **escape analysis** doing
+scalar replacement *after profiling `foo` as hot enough to bother* - a
+runtime optimization the JIT is free to skip, undo, or never attempt at
+all, and one you can't read off the source.
+
+Rust makes the same decision the opposite way: it's not an optimization
+pass, it's baked into what the type *is*.
+
+```rust
+fn foo() {
+    let x: i32 = 10;              // stack
+    let e = Employee { age: 30 }; // whole struct on stack, not a reference
+}
+// scope ends -> everything freed here, no GC, no JIT guess
+```
+
+```rust,ignore
+fn foo() {
+    let e = Box::new(Employee { age: 30 }); // explicitly heap
+}
+// scope ends -> compiler inserts the free
+```
+
+| Question | Scala/JVM | Rust |
+|---|---|---|
+| Who decides stack vs. heap? | JVM at runtime (JIT, if it bothers) | You, at compile time |
+| Local `AnyVal` (`Int`, `Boolean`) | Stack slot | Stack |
+| `case class` / struct instance | Always heap, behind a reference | Stack by default, heap only via `Box` |
+| Fields inside a class/struct | Heap, inside the object | Wherever the struct itself lives |
+| Who frees the heap allocation? | GC, running in the background | Compiler-inserted drop, at scope end |
+| Can you forget to free? | No - GC handles it | No - compiler handles it, and rejects double-frees |
+| Runtime cost of cleanup | GC pauses, unpredictable | Zero - resolved at compile time |
+
+A `usize`, a `[u8; 4]`, a `PipelineIoError` enum, a `CsvBatch<'a>` struct -
+all of these are plain values, and a plain value lives wherever its owner
+lives, stack by default, moved or copied as a unit, no heap allocation
+involved at all unless something inside it explicitly asks for one (`Box`,
+`Vec`, `String`, `Arc`). `crates/dtl-core/src/csv_zero_copy.rs`'s
+`CsvBatch<'a> { records: Vec<&'a [u8]> }` makes this concrete: the `Vec`
+itself is a heap allocation (it has to be - its length isn't known at
+compile time), but every `&'a [u8]` it holds is just a pointer-and-length
+pair borrowed from someone else's buffer, sitting inline in that `Vec`'s
+heap storage with no allocation of its own. Nothing here is a JIT guess
+that might not fire; it's a fact about the type, true on every run, on
+every platform, readable straight from the struct definition.
+
+This is exactly why `CsvBatch<'a>` is worth the trouble in a pipeline
+processing millions of rows: every field it hands back is a borrow into one
+buffer Arrow/`csv` already read, not a fresh heap object per field, per
+row. On the JVM the same win needs a library (Arrow's Java implementation,
+`RecordBatch`s over a flat off-heap buffer) working *against* the runtime's
+default - `case class` per row would mean an allocation and a GC-tracked
+object per row, per field. Rust's `CsvBatch<'a>` gets that shape for free,
+because "borrow, don't allocate" is the type's default, not a library
+fighting the platform's default.
+
+**Scala/FP bridge**: this is also the precise answer to "can macros or
+Scala 3 capabilities do the same thing" - no. `scala.reflect`
+macros/Scalameta generate source code at compile time, and Scala 3's
+capture-checking ("capabilities") tracks which effects/resources a function
+is allowed to touch, closer in spirit to Rust's ownership/borrowing than to
+memory layout - neither one reaches down to "does this value get a stack
+slot or a heap allocation." That decision stays exactly where it's always
+been on the JVM: the JIT's, at runtime, invisible from the source, contingent
+on the method getting hot enough to be profiled and inlined in the first
+place. Rust's version of the same question has no runtime component to it
+at all - it's answered once, by the compiler, from the type alone.
 
 `Vec<T>`'s growth strategy is the concrete, checkable version of this:
 pushing past capacity doesn't allocate one new slot - it **doubles** the
