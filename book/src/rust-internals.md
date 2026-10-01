@@ -45,6 +45,7 @@ earns it.
 | You know this from Scala/FP | The Rust mechanism | Where it shows up in `datacrate` |
 |---|---|---|
 | The GC frees whatever's unreachable, whenever it gets around to it | Ownership: one owner, freed the instant it goes out of scope - no collector | [Ownership, borrowing, and lifetimes](#ownership-borrowing-and-lifetimes-how-the-checker-actually-works) |
+| Every value is already a GC-tracked reference; "how many owners" isn't a question you ask | `Box<T>` = exactly one owner, heap-allocated; `Rc`/`Arc<T>` = shared ownership via refcounting, clone is O(1) not a copy | [`Box`, `Rc`/`Arc`, and `Cow`](#box-rcarc-and-cow-ownership-cardinality-not-a-pointer) |
 | The JVM picks virtual-vs-inlined per call site, at runtime | You pick static (`<T: Trait>`) vs. dynamic (`dyn Trait`) dispatch, at compile time, in the source | [Static dispatch is the default](#static-dispatch-is-the-default-dyn-is-the-opt-in) |
 | Generics erased to `Object` at the bytecode level | Generics **monomorphized** - one compiled body per concrete type | [Monomorphization](#monomorphization-what-static-dispatch-by-default-costs-you) |
 | `Function1`, always a heap object, always virtually dispatched | A closure is an anonymous struct; heap + `dyn` only if you ask for it | [Closures are anonymous structs](#closures-are-anonymous-structs-not-references-to-code) |
@@ -152,6 +153,107 @@ have no Scala parallel at all - there's no borrow checker to run a dataflow
 analysis for, because the JVM's garbage collector makes the question "does
 this reference still need to be valid" moot; the checker's entire existence
 is answering a question Scala's runtime never has to ask.
+
+## `Box`, `Rc`/`Arc`, and `Cow`: ownership cardinality, not "a pointer"
+
+This is the question that actually separates "has written Rust" from "has
+internalized Rust": not "what does `Box` do" or "what does `Arc` do" in
+isolation, but *why they answer different questions*. On the JVM, every
+value already lives behind a reference the GC tracks for you, so "how many
+things point at this object, and who frees it" isn't something you normally
+reason about - the GC answers it uniformly, every time, regardless of
+whether the real answer is one owner or a hundred. Rust refuses to give you
+that uniform answer for free; it makes you pick the ownership shape, and the
+shape you pick is a different type, not a flag on the same type.
+
+**`Box<T>` answers "where does this live," while leaving ownership
+untouched.** A `Box<T>` is a single owning pointer to a heap allocation, plus
+a `Drop` impl that frees it - nothing else. No refcount, no atomics, no
+runtime bookkeeping beyond the allocation itself. Ownership is still
+*exactly one*, the same as a plain `T` on the stack; `Box` only moves that
+one owner's data to the heap, for one of two reasons: the value is
+recursive or too large to want on the stack, or you need to erase its
+concrete type behind `dyn Trait` (the closures section above, and
+[the typestate builder](typestate.md)'s `Box<dyn Fn(RecordBatch) ->
+RecordBatch>`, are exactly this second case). When a `Box<T>`'s owner goes
+out of scope, the heap memory is freed immediately and deterministically -
+there's no "maybe later, when the collector gets around to it."
+
+**`Rc<T>`/`Arc<T>` answer a completely different question: "how many
+owners does this have, and do I even know that count until runtime."**
+Cloning an `Rc`/`Arc` never copies the underlying data - it increments a
+counter and hands back a new pointer into the *same* allocation; the
+allocation is freed only when the last clone drops. `Rc<T>` uses a plain,
+non-atomic counter (safe only within one thread); `Arc<T>` uses an atomic
+counter, at a small but real runtime cost on every clone and drop, in
+exchange for being safely shareable across threads - the full mechanics of
+*why* that forces `Arc` over `Rc` in `datacrate` are in the
+[Send/Sync section](#sendsync-atomics-and-mutex-concurrencys-compile-time-and-runtime-halves)
+below. The point here is narrower: `Box` and `Arc` are not two options for
+the same job. Reaching for "should this be a `Box` or an `Arc`" as if it's
+one decision is itself the tell that the ownership question hasn't been
+asked yet. The real question is always: does this value have exactly one
+owner (keep it plain, or `Box` it only if it must live on the heap), or does
+it have to be shared among several owners whose relative lifetimes you
+don't control statically (reach for `Rc`/`Arc`, and only *then* ask whether
+it also needs to cross a thread boundary).
+
+`datacrate` has a clean example of both ends of that spectrum sitting one
+layer apart. `crates/dtl-core/src/csv_zero_copy.rs`'s `CsvBatch<'a>` picks
+the cheapest possible "exactly one owner" answer: not even a `Box`, just a
+borrow (`&'a [u8]`). The input buffer has exactly one owner - the caller -
+and `CsvBatch` only ever observes it, so there's nothing to allocate or
+refcount at all; the lifetime `'a` is the compiler's proof that the borrow
+never outlives that one owner. Arrow's `RecordBatch`, the type `CsvBatch`'s
+own doc comment explicitly contrasts itself with, makes the opposite choice
+on purpose: each column is an `Arc<dyn Array>`, because the same column data
+*genuinely* needs multiple simultaneous owners - `crates/pipeline`'s
+DataFusion physical plans clone a `RecordBatch` into several operators
+(filter, project, aggregate) that all read the same batch concurrently, and
+no single one of them owns it exclusively or briefly enough to justify a
+`Box`. Cloning a `RecordBatch` is cheap specifically *because* it's cloning
+a handful of `Arc` pointers, not the megabytes of data those pointers point
+at - the same "clone is O(1), not O(data)" property that makes `Arc<dyn
+ObjectStore>` (`crates/pipeline/src/datafusion_query.rs`,
+`crates/typestate/src/lib.rs`) cheap to pass into every concurrent upload
+task in [the bounded pipeline](#sendsync-atomics-and-mutex-concurrencys-compile-time-and-runtime-halves).
+
+**`Cow<'a, T>` (clone-on-write)** is the type that defers the borrow-vs-own
+decision to runtime instead of forcing you to commit to one at the call
+site: it holds either a borrowed `&'a T` or an owned `T`, starts borrowed,
+and only allocates an owned copy the moment something actually needs to
+mutate it. `datacrate` doesn't need one today, but the shape is worth
+recognizing because it's the idiomatic answer to a pattern that recurs in
+parsers and formatters: "usually I can just hand back a view into the
+input, but occasionally - an escaped quote in a CSV field, a path that
+needs normalizing - I have to allocate a modified copy." `Cow` lets that
+rare case pay for its own allocation without taxing the common case that
+never needed one.
+
+All three smart pointers (`Box`, `Rc`, `Arc`) implement `Deref<Target = T>`,
+which is why calling a `T` method through any of them never needs an
+explicit dereference - `boxed.some_method()` just works, deref coercion
+inserts the `*` for you. This is also exactly why it's easy to forget, until
+an interview asks you directly, that `Box<T>` and `Arc<T>` aren't
+interchangeable "pointer to `T`" types with the same ownership story -
+`Deref` deliberately hides the ownership difference behind an identical
+calling syntax.
+
+**Scala/FP bridge**: `Arc<Mutex<T>>` is the closest Rust analogue to a
+cats-effect `Ref[F, A]` or the mutable state tucked inside an Akka actor -
+shared, synchronized, mutable state reached through one logical handle.
+The difference is where the rule lives: an actor's internal state is
+private *by convention* - nothing in the JVM stops another piece of code in
+the same process from reaching in if it has a reference, it's just
+considered bad practice. `Arc<Mutex<T>>` enforces the rule in the type
+system instead - there is no way to obtain a `&T` from a `Mutex<T>` without
+going through `.lock()` first, so "touch the data without synchronizing" is
+not bad practice to avoid, it's a compile error. A bare `Arc<T>` (no
+`Mutex`), by contrast, gives you shared *read-only* access only - the Scala
+instinct "it's shared, so it must need a lock" doesn't automatically apply;
+if nothing behind the `Arc` needs mutation, no lock is needed either,
+exactly how `CancellationToken(Arc<AtomicBool>)` (below) shares a flag
+across threads using only an atomic, with no `Mutex` at all.
 
 ## Static dispatch is the default; `dyn` is the opt-in
 
