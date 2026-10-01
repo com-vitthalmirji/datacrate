@@ -24,7 +24,7 @@ polars = ["dep:polars"]
 # (manifest.rs). Already resolved transitively via datafusion, so this adds
 # no new crate to the dependency graph.
 ahash = "0.8"
-arrow = "59"
+arrow = "60"
 # Ballista has no crates.io release compatible with datafusion 55.1.0 yet
 # (last release, 54.1.0, pins datafusion ^54); main tracks datafusion "55"
 # as of this commit. Pinned by rev, not branch, for reproducible builds.

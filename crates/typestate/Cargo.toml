@@ -9,7 +9,7 @@ publish = false
 workspace = true
 
 [dependencies]
-arrow = "59"
+arrow = "60"
 object_store = "0.13.2"
 pipeline = { path = "../pipeline" }
 
