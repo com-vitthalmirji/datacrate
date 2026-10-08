@@ -25,6 +25,11 @@ polars = ["dep:polars"]
 # no new crate to the dependency graph.
 ahash = "0.8"
 arrow = "59"
+# Required to implement `datafusion::catalog::TableProvider`: the trait
+# itself is declared `#[async_trait]` by DataFusion, so any impl block needs
+# the same macro. Already resolved transitively via datafusion; this just
+# names it directly for our own `impl TableProvider` block.
+async-trait = "0.1"
 # Ballista has no crates.io release compatible with datafusion 55.1.0 yet
 # (last release, 54.1.0, pins datafusion ^54); main tracks datafusion "55"
 # as of this commit. Pinned by rev, not branch, for reproducible builds.

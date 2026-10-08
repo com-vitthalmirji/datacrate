@@ -3753,6 +3753,7 @@ version = "0.1.0"
 dependencies = [
  "ahash",
  "arrow",
+ "async-trait",
  "ballista",
  "ballista-core",
  "ballista-executor",
