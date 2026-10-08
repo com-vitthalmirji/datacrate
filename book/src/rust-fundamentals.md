@@ -56,6 +56,22 @@ let returned = takes_and_gives_back(draft);
 // handed back.
 ```
 
+**Why this is the actual argument for Rust, not just a style preference:**
+the generic case for rewriting a JVM pipeline in Rust usually gets made in
+the abstract - "GC pauses cost 100ms to over a second on a large heap, and
+the JVM carries 2-3x the memory overhead of a comparable native program."
+That claim is directionally real, but it's also exactly the kind of number
+this book refuses to repeat without checking it against something measured.
+So it was checked: running this repo's own Spark driver, locally, under
+`local[*]`, with zero GC tuning,
+peaked at 1.446 GiB of memory and started in 4.359 seconds. That's not a
+rebuttal of the generic GC argument - a real multi-executor cluster job
+under sustained load will show GC pressure the driver-only, local case
+doesn't - but it is the difference between citing a number and measuring
+one. Every performance claim later in this book follows the same rule: if
+it isn't measured on this repo's own fixtures, it's labeled a hypothesis,
+not stated as fact.
+
 That's not a restriction Rust adds for fun; it's what makes "who's
 responsible for this data, and for how long" a question with one obvious
 answer everywhere in the codebase, including in code you didn't write.

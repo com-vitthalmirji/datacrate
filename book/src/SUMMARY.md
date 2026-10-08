@@ -7,6 +7,7 @@
 - [Rust internals: dispatch, generics, and closures](rust-internals.md)
 - [Usage](usage.md)
 - [Ownership and streaming: `csv-select` walked through](ownership.md)
+- [Security patterns: what ownership does and doesn't buy you](security-patterns.md)
 - [Typestate pipeline builder](typestate.md)
 - [The DataFusion pipeline: from CSV to a running query](datafusion-basics.md)
 - [The DataFusion pipeline: failure paths and resource control](datafusion.md)

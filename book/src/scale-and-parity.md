@@ -88,6 +88,52 @@ different things and calling it a ranking. The same rule that keeps
 Ballista, Comet, and DataFusion from being ranked against each other in the
 previous chapter applies here to Polars too.
 
+### A sixth engine, a different scalability trade-off: DuckDB
+
+Every engine measured so far either streams in memory (DataFusion,
+Polars) or distributes across processes (Ballista, Spark). DuckDB takes a
+third approach worth naming on its own: a vectorized, out-of-core
+buffer-manager engine, designed from the start to run queries larger than
+RAM on a single machine by spilling through its own buffer manager rather
+than by distributing or by requiring everything to fit in memory. Proving
+it on the exact same query, dataset, and scale as the DataFusion/Polars
+numbers above is what turns "DuckDB is a different scalability trade-off"
+from an assumed claim into a measured one - and this repo now carries a
+`scale-aggregate-duckdb` bin, feature-gated behind `duckdb`, that runs the
+identical `COUNT(*)`/`SUM(amount) WHERE amount > 50.00` query this
+chapter's whole plain-aggregate table already uses:
+
+```rust
+let (order_count, total_amount): (i64, f64) = conn
+    .query_row(
+        "SELECT COUNT(*), CAST(SUM(amount) AS DECIMAL(38,2)) \
+         FROM read_parquet(?) WHERE amount > 50.00",
+        params![scan_path.to_string_lossy()],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .map_err(CliError::Query)?;
+```
+
+Note the explicit `CAST(... AS DECIMAL(38,2))` - the same precision
+widening the two-pass discipline earlier in this chapter had to add for
+Polars, for the same underlying reason: a `SUM` over this fixture's scale
+of `Decimal(10,2)` values needs more integer digits than the column's own
+declared precision provides, and DuckDB's default `SUM` behavior, like
+Polars', stays at the input's precision unless told otherwise.
+
+```sh
+cargo build -p pipeline --features duckdb
+cargo run -p pipeline --features duckdb --bin scale-aggregate-duckdb -- --input benchmark/m3.6/orders
+```
+
+This bin follows the same house convention every other `scale-aggregate-*`
+bin in this repo already follows: print the result and the elapsed time,
+diff it externally against the other engines' output, don't assert
+equality in-repo. It hasn't yet been run at the full 91GB scale this
+chapter's table reports for the other five engines - until it has, treat
+it as a proof that the comparison is runnable, not as a sixth row in the
+table above.
+
 ## Joins at scale: the same shuffle-join proof, 2M rows and then 91GB/50GB
 
 A `SUM`/`COUNT` over a single table never touches DataFusion's hash-join or
@@ -290,6 +336,71 @@ past 64GB is plausibly super-linear, which would make the real 1TB gap
 larger than 10.5x, not smaller. That reasoning is not itself a measurement,
 which is exactly why the number stays labeled a projection instead of a
 result.
+
+## Proving Polars' lazy optimizer, not just citing it
+
+The DataFusion-vs-Polars comparison earlier in this chapter treats Polars
+as a black box that happens to be faster or slower. One claim behind
+*why* Polars' lazy API is worth using at all - that `.filter()` and
+`.select()` calls chained before `.collect()` get pushed down into the
+scan itself, rather than running as separate passes after a full read -
+deserves the same "prove, don't assert" treatment this chapter already
+applies to every performance number: diff the actual query plan, don't
+take the API's own marketing for it.
+
+**Claim**: Polars' lazy query optimizer folds a `.filter()` predicate and
+a `.select()` projection into the scan node itself when given the chance
+- the eager equivalent has no such opportunity, because by the time
+`.filter()` runs, the whole file has already been read.
+
+**Code**: `orders_lazy()` builds the same scan/filter/select chain the
+rest of this chapter's Polars numbers are built from, and `.explain(true)`
+versus `.explain(false)` surfaces the optimizer's before/after directly as
+plan text:
+
+```rust
+let optimized = lf.clone().explain(true).expect("optimized plan");
+let unoptimized = lf.explain(false).expect("unoptimized plan");
+
+assert!(optimized.contains("SELECTION: col(\"amount\") > 50.0"));
+assert!(!optimized.contains("FILTER"));
+assert!(unoptimized.contains("FILTER col(\"amount\") > 50.0"));
+```
+
+```console
+$ cargo test -p pipeline --features polars polars_lazy_plan_pushes_predicate_below_scan -- --nocapture
+$ cargo test -p pipeline --features polars polars_lazy_plan_pushes_projection_below_scan -- --nocapture
+```
+
+The optimized plan folds the predicate straight into the scan node's own
+`SELECTION` clause and has no separate `FILTER` node left at all. The
+unoptimized plan keeps `FILTER` as its own node sitting above the scan -
+proving the two plans really are structurally different, not just
+differently worded. The projection test makes the same point about column
+pruning: the optimized plan's scan reads `PROJECT 2/4 COLUMNS` (only `id`
+and `amount`), while the unoptimized plan reads all four and defers
+column selection to a separate node afterward.
+
+This is the same technique this repo's DataFusion chapters already use
+(`EXPLAIN`-string parsing to prove pushdown happened, not just assume it
+from a query running fast) applied to Polars' own plan representation -
+the Data is the plan-string output, the Calculation is the marker-text
+check against it, and `.explain()`/`.collect()` are the Actions that
+produce real plans instead of hypothetical ones.
+
+A third test closes the loop on correctness: the lazy path (scan, filter,
+select, collect) and the eager path (read the whole file, then filter and
+select afterward) must agree exactly, row for row:
+
+```console
+$ cargo test -p pipeline --features polars polars_eager_and_lazy_paths_produce_identical_results -- --nocapture
+```
+
+An optimizer that reorders work is only trustworthy if reordering it
+never changes the answer - this is the same "byte-identical before any
+speed claim" discipline the two-pass discipline section above applies to
+every cross-engine comparison in this chapter, now applied to Polars
+against itself.
 
 ## Try it yourself
 
