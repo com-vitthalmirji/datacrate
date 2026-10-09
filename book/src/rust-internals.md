@@ -338,6 +338,19 @@ compiler tells you exactly which rule it broke - it's not a vague
 restriction, it's a direct consequence of "a vtable is a fixed-size table of
 function pointers decided once, at compile time, for one concrete type."
 
+`crates/pipeline/src/datafusion_query.rs`'s `OrdersMemoryTableProvider` is
+this codebase's concrete example of *why* a framework reaches for `dyn`
+instead of generics at a specific boundary: DataFusion's planner holds a
+registry of tables whose concrete types it can't know ahead of time - a
+CSV-backed table today, `OrdersMemoryTableProvider` tomorrow - so
+`TableProvider` and `OptimizerRule` are both object-safe traits DataFusion
+stores as `Arc<dyn TableProvider>`/`Arc<dyn OptimizerRule>`, the same
+vtable-indirection trade this section just described, paid deliberately at
+the one seam that genuinely needs "which concrete type this is gets
+decided later, by whoever registers it," not habitually everywhere.
+[Extending DataFusion](extending-datafusion.md) walks through both traits
+end to end, with a live test per extension point.
+
 ## Monomorphization: what "static dispatch by default" costs you
 
 Follow what `describe::<i32>` and `describe::<String>` actually turn into
@@ -1269,6 +1282,16 @@ why a rule against `unwrap()`/`expect()` on any input-reachable path is
 enforceable at all: a `Result` that must be handled or propagated with `?`
 is a compile error if you silently drop it, unlike an unchecked exception a
 Scala/JVM caller can simply never catch.
+
+`dtl_core::security_patterns` (walked through in
+[Security patterns](security-patterns.md)) is a second, independently
+motivated proof of the same claim: `create_file_racy`/`create_file_atomically`,
+`mkdir_racy_then_chmod`/`mkdir_atomic_with_mode`, and friends all return
+`io::Result<T>` rather than panicking on a failed syscall, including the
+deliberately-vulnerable `*_racy`/`*_naive` functions kept as counter-examples
+- a TOCTOU bug is a logic error, not a reason to reach for `unwrap()`, and
+`Result` propagation via `?` makes that failure visible in the type instead
+of as an uncaught panic.
 
 **Scala/FP bridge**: `?` is `Either`'s `for`-comprehension short-circuit,
 minus the monadic-bind ceremony, plus an automatic `From` conversion baked
