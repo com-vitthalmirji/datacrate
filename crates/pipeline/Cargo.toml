@@ -26,7 +26,7 @@ duckdb = ["dep:duckdb"]
 # (manifest.rs). Already resolved transitively via datafusion, so this adds
 # no new crate to the dependency graph.
 ahash = "0.8"
-arrow = "59"
+arrow = "60"
 # Required to implement `datafusion::catalog::TableProvider`: the trait
 # itself is declared `#[async_trait]` by DataFusion, so any impl block needs
 # the same macro. Already resolved transitively via datafusion; this just
