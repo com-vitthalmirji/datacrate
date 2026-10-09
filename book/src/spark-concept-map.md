@@ -42,6 +42,7 @@ their name on this side.
 | `SparkSession` | `datafusion::execution::context::SessionContext` | [The DataFusion pipeline](datafusion-basics.md) |
 | `Dataset[T]` / `DataFrame` | `arrow::record_batch::RecordBatch` - a columnar, in-memory batch, not lazy, not distributed by itself | [Ownership and streaming](ownership.md), [The DataFusion pipeline](datafusion-basics.md) |
 | Catalyst's logical/physical plan | DataFusion's `LogicalPlan` / `ExecutionPlan` - same two-phase optimizer shape, different implementation | [The DataFusion pipeline](datafusion-basics.md) |
+| `DataSourceV2` connectors / injecting a Catalyst optimizer rule | `TableProvider` / `OptimizerRule` - the same "framework holds a registry of types it can't know ahead of time" shape, so both are object-safe traits stored as `Arc<dyn TableProvider>`/`Arc<dyn OptimizerRule>`, not generics | [Extending DataFusion](extending-datafusion.md) |
 | `df.sql(...)` vs. the DataFrame builder API both compiling to the same plan | The same claim, but tested, not assumed: queries are written both ways and asserted equal | [The DataFusion pipeline](datafusion-basics.md) |
 | Spark executors + shuffle across a cluster | Ballista's scheduler/executor pair - a distributed *DataFusion*, not a different engine, with the same hash-partitioned shuffle idea | [Distributing DataFusion](distributed-and-acceleration.md) |
 | `spark.sql.shuffle.partitions` / broadcast-join threshold tuning | `spark.sql.autoBroadcastJoinThreshold=-1` used on the Spark side of a comparison for the same reason you'd use it: force a real shuffle join, not a silent broadcast | [Proving it at scale](scale-and-parity.md) |
@@ -54,7 +55,7 @@ their name on this side.
 | Scala's `Future`/`ExecutionContext`, or ZIO/Cats-Effect fibers | Rust's `async`/`.await` + Tokio - used narrowly here, not pervasively, because this codebase treats async as an edge concern rather than the default | [The object-store edge](object-store.md) |
 | `sealed trait` + `case class`/`case object` ADT | Rust `enum` - a real sum type, each variant can carry its own data - used throughout for errors and states | [Typestate pipeline builder](typestate.md) |
 | `Option[T]` / `Either[E, A]` | `Option<T>` / `Result<T, E>` - same shape, but `Result`'s `?` operator is Rust's terser analogue to a `for`-comprehension over `Either` | throughout |
-| Ownership/borrowing - the one concept with **no** Scala/JVM analogue | The compiler enforces, at compile time, that data has exactly one owner (or many read-only borrowers, or one mutable borrower) at a time - nothing to unlearn from Scala, this is genuinely new | [Rust fundamentals](rust-fundamentals.md), [Ownership and streaming](ownership.md) |
+| Ownership/borrowing - the one concept with **no** Scala/JVM analogue | The compiler enforces, at compile time, that data has exactly one owner (or many read-only borrowers, or one mutable borrower) at a time - nothing to unlearn from Scala, this is genuinely new. It's a memory-safety guarantee, not a correctness one - ownership is the floor, not the ceiling | [Rust fundamentals](rust-fundamentals.md), [Ownership and streaming](ownership.md), [Security patterns](security-patterns.md) |
 
 ## Suggested reading order
 
@@ -77,8 +78,12 @@ Spark/Scala reader specifically:
    guarantees with no direct Scala equivalent, but both solve problems a
    Spark/Scala engineer has hit at runtime before: an incompletely-configured
    job, a schema drift caught in production instead of CI.
-6. **[The DataFusion pipeline: failure paths](datafusion.md)** and
-   **[The object-store edge](object-store.md)** - the concurrency/I/O
-   internals; read once the above feels solid, not before.
+6. **[The DataFusion pipeline: failure paths](datafusion.md)**,
+   **[Extending DataFusion](extending-datafusion.md)**, and
+   **[The object-store edge](object-store.md)** - the concurrency/I/O/
+   extension-point internals; read once the above feels solid, not before.
+7. **[Security patterns](security-patterns.md)** - a deliberate boundary
+   check on everything above: ownership rules out memory-safety bugs, not
+   logic bugs, so this chapter tests that line with real CVE shapes.
 
 Then use the [glossary](about.md#glossary) whenever a term isn't landing.
