@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/com-vitthalmirji/datacrate/compare/dtl-core-v0.1.1...dtl-core-v0.1.2) - 2026-10-09
+
+### Other
+
+- Add CVE-backed security patterns module, DuckDB benchmark bin, and Polars lazy-optimizer tests ([#84](https://github.com/com-vitthalmirji/datacrate/pull/84))
+
 ## [0.1.1](https://github.com/com-vitthalmirji/datacrate/compare/dtl-core-v0.1.0...dtl-core-v0.1.1) - 2026-08-13
 
 ### Other
