@@ -15,15 +15,40 @@ use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
 
+#[cfg(test)]
+use arrow::array::{Array, Float64Array};
 use arrow::array::{
     ArrayRef, Decimal128Array, Int64Array, RecordBatch, StringArray, TimestampMicrosecondArray,
 };
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use chrono::NaiveDateTime;
+#[cfg(test)]
+use datafusion::catalog::{Session, TableProvider};
+#[cfg(test)]
+use datafusion::common::ScalarValue;
+#[cfg(test)]
+use datafusion::common::tree_node::{Transformed, TreeNodeRecursion};
 use datafusion::error::DataFusionError;
+#[cfg(test)]
+use datafusion::execution::TaskContext;
 use datafusion::execution::memory_pool::{FairSpillPool, TrackConsumersPool};
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::logical_expr::{ColumnarValue, JoinType, Volatility, col, create_udf};
+#[cfg(test)]
+use datafusion::logical_expr::{Expr, Limit, LogicalPlan, TableType};
+#[cfg(test)]
+use datafusion::optimizer::{OptimizerConfig, OptimizerRule};
+#[cfg(test)]
+use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
+#[cfg(test)]
+use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+#[cfg(test)]
+use datafusion::physical_plan::memory::MemoryStream;
+#[cfg(test)]
+use datafusion::physical_plan::{
+    ChildrenPropertiesMode, DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning,
+    PlanProperties, ReplaceChildrenOptions, SendableRecordBatchStream,
+};
 use datafusion::prelude::{SessionConfig, SessionContext, lit};
 use object_store::ObjectStore;
 use url::Url;
@@ -718,6 +743,587 @@ pub async fn multi_predicate_query_dataframe(
         .await
 }
 
+/// A hand-rolled [`TableProvider`] over `orders` batches already held in
+/// memory, proving DataFusion's custom-data-source extension point rather
+/// than asserting it from the docs.
+///
+/// Trade-off named explicitly (DDIA ch04/ch07 lens): this provider
+/// materializes every batch up front and keeps them all resident for the
+/// table's lifetime - the same choice `register_orders` makes for Parquet
+/// via `fixture_to_orders_batch`. That's the right trade for this crate's
+/// fixture-sized data; a provider over a table larger than memory would need
+/// to replace the `Vec<RecordBatch>` field with a chunked/streaming scan
+/// instead, at the cost of a more complex `scan()`.
+#[cfg(test)]
+#[derive(Debug)]
+struct OrdersMemoryTableProvider {
+    schema: SchemaRef,
+    batches: Vec<RecordBatch>,
+}
+
+#[cfg(test)]
+impl OrdersMemoryTableProvider {
+    fn new(batches: Vec<RecordBatch>) -> Self {
+        Self {
+            schema: orders_schema(),
+            batches,
+        }
+    }
+}
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl TableProvider for OrdersMemoryTableProvider {
+    fn schema(&self) -> SchemaRef {
+        Arc::clone(&self.schema)
+    }
+
+    fn table_type(&self) -> TableType {
+        TableType::Base
+    }
+
+    /// # Errors
+    ///
+    /// Returns a [`DataFusionError`] if `projection` names a column index
+    /// outside `self.schema`.
+    async fn scan(
+        &self,
+        _state: &dyn Session,
+        projection: Option<&Vec<usize>>,
+        _filters: &[Expr],
+        _limit: Option<usize>,
+    ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+        let projection = projection.cloned();
+        let projected_schema = match &projection {
+            Some(indices) => Arc::new(self.schema.project(indices)?),
+            None => Arc::clone(&self.schema),
+        };
+        Ok(Arc::new(OrdersMemoryExec::new(
+            self.batches.clone(),
+            projected_schema,
+            projection,
+        )))
+    }
+}
+
+/// The [`ExecutionPlan`] [`OrdersMemoryTableProvider::scan`] returns: a
+/// single-partition leaf node that re-plays the batches it was handed,
+/// applying `projection` via [`MemoryStream`] - the same stream DataFusion's
+/// own `MemTable` uses, reused here rather than hand-rolled (Ousterhout:
+/// define errors/special cases out of existence by reusing a mechanism
+/// DataFusion already validated).
+#[cfg(test)]
+#[derive(Debug)]
+struct OrdersMemoryExec {
+    batches: Vec<RecordBatch>,
+    schema: SchemaRef,
+    projection: Option<Vec<usize>>,
+    properties: Arc<PlanProperties>,
+}
+
+#[cfg(test)]
+impl OrdersMemoryExec {
+    fn new(batches: Vec<RecordBatch>, schema: SchemaRef, projection: Option<Vec<usize>>) -> Self {
+        let properties = Arc::new(PlanProperties::new(
+            EquivalenceProperties::new(Arc::clone(&schema)),
+            Partitioning::UnknownPartitioning(1),
+            EmissionType::Incremental,
+            Boundedness::Bounded,
+        ));
+        Self {
+            batches,
+            schema,
+            projection,
+            properties,
+        }
+    }
+}
+
+#[cfg(test)]
+impl DisplayAs for OrdersMemoryExec {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "OrdersMemoryExec: partitions=1")
+    }
+}
+
+#[cfg(test)]
+impl ExecutionPlan for OrdersMemoryExec {
+    fn name(&self) -> &'static str {
+        "OrdersMemoryExec"
+    }
+
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.properties
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![]
+    }
+
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> Result<TreeNodeRecursion, DataFusionError>,
+    ) -> Result<TreeNodeRecursion, DataFusionError> {
+        Ok(TreeNodeRecursion::Continue)
+    }
+
+    fn replace_children(
+        self: Arc<Self>,
+        _children: Vec<Arc<dyn ExecutionPlan>>,
+        _options: ReplaceChildrenOptions,
+    ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+        Ok(self)
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+        self.replace_children(
+            children,
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+        )
+    }
+
+    fn execute(
+        &self,
+        _partition: usize,
+        _context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream, DataFusionError> {
+        let stream = MemoryStream::try_new(
+            self.batches.clone(),
+            Arc::clone(&self.schema),
+            self.projection.clone(),
+        )?;
+        Ok(Box::pin(stream))
+    }
+}
+
+/// A hand-rolled [`AggregateUDF`] - `amount_range(amount)` returns
+/// `MAX(amount) - MIN(amount)` over `orders.amount` - proving the
+/// multi-phase accumulator mechanism (`update_batch`/`state`/`merge_batch`)
+/// rather than asserting it from the docs. Deliberately tracks two running
+/// values (min and max), not one, so [`AmountRangeUdf::state_fields`] has to
+/// override the trait's one-field default and [`AmountRangeAccumulator::state`]/
+/// [`AmountRangeAccumulator::merge_batch`] exercise the actual partial-state
+/// combine DataFusion uses for parallel partitions - a single-value
+/// accumulator (e.g. a custom SUM) would never need to.
+///
+/// Grokking Simplicity lens: [`AmountRangeAccumulator`]'s two `Option<i128>`
+/// fields are Data; `update_batch`/`merge_batch` are Actions (they mutate
+/// that data across calls, so calling them twice on the same batch gives a
+/// wrong answer - the trait's own doc comment on `Accumulator::evaluate`
+/// calls this out as a correctness rule, not a style note); `evaluate`
+/// reads the data back out without consuming it, closer to a Calculation
+/// despite the `&mut self` the trait signature requires for internal
+/// buffer reuse.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct AmountRangeUdf {
+    signature: datafusion::logical_expr::Signature,
+}
+
+#[cfg(test)]
+impl AmountRangeUdf {
+    fn new() -> Self {
+        Self {
+            signature: datafusion::logical_expr::Signature::exact(
+                vec![DataType::Decimal128(10, 2)],
+                Volatility::Immutable,
+            ),
+        }
+    }
+}
+
+#[cfg(test)]
+impl datafusion::logical_expr::AggregateUDFImpl for AmountRangeUdf {
+    fn name(&self) -> &str {
+        "amount_range"
+    }
+
+    fn signature(&self) -> &datafusion::logical_expr::Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType, DataFusionError> {
+        Ok(DataType::Decimal128(10, 2))
+    }
+
+    fn accumulator(
+        &self,
+        _acc_args: datafusion::logical_expr::function::AccumulatorArgs,
+    ) -> Result<Box<dyn datafusion::logical_expr::Accumulator>, DataFusionError> {
+        Ok(Box::new(AmountRangeAccumulator::default()))
+    }
+
+    fn state_fields(
+        &self,
+        args: datafusion::logical_expr::function::StateFieldsArgs,
+    ) -> Result<Vec<arrow::datatypes::FieldRef>, DataFusionError> {
+        let decimal = DataType::Decimal128(10, 2);
+        Ok(vec![
+            Arc::new(Field::new(
+                datafusion::logical_expr::utils::format_state_name(args.name, "min"),
+                decimal.clone(),
+                true,
+            )),
+            Arc::new(Field::new(
+                datafusion::logical_expr::utils::format_state_name(args.name, "max"),
+                decimal,
+                true,
+            )),
+        ])
+    }
+}
+
+/// [`AmountRangeUdf::accumulator`]'s per-group running state: the smallest
+/// and largest unscaled `i128` seen so far (matching `Decimal128(10, 2)`'s
+/// representation), `None` until the first non-null value arrives.
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct AmountRangeAccumulator {
+    min: Option<i128>,
+    max: Option<i128>,
+}
+
+#[cfg(test)]
+impl datafusion::logical_expr::Accumulator for AmountRangeAccumulator {
+    fn update_batch(&mut self, values: &[ArrayRef]) -> Result<(), DataFusionError> {
+        let amounts = values[0]
+            .as_any()
+            .downcast_ref::<Decimal128Array>()
+            .expect("amount_range is registered with a Decimal128(10, 2) signature");
+        for value in amounts.iter().flatten() {
+            self.min = Some(self.min.map_or(value, |min| min.min(value)));
+            self.max = Some(self.max.map_or(value, |max| max.max(value)));
+        }
+        Ok(())
+    }
+
+    fn evaluate(&mut self) -> Result<datafusion::common::ScalarValue, DataFusionError> {
+        let range = match (self.min, self.max) {
+            (Some(min), Some(max)) => Some(max - min),
+            _ => None,
+        };
+        Ok(datafusion::common::ScalarValue::Decimal128(range, 10, 2))
+    }
+
+    fn size(&self) -> usize {
+        std::mem::size_of_val(self)
+    }
+
+    fn state(&mut self) -> Result<Vec<datafusion::common::ScalarValue>, DataFusionError> {
+        Ok(vec![
+            datafusion::common::ScalarValue::Decimal128(self.min, 10, 2),
+            datafusion::common::ScalarValue::Decimal128(self.max, 10, 2),
+        ])
+    }
+
+    fn merge_batch(&mut self, states: &[ArrayRef]) -> Result<(), DataFusionError> {
+        let mins = states[0]
+            .as_any()
+            .downcast_ref::<Decimal128Array>()
+            .expect("amount_range's first state field is the running min");
+        let maxes = states[1]
+            .as_any()
+            .downcast_ref::<Decimal128Array>()
+            .expect("amount_range's second state field is the running max");
+        for min in mins.iter().flatten() {
+            self.min = Some(self.min.map_or(min, |current| current.min(min)));
+        }
+        for max in maxes.iter().flatten() {
+            self.max = Some(self.max.map_or(max, |current| current.max(max)));
+        }
+        Ok(())
+    }
+}
+
+/// A custom [`datafusion::logical_expr::WindowUDFImpl`], the fourth and
+/// last DataFusion extension point this file proves end-to-end alongside
+/// `TableProvider`/`ExecutionPlan` (a custom data source), `ScalarUDF`
+/// (`days_since_epoch`), and `AggregateUDF` (`amount_range`): a window
+/// function, `percent_of_total(amount) OVER ()`, that rewrites each row's
+/// amount as a percentage of the sum of every row in its partition.
+///
+/// Software Design Depth Doctrine lens: a window function's one piece of
+/// hidden complexity that a `ScalarUDF` cannot hide is that its result for
+/// one row depends on every other row in the same partition.
+/// [`PercentOfTotalEvaluator::evaluate_all`] is where that dependency is
+/// absorbed - it reads the whole `values` array once, sums it, then maps
+/// every row against that single sum. The caller never sees this; the SQL
+/// reads like calling any built-in window function.
+///
+/// DDIA lens: `evaluate_all` trades memory for simplicity the same way a
+/// non-streaming batch step does - the whole partition must be
+/// materialized before the first output row exists, unlike
+/// [`AmountRangeAccumulator`]'s running min/max, which processes one row
+/// (or one spilled partial state) at a time. That is the right trade-off
+/// for this file's 8-row fixture; a partition too large to fit in memory
+/// would need the row-at-a-time `evaluate` + window-frame path instead -
+/// not proven here, since nothing in this fixture forces that choice.
+#[cfg(test)]
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct PercentOfTotalUdf {
+    signature: datafusion::logical_expr::Signature,
+}
+
+#[cfg(test)]
+impl PercentOfTotalUdf {
+    fn new() -> Self {
+        Self {
+            signature: datafusion::logical_expr::Signature::exact(
+                vec![DataType::Decimal128(10, 2)],
+                Volatility::Immutable,
+            ),
+        }
+    }
+}
+
+#[cfg(test)]
+impl datafusion::logical_expr::WindowUDFImpl for PercentOfTotalUdf {
+    fn name(&self) -> &str {
+        "percent_of_total"
+    }
+
+    fn signature(&self) -> &datafusion::logical_expr::Signature {
+        &self.signature
+    }
+
+    fn partition_evaluator(
+        &self,
+        _partition_evaluator_args: datafusion::logical_expr::function::PartitionEvaluatorArgs,
+    ) -> Result<Box<dyn datafusion::logical_expr::PartitionEvaluator>, DataFusionError> {
+        Ok(Box::new(PercentOfTotalEvaluator))
+    }
+
+    fn field(
+        &self,
+        field_args: datafusion::logical_expr::function::WindowUDFFieldArgs,
+    ) -> Result<arrow::datatypes::FieldRef, DataFusionError> {
+        Ok(Arc::new(Field::new(
+            field_args.name(),
+            DataType::Float64,
+            true,
+        )))
+    }
+}
+
+/// [`PercentOfTotalUdf::partition_evaluator`]'s implementation.
+///
+/// Grokking Simplicity lens: `evaluate_all` is a Calculation - same
+/// `values`/`num_rows` in, same `ArrayRef` out, no state carried between
+/// calls - unlike [`AmountRangeAccumulator`]'s `update_batch`/`merge_batch`,
+/// which are Actions precisely because they accumulate across calls.
+#[cfg(test)]
+#[derive(Debug)]
+struct PercentOfTotalEvaluator;
+
+#[cfg(test)]
+impl datafusion::logical_expr::PartitionEvaluator for PercentOfTotalEvaluator {
+    fn evaluate_all(
+        &mut self,
+        values: &[ArrayRef],
+        num_rows: usize,
+    ) -> Result<ArrayRef, DataFusionError> {
+        let amounts = values[0]
+            .as_any()
+            .downcast_ref::<Decimal128Array>()
+            .expect("percent_of_total is registered with a Decimal128(10, 2) signature");
+        let total: i128 = amounts.iter().flatten().sum();
+        let percentages: Float64Array = (0..num_rows)
+            .map(|row| {
+                amounts
+                    .is_valid(row)
+                    .then(|| amounts.value(row) as f64 / total as f64 * 100.0)
+            })
+            .collect();
+        Ok(Arc::new(percentages))
+    }
+}
+
+/// A custom [`datafusion::logical_expr::async_udf::AsyncScalarUDFImpl`], the
+/// fifth and final DataFusion extension point this file proves end-to-end
+/// alongside `TableProvider`/`ExecutionPlan`, `ScalarUDF` (`days_since_epoch`),
+/// `AggregateUDF` (`amount_range`), and `WindowUDF` (`percent_of_total`): a
+/// scalar function whose per-batch evaluation is itself an `async fn`, for
+/// the case where producing a result genuinely requires awaiting something
+/// (a remote lookup, a cache, another service) rather than pure CPU work.
+///
+/// Software Design Depth Doctrine lens: [`ScalarUDFImpl::invoke_with_args`]
+/// (the sync path, used by `days_since_epoch_udf`) and
+/// `AsyncScalarUDFImpl::invoke_async_with_args` have the same shape - same
+/// `ScalarFunctionArgs` in, same `ColumnarValue` out. The interface hides
+/// exactly one thing: whether producing that value can be computed
+/// synchronously. DataFusion's physical planner is what absorbs that
+/// difference - it inserts an `AsyncFuncExec` node only when a plan
+/// actually contains an async function - so `region_multiplier`'s own call
+/// site (plain SQL, same as every other UDF in this file) never has to
+/// know which path it took.
+///
+/// DDIA lens: this models an external dependency the way a remote
+/// pricing-tier lookup would work - [`RegionMultiplierUdf::lookup`] is a
+/// fixed, in-memory stand-in, not a real network call. What *is* proven
+/// here is the shape (await a lookup keyed by row, return the same
+/// `ColumnarValue` contract as a sync UDF); real network latency,
+/// timeouts, or partial failure are not exercised by this fixture and are
+/// not claimed as demonstrated.
+#[cfg(test)]
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct RegionMultiplierUdf {
+    signature: datafusion::logical_expr::Signature,
+}
+
+#[cfg(test)]
+impl RegionMultiplierUdf {
+    fn new() -> Self {
+        Self {
+            signature: datafusion::logical_expr::Signature::exact(
+                vec![DataType::Int64],
+                Volatility::Volatile,
+            ),
+        }
+    }
+
+    /// The fixed, in-memory stand-in for a remote per-id pricing-tier
+    /// lookup - unknown ids default to `1.0`, same as a real lookup
+    /// service would for an id outside its known set.
+    fn lookup(id: i64) -> f64 {
+        match id {
+            1 | 4 | 8 => 1.5,
+            5 | 6 => 0.8,
+            _ => 1.0,
+        }
+    }
+}
+
+#[cfg(test)]
+impl datafusion::logical_expr::ScalarUDFImpl for RegionMultiplierUdf {
+    fn name(&self) -> &str {
+        "region_multiplier"
+    }
+
+    fn signature(&self) -> &datafusion::logical_expr::Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType, DataFusionError> {
+        Ok(DataType::Float64)
+    }
+
+    fn invoke_with_args(
+        &self,
+        _args: datafusion::logical_expr::ScalarFunctionArgs,
+    ) -> Result<ColumnarValue, DataFusionError> {
+        Err(DataFusionError::Internal(
+            "region_multiplier is async-only; the physical planner must route calls \
+             through AsyncFuncExec, not invoke_with_args directly"
+                .to_string(),
+        ))
+    }
+}
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl datafusion::logical_expr::async_udf::AsyncScalarUDFImpl for RegionMultiplierUdf {
+    async fn invoke_async_with_args(
+        &self,
+        args: datafusion::logical_expr::ScalarFunctionArgs,
+    ) -> Result<ColumnarValue, DataFusionError> {
+        // Yield once before computing, so a passing test proves the
+        // physical plan actually awaited this function rather than
+        // happening to run it to completion synchronously.
+        tokio::task::yield_now().await;
+        let ids = match &args.args[0] {
+            ColumnarValue::Array(array) => Arc::clone(array),
+            ColumnarValue::Scalar(scalar) => scalar.to_array_of_size(1)?,
+        };
+        let ids = ids
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("region_multiplier is registered with an Int64 signature");
+        let multipliers: Float64Array = ids.iter().map(|id| id.map(Self::lookup)).collect();
+        Ok(ColumnarValue::Array(Arc::new(multipliers)))
+    }
+}
+
+/// A custom [`OptimizerRule`], the sixth extension point this file proves
+/// end-to-end: a logical-plan rewrite that caps every top-level result set
+/// at `max_rows`, the way a platform team would guard a shared SQL endpoint
+/// against an accidental unbounded scan. Unlike the generic simplifications
+/// already built into `datafusion-optimizer` (e.g. duplicate-predicate or
+/// dead-filter elimination), this rule encodes a decision no generic rule
+/// could know - the right cap for *this* deployment - so it genuinely needs
+/// to be a custom rule rather than a request to change upstream.
+///
+/// DDIA lens: this is a deliberate reliability/correctness trade-off, not a
+/// free win. It buys protection against unbounded-scan resource exhaustion
+/// at the cost of silently truncating a legitimate large result instead of
+/// erroring. A production version of this guardrail would surface the cap
+/// back to the caller (a warning, a response header); this demo proves only
+/// the rewrite itself, not that follow-up.
+///
+/// Software Design Depth Doctrine lens ("define errors out of existence"):
+/// without this rule, "forgetting a LIMIT" is a runtime risk every query
+/// author must remember to avoid. With it registered, that risk is removed
+/// from the plan shape itself - every top-level plan that reaches execution
+/// already has an acceptable `fetch`, so there is no separate missing-limit
+/// error path to write or forget.
+///
+/// Grokking Simplicity lens: [`OptimizerRule::rewrite`] is a Calculation -
+/// same [`LogicalPlan`] in, same [`Transformed<LogicalPlan>`] out, no I/O,
+/// no shared mutable state. The Action/Calculation split lives one layer up:
+/// `SessionContext::add_optimizer_rule` (an Action, called once at setup) is
+/// what wires this pure rewrite into the optimizer's call sequence; the SQL
+/// call site that triggers it never has to know the rule exists.
+#[cfg(test)]
+#[derive(Debug)]
+struct MaxRowsGuardrail {
+    max_rows: i64,
+}
+
+#[cfg(test)]
+impl MaxRowsGuardrail {
+    fn new(max_rows: i64) -> Self {
+        Self { max_rows }
+    }
+}
+
+#[cfg(test)]
+impl OptimizerRule for MaxRowsGuardrail {
+    fn name(&self) -> &str {
+        "max_rows_guardrail"
+    }
+
+    fn rewrite(
+        &self,
+        plan: LogicalPlan,
+        _config: &dyn OptimizerConfig,
+    ) -> Result<Transformed<LogicalPlan>, DataFusionError> {
+        if let LogicalPlan::Limit(Limit { skip, fetch, input }) = &plan {
+            let already_capped = fetch.as_deref().is_some_and(|fetch_expr| {
+                matches!(
+                    fetch_expr,
+                    Expr::Literal(ScalarValue::Int64(Some(n)), _) if *n <= self.max_rows
+                )
+            });
+            if already_capped {
+                return Ok(Transformed::no(plan));
+            }
+            return Ok(Transformed::yes(LogicalPlan::Limit(Limit {
+                skip: skip.clone(),
+                fetch: Some(Box::new(lit(self.max_rows))),
+                input: Arc::clone(input),
+            })));
+        }
+
+        Ok(Transformed::yes(LogicalPlan::Limit(Limit {
+            skip: None,
+            fetch: Some(Box::new(lit(self.max_rows))),
+            input: Arc::new(plan),
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1301,6 +1907,251 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn amount_range_udaf_matches_independently_computed_max_minus_min() {
+        let (ctx, _parquet) = context_over_fixture().await;
+        ctx.register_udaf(datafusion::logical_expr::AggregateUDF::from(
+            AmountRangeUdf::new(),
+        ));
+
+        let batches = ctx
+            .sql("SELECT amount_range(amount) AS range FROM orders")
+            .await
+            .expect("plan query")
+            .collect()
+            .await
+            .expect("execute query");
+        assert_eq!(batches.len(), 1);
+
+        let range = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Decimal128Array>()
+            .expect("range column is Decimal128(10, 2)");
+        // fixtures/m3/orders.csv: max 999999.99, min 0.01 - computed by hand
+        // from the fixture file, not derived from the accumulator under test.
+        let expected_range_unscaled = 99_999_999i128 - 1i128;
+        assert_eq!(range.value(0), expected_range_unscaled);
+    }
+
+    #[tokio::test]
+    async fn percent_of_total_udwf_matches_independently_computed_percentages() {
+        let (ctx, _parquet) = context_over_fixture().await;
+        ctx.register_udwf(datafusion::logical_expr::WindowUDF::from(
+            PercentOfTotalUdf::new(),
+        ));
+
+        let batches = ctx
+            .sql("SELECT id, percent_of_total(amount) OVER () AS pct FROM orders ORDER BY id")
+            .await
+            .expect("plan query")
+            .collect()
+            .await
+            .expect("execute query");
+        assert_eq!(batches.len(), 1);
+
+        let ids = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("id column is Int64");
+        let percentages = batches[0]
+            .column(1)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("pct column is Float64");
+
+        // fixtures/m3/orders.csv's 8 unscaled amounts (cents) sum to
+        // 100_154_174 - summed by hand from the raw file, not derived from
+        // the window function under test. Each row's expected share is
+        // amount / total * 100.
+        let total_unscaled = 100_154_174_f64;
+        let expected_unscaled_by_id = [
+            (1i64, 10_000_f64),
+            (2, 25_075.0),
+            (3, 9_999.0),
+            (4, 100_000.0),
+            (5, 4_550.0),
+            (6, 4_550.0),
+            (7, 1.0),
+            (8, 99_999_999.0),
+        ];
+        assert_eq!(ids.len(), expected_unscaled_by_id.len());
+
+        let mut percentage_sum = 0.0_f64;
+        for (row, &(expected_id, unscaled)) in expected_unscaled_by_id.iter().enumerate() {
+            assert_eq!(ids.value(row), expected_id);
+            let expected_pct = unscaled / total_unscaled * 100.0;
+            let actual_pct = percentages.value(row);
+            assert!(
+                (actual_pct - expected_pct).abs() < 1e-9,
+                "row {row} (id={expected_id}): expected {expected_pct}, got {actual_pct}"
+            );
+            percentage_sum += actual_pct;
+        }
+        // Every row's share of the single (whole-table) partition must sum
+        // back to 100%, proving evaluate_all saw the same partition total
+        // for every row, not a per-batch or per-row-group slice of it.
+        assert!(
+            (percentage_sum - 100.0).abs() < 1e-9,
+            "percentages must sum to 100.0, got {percentage_sum}"
+        );
+    }
+
+    #[tokio::test]
+    async fn async_udf_region_multiplier_matches_independently_computed_lookup() {
+        let (ctx, _parquet) = context_over_fixture().await;
+        ctx.register_udf(
+            datafusion::logical_expr::async_udf::AsyncScalarUDF::new(Arc::new(
+                RegionMultiplierUdf::new(),
+            ))
+            .into_scalar_udf(),
+        );
+
+        let batches = ctx
+            .sql("SELECT id, region_multiplier(id) AS mult FROM orders ORDER BY id")
+            .await
+            .expect("plan query")
+            .collect()
+            .await
+            .expect("execute query");
+        assert_eq!(batches.len(), 1);
+
+        let ids = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("id column is Int64");
+        let multipliers = batches[0]
+            .column(1)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("mult column is Float64");
+
+        // Independently computed from RegionMultiplierUdf::lookup's own
+        // match arms, not derived by calling the UDF under test.
+        let expected_by_id = [
+            (1i64, 1.5),
+            (2, 1.0),
+            (3, 1.0),
+            (4, 1.5),
+            (5, 0.8),
+            (6, 0.8),
+            (7, 1.0),
+            (8, 1.5),
+        ];
+        assert_eq!(ids.len(), expected_by_id.len());
+        for (row, &(expected_id, expected_mult)) in expected_by_id.iter().enumerate() {
+            assert_eq!(ids.value(row), expected_id);
+            let actual_mult = multipliers.value(row);
+            assert!(
+                (actual_mult - expected_mult).abs() < 1e-9,
+                "row {row} (id={expected_id}): expected {expected_mult}, got {actual_mult}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn optimizer_rule_max_rows_guardrail_caps_but_does_not_override_smaller_limit() {
+        let (ctx, _parquet) = context_over_fixture().await;
+        ctx.add_optimizer_rule(Arc::new(MaxRowsGuardrail::new(5)));
+
+        let uncapped = ctx
+            .sql("SELECT id FROM orders ORDER BY id")
+            .await
+            .expect("plan unbounded query")
+            .collect()
+            .await
+            .expect("execute unbounded query");
+        let uncapped_rows: usize = uncapped.iter().map(RecordBatch::num_rows).sum();
+        // The fixture has 8 rows; without the guardrail this would be 8.
+        assert_eq!(uncapped_rows, 5);
+
+        let already_limited = ctx
+            .sql("SELECT id FROM orders ORDER BY id LIMIT 3")
+            .await
+            .expect("plan already-limited query")
+            .collect()
+            .await
+            .expect("execute already-limited query");
+        let already_limited_rows: usize = already_limited.iter().map(RecordBatch::num_rows).sum();
+        // The user's own smaller LIMIT must survive, not be raised to 5.
+        assert_eq!(already_limited_rows, 3);
+    }
+
+    #[test]
+    fn amount_range_accumulator_merge_batch_combines_partial_states() {
+        use datafusion::logical_expr::Accumulator;
+
+        // The fixture's 8 rows fit in a single Parquet row group, so a real
+        // SQL plan over it never reaches AggregateMode::Partial - DataFusion
+        // only splits into Partial/Final phases across multiple partitions.
+        // Exercising AmountRangeAccumulator::state/merge_batch directly is
+        // the precise way to prove that combine logic: build two partition
+        // accumulators (split 0.01..250.75 and 45.50..999999.99), serialize
+        // each with `state()`, merge both into a fresh accumulator, and
+        // check the merged min/max match the full fixture's range.
+        let decimal = |v: &str| -> i128 {
+            let (whole, frac) = v
+                .split_once('.')
+                .expect("fixture literal has a decimal point");
+            format!("{whole}{frac}")
+                .parse()
+                .expect("fixture literal parses")
+        };
+
+        let mut left = AmountRangeAccumulator::default();
+        left.update_batch(&[Arc::new(
+            Decimal128Array::from(vec![decimal("100.00"), decimal("250.75"), decimal("0.01")])
+                .with_precision_and_scale(10, 2)
+                .expect("valid Decimal128(10, 2)"),
+        )])
+        .expect("update_batch on left partition");
+
+        let mut right = AmountRangeAccumulator::default();
+        right
+            .update_batch(&[Arc::new(
+                Decimal128Array::from(vec![
+                    decimal("99.99"),
+                    decimal("1000.00"),
+                    decimal("45.50"),
+                    decimal("45.50"),
+                    decimal("999999.99"),
+                ])
+                .with_precision_and_scale(10, 2)
+                .expect("valid Decimal128(10, 2)"),
+            )])
+            .expect("update_batch on right partition");
+
+        let left_state = left.state().expect("serialize left partial state");
+        let right_state = right.state().expect("serialize right partial state");
+
+        let mut merged = AmountRangeAccumulator::default();
+        for state in [left_state, right_state] {
+            let mins =
+                datafusion::common::ScalarValue::iter_to_array(std::iter::once(state[0].clone()))
+                    .expect("build mins array");
+            let maxes =
+                datafusion::common::ScalarValue::iter_to_array(std::iter::once(state[1].clone()))
+                    .expect("build maxes array");
+            merged
+                .merge_batch(&[mins, maxes])
+                .expect("merge_batch combines a partial state");
+        }
+
+        let range = merged.evaluate().expect("evaluate merged accumulator");
+        assert_eq!(
+            range,
+            datafusion::common::ScalarValue::Decimal128(
+                Some(decimal("999999.99") - decimal("0.01")),
+                10,
+                2
+            ),
+            "merging two partitions' partial state must reproduce the fixture's full \
+             max-minus-min, proving merge_batch - not just update_batch - is correct"
+        );
+    }
+
+    #[tokio::test]
     async fn cast_string_to_decimal_diverges_from_spark_on_malformed_input() {
         let ctx = SessionContext::new();
 
@@ -1448,5 +2299,179 @@ mod tests {
             "dropping the stream must eventually run RefCountedTempFile's Drop impl and clean \
              up any in-flight spill files via ordinary Rust scope exit, got: {progress:?}"
         );
+    }
+
+    async fn context_over_memory_provider() -> SessionContext {
+        let batch = fixture_to_orders_batch(&fixture_path()).expect("fixture parses");
+        let ctx = SessionContext::new();
+        ctx.register_table(
+            "orders_mem",
+            Arc::new(OrdersMemoryTableProvider::new(vec![batch])),
+        )
+        .expect("register custom TableProvider");
+        ctx
+    }
+
+    #[tokio::test]
+    async fn custom_table_provider_plan_names_its_own_exec() {
+        let ctx = context_over_memory_provider().await;
+
+        let plan = ctx
+            .sql("EXPLAIN SELECT * FROM orders_mem")
+            .await
+            .expect("plan query")
+            .collect()
+            .await
+            .expect("collect explain rows");
+        let plan_text = arrow::util::pretty::pretty_format_batches(&plan)
+            .expect("format explain output")
+            .to_string();
+
+        assert!(
+            plan_text.contains("OrdersMemoryExec"),
+            "expected the custom ExecutionPlan's name in the physical plan, got:\n{plan_text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn custom_table_provider_pushes_projection_into_scan() {
+        let ctx = context_over_memory_provider().await;
+
+        let rows = ctx
+            .sql("SELECT id, note FROM orders_mem")
+            .await
+            .expect("plan query")
+            .collect()
+            .await
+            .expect("collect rows");
+
+        let schema = rows[0].schema();
+        assert_eq!(
+            schema.fields().iter().map(|f| f.name()).collect::<Vec<_>>(),
+            vec!["id", "note"],
+            "scan's projection argument should have limited OrdersMemoryExec's output \
+             to exactly the two selected columns"
+        );
+    }
+
+    #[tokio::test]
+    async fn custom_table_provider_matches_parquet_provider_row_count() {
+        let memory_ctx = context_over_memory_provider().await;
+        let (parquet_ctx, _parquet) = context_over_fixture().await;
+
+        let memory_rows = memory_ctx
+            .sql("SELECT COUNT(*) AS n FROM orders_mem")
+            .await
+            .expect("plan query")
+            .collect()
+            .await
+            .expect("collect rows");
+        let parquet_rows = parquet_ctx
+            .sql("SELECT COUNT(*) AS n FROM orders")
+            .await
+            .expect("plan query")
+            .collect()
+            .await
+            .expect("collect rows");
+
+        assert_eq!(
+            memory_rows[0].column(0).as_ref(),
+            parquet_rows[0].column(0).as_ref(),
+            "the hand-rolled TableProvider and the Parquet-backed one must agree on row \
+             count over the same fixture"
+        );
+    }
+
+    // The three tests below close out the extension-API tour's remaining
+    // SQL-surface claims: a CTE, a set operation, and BigQuery-style pipe
+    // (`|>`) syntax. Grokking Simplicity lens: each is a Calculation-only
+    // check (same `ctx.sql(..).collect()` in, same `Vec<RecordBatch>` out),
+    // so the "prove, don't assert" pattern used throughout this file still
+    // applies - assert actual row counts/values, not just that planning
+    // succeeded. DDIA lens worth naming once: CTEs and `EXCEPT` are
+    // standard SQL, portable across engines; the pipe operator is not -
+    // DataFusion accepts it under the default `Generic` dialect, but a
+    // query written with `|>` will not run unmodified against a database
+    // that hasn't adopted this still-spreading syntax. That is the
+    // trade-off this syntax buys: easier left-to-right reading at the cost
+    // of portability.
+
+    #[tokio::test]
+    async fn cte_query_matches_equivalent_subquery() {
+        let (ctx, _parquet) = context_over_fixture().await;
+
+        let cte_batches = ctx
+            .sql(
+                "WITH high_value AS (SELECT id FROM orders WHERE amount > 100) \
+                 SELECT id FROM high_value ORDER BY id",
+            )
+            .await
+            .expect("plan CTE query")
+            .collect()
+            .await
+            .expect("execute CTE query");
+        let subquery_batches = ctx
+            .sql("SELECT id FROM (SELECT id FROM orders WHERE amount > 100) ORDER BY id")
+            .await
+            .expect("plan subquery query")
+            .collect()
+            .await
+            .expect("execute subquery query");
+
+        assert_eq!(cte_batches, subquery_batches);
+        let total_rows: usize = cte_batches.iter().map(RecordBatch::num_rows).sum();
+        // amount > 100 keeps ids 2 (250.75), 4 (1000.00), 8 (999999.99).
+        assert_eq!(total_rows, 3);
+    }
+
+    #[tokio::test]
+    async fn except_set_operation_removes_matching_rows() {
+        let (ctx, _parquet) = context_over_fixture().await;
+
+        let batches = ctx
+            .sql(
+                "SELECT id FROM (
+                     SELECT id FROM orders WHERE amount > 40
+                     EXCEPT
+                     SELECT id FROM orders WHERE amount > 500
+                 ) t ORDER BY id",
+            )
+            .await
+            .expect("plan EXCEPT query")
+            .collect()
+            .await
+            .expect("execute EXCEPT query");
+
+        assert_eq!(batches.len(), 1);
+        let ids = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("id column is Int64");
+        // amount > 40 keeps {1, 2, 3, 4, 5, 6, 8}; amount > 500 keeps {4, 8};
+        // EXCEPT removes the latter from the former, leaving {1, 2, 3, 5, 6}.
+        assert_eq!(ids.values(), &[1, 2, 3, 5, 6]);
+    }
+
+    #[tokio::test]
+    async fn pipe_operator_syntax_matches_equivalent_standard_sql() {
+        let (ctx, _parquet) = context_over_fixture().await;
+
+        let pipe_batches = ctx
+            .sql("SELECT * FROM orders |> WHERE amount > 100 |> SELECT id |> ORDER BY id")
+            .await
+            .expect("plan pipe-syntax query")
+            .collect()
+            .await
+            .expect("execute pipe-syntax query");
+        let standard_batches = ctx
+            .sql("SELECT id FROM orders WHERE amount > 100 ORDER BY id")
+            .await
+            .expect("plan standard-syntax query")
+            .collect()
+            .await
+            .expect("execute standard-syntax query");
+
+        assert_eq!(pipe_batches, standard_batches);
     }
 }
