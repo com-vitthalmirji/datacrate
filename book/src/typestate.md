@@ -116,7 +116,40 @@ This runs the happy-path tests plus a `trybuild` suite
 compile error when any one stage is missing - proof that the guarantee is
 real, not just documented.
 
-Local callbacks are `FnOnce`: the consuming `build` calls each callback once,
-so it may consume captured resources. Remote transforms remain repeatable `Fn`
-callbacks because they run once per batch. These bounds do not add thread-sharing
+## Configuration and callback boundaries
+
+That boxed `Fn` design solved capturing, but still rejected a callback that
+consumed a captured resource. The local `build` consumes the builder and calls
+each callback once, so requiring repeatability bought no additional guarantee.
+Local callbacks now use `Box<dyn FnOnce(RecordBatch) -> RecordBatch>`, and their
+setters accept `FnOnce + 'static`. Remote transforms retain a separate repeatable
+`Fn` alias because they run once per batch. These bounds do not add thread-sharing
 requirements or imply schema validation.
+
+The local `build` eagerly reads the CSV fixture, runs its two batch callbacks
+and returns the batch. Its `sink` callback does not itself publish to storage.
+The remote builder instead wraps the bounded pipeline and names an output
+object. Stage presence alone establishes neither declaration compatibility nor
+validation of external data.
+
+The bounded pipeline previously accepted a zero batch size and asserted later;
+the remote path could already have downloaded input before reaching that
+assertion. `PipelineConfig.batch_size` now uses `NonZeroUsize`, and both pipeline
+CLIs parse that type before execution. Zero and values above `usize::MAX` are
+argument errors rather than a later pipeline panic. A custom configuration can
+be constructed inside a function returning `Result`:
+
+```rust,ignore
+use std::num::NonZeroUsize;
+use pipeline::bounded::PipelineConfig;
+
+let config = PipelineConfig {
+    batch_size: "250".parse::<NonZeroUsize>()?,
+    channel_capacity: 0,
+    ..PipelineConfig::default()
+};
+```
+
+Defaults remain 1,000 rows per batch, capacity 4 and Snappy compression. Capacity
+zero remains a valid rendezvous channel. A row-count bound is not a byte ceiling:
+wide input rows, transformed batches and backend allocations still matter.

@@ -313,14 +313,20 @@ A closure is an anonymous function that can capture variables from its
 surrounding scope - `|args| { ... }`, same shape as Scala's
 `(args) => { ... }` or Python's `lambda args: ...`. [The typestate pipeline
 builder](typestate.md) stores closures behind
-`Box<dyn Fn(RecordBatch) -> RecordBatch>`: `Box` puts the closure on the heap
-(closures can have different sizes depending on what they capture, so they
-can't live directly in a struct field without one), and `dyn Fn` means "any
-type implementing the `Fn` trait, decided at runtime" rather than "one
-specific closure type fixed at compile time."
+`Box<dyn FnOnce(RecordBatch) -> RecordBatch>`: `Box` puts the closure on the heap
+and erases its concrete type behind `dyn FnOnce`. The builder can store
+caller-supplied closures of different sizes behind one pointer type without
+adding the closure's concrete type to its generic parameters. Generic structs
+can store closures directly; boxing is the choice this builder makes.
 
-**JVM bridge**: `Box<dyn Fn(RecordBatch) -> RecordBatch>` is doing the job
-of `RecordBatch => RecordBatch` (a `Function1` value) - Scala's function
+The local builder previously used `Fn`, which allowed capturing state but required
+a repeatable call. It now uses `FnOnce` because consuming `build` invokes each
+callback only once; a callback may therefore move out a captured resource.
+The remote builder keeps `Fn` because it invokes the transform for every batch.
+
+**JVM bridge**: `Box<dyn FnOnce(RecordBatch) -> RecordBatch>` is doing the job
+of `RecordBatch => RecordBatch` (a `Function1` value), with Rust additionally
+allowing this owned callback to be consumed when called. Scala's function
 types are reference types by default, so you get the heap allocation and
 dynamic dispatch for free; Rust makes both explicit in the type because it
 otherwise defaults to zero-cost, statically-dispatched closures.
