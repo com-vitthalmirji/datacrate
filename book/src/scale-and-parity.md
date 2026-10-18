@@ -417,3 +417,10 @@ just m36-polars
 
 Confirm all engines agree on the small dataset before spending the disk and
 time budget on the full 91GB run.
+
+The orders and shipments generators require a nonzero batch size. Timestamp
+products use i128 before division and checked narrowing to i64. The orders
+generator retains its total-row divisor; shipments retain the billion-order
+divisor and delivery-day offsets. Shipments reject a requested range before
+creating output if any emitted timestamp would exceed i64 microseconds. These
+changes do not regenerate existing benchmark datasets or establish new timings.
