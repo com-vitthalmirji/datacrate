@@ -146,3 +146,8 @@ cargo test -p contracts -p contracts-derive
 Includes `trybuild` cases proving an `Exact`-policy mismatch is a genuine
 compile error, and a case proving `#[derive(Contract)]` itself is rejected
 on generic structs (a bare type parameter has no shape the macro can see).
+
+Compatibility verdicts visit the relevant shape tree independently of the display
+limits. Policies filter tolerated differences before they consume diagnostic
+slots. At most eight rejecting differences and six path segments are rendered;
+additional differences or deeper paths still reject the declaration.

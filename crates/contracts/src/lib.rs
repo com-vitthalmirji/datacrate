@@ -19,27 +19,17 @@
 //! comparison the same way — see `nested_optionality_is_preserved` in the
 //! test module.
 //!
-//! # Known permanent gap vs. `compile-time-data-contracts`
+//! # Diagnostic limits on the pinned stable toolchain vs. `compile-time-data-contracts`
 //!
 //! This crate's Scala counterpart, `compile-time-data-contracts` (CTDC),
 //! renders an unbounded [`Vec`]-backed diff list with arbitrarily rich
 //! per-field text, because its macros run as ordinary compile-time Scala
-//! with full heap/`String`/`List` access. Rust's stable `const fn`
-//! evaluator has no heap: no `Vec`, no runtime `String` building. This
-//! crate's diagnostics are therefore, by necessity, both **bounded**
-//! (`MAX_DIFFS` diffs, `MAX_PATH_DEPTH` path segments each — a diff or
-//! path segment beyond either bound still fails the check, it just isn't
-//! individually named in the message) and **composed from fixed static
-//! strings** rather than freely formatted: each diff's optional/default
-//! annotation is selected from a small set of precomputed `&'static str`
-//! literals, and a `Mismatch`'s `expected`/`found` labels are ordinary
-//! `&'static str` values spliced in as their own `const_panic::concat_panic!`
-//! arguments (the same way path segments already are), since
-//! `const_format::concatcp!` cannot concatenate non-literal `const fn`
-//! parameters. This is a disclosed, permanent architectural limitation, not an
-//! oversight — closing it fully would mean abandoning `const fn`/CTFE
-//! diagnostics for a build-time codegen step, which this crate deliberately
-//! does not do.
+//! with full heap/`String`/`List` access. This implementation uses fixed
+//! arrays and static labels for stable const evaluation on Rust 1.97.1:
+//! at most `MAX_DIFFS` rejections and `MAX_PATH_DEPTH` path segments are
+//! rendered. These display limits never determine the compatibility verdict.
+//! Future language capabilities may allow richer diagnostics without changing
+//! the policy relation.
 
 // `SchemaConforms::CHECK`'s hand-unrolled `concat_panic!` call has ~90
 // arguments (8 diff slots x ~11 pieces each) — well past `concat_panic!`'s
@@ -214,7 +204,7 @@ impl SchemaPolicyMarker for Full {
 /// regardless of policy.
 #[must_use]
 pub const fn conforms(producer: TypeShape, contract: TypeShape, policy: SchemaPolicy) -> bool {
-    diagnose_all(producer, contract, policy).len == 0
+    !compare(producer, contract, policy).rejected
 }
 
 /// How many `.`-separated segments a mismatch path can hold (e.g.
@@ -380,6 +370,44 @@ impl Diffs {
     }
 }
 
+/// Owns the policy verdict independently of the bounded diagnostic display.
+struct Comparison {
+    policy: SchemaPolicy,
+    rejected: bool,
+    diffs: Diffs,
+}
+
+impl Comparison {
+    const fn new(policy: SchemaPolicy) -> Self {
+        Self {
+            policy,
+            rejected: false,
+            diffs: Diffs::new(),
+        }
+    }
+
+    const fn push(&mut self, diff: Diff) {
+        if rejects(diff, self.policy) {
+            self.rejected = true;
+            self.diffs.push(diff);
+        }
+    }
+}
+
+/// Applies compatibility policy before a difference consumes display capacity.
+const fn rejects(diff: Diff, policy: SchemaPolicy) -> bool {
+    match policy {
+        SchemaPolicy::Full => false,
+        SchemaPolicy::Backward => match diff.kind {
+            DiffKind::Missing => !diff.optional_or_default,
+            DiffKind::Extra => false,
+            DiffKind::Mismatch => true,
+        },
+        SchemaPolicy::Forward => !matches!(diff.kind, DiffKind::Missing),
+        _ => true,
+    }
+}
+
 /// The three traversal booleans CTDC's `SchemaPolicy` computes, bundled into
 /// one value so the recursive comparison functions below take one extra
 /// argument instead of three.
@@ -425,13 +453,10 @@ const fn policy_mode(policy: SchemaPolicy) -> Mode {
     }
 }
 
-/// Compares `producer` against `contract` under `policy`, returning every
-/// diff the traversal finds (bounded by `MAX_DIFFS`), already filtered per
-/// `policy`'s CTDC-matching rules. `conforms` is defined in terms of this
-/// function's result being empty, so the two can never disagree.
-const fn diagnose_all(producer: TypeShape, contract: TypeShape, policy: SchemaPolicy) -> Diffs {
+/// Traverses the shapes once, recording rejection independently of rendering.
+const fn compare(producer: TypeShape, contract: TypeShape, policy: SchemaPolicy) -> Comparison {
     let mode = policy_mode(policy);
-    let mut diffs = Diffs::new();
+    let mut diffs = Comparison::new(policy);
     match (&producer, &contract) {
         (TypeShape::Struct(producer_fields), TypeShape::Struct(contract_fields)) => {
             compare_fields(
@@ -453,47 +478,7 @@ const fn diagnose_all(producer: TypeShape, contract: TypeShape, policy: SchemaPo
             }
         }
     }
-    filter_diffs(diffs, policy)
-}
-
-/// Applies CTDC's exact per-policy diff-retention rules:
-/// ```text
-/// miss1 = if isBackward then miss0.filterNot(optional_or_default)
-///         else if isForward || isFull then Nil
-///         else miss0
-/// extra1 = if isBackward || isFull then Nil else extra0
-/// mism1  = if isFull then Nil else mism0
-/// ```
-/// `Full` is a genuine escape hatch: every diff is dropped, so the check
-/// always passes.
-const fn filter_diffs(diffs: Diffs, policy: SchemaPolicy) -> Diffs {
-    if matches!(policy, SchemaPolicy::Full) {
-        return Diffs::new();
-    }
-    let is_backward = matches!(policy, SchemaPolicy::Backward);
-    let is_forward = matches!(policy, SchemaPolicy::Forward);
-    let mut out = Diffs::new();
-    let mut i = 0;
-    while i < diffs.len {
-        if let Some(diff) = diffs.items[i] {
-            let keep = match diff.kind {
-                DiffKind::Missing => {
-                    if is_backward {
-                        !diff.optional_or_default
-                    } else {
-                        !is_forward
-                    }
-                }
-                DiffKind::Extra => !is_backward,
-                DiffKind::Mismatch => true,
-            };
-            if keep {
-                out.push(diff);
-            }
-        }
-        i += 1;
-    }
-    out
+    diffs
 }
 
 /// Dispatches to the traversal shape `ordered`/`by_pos` select, mirroring
@@ -504,7 +489,7 @@ const fn compare_fields(
     path: [&'static str; MAX_PATH_DEPTH],
     depth: usize,
     mode: Mode,
-    diffs: &mut Diffs,
+    diffs: &mut Comparison,
 ) {
     if mode.by_pos {
         compare_by_position(producer, contract, path, depth, mode, diffs);
@@ -524,7 +509,7 @@ const fn compare_by_name(
     path: [&'static str; MAX_PATH_DEPTH],
     depth: usize,
     mode: Mode,
-    diffs: &mut Diffs,
+    diffs: &mut Comparison,
 ) {
     let mut i = 0;
     while i < contract.len() {
@@ -570,7 +555,7 @@ const fn compare_ordered(
     path: [&'static str; MAX_PATH_DEPTH],
     depth: usize,
     mode: Mode,
-    diffs: &mut Diffs,
+    diffs: &mut Comparison,
 ) {
     let shared = min_len(producer.len(), contract.len());
     let mut i = 0;
@@ -618,7 +603,7 @@ const fn compare_by_position(
     path: [&'static str; MAX_PATH_DEPTH],
     depth: usize,
     mode: Mode,
-    diffs: &mut Diffs,
+    diffs: &mut Comparison,
 ) {
     let shared = min_len(producer.len(), contract.len());
     let mut i = 0;
@@ -659,7 +644,7 @@ const fn compare_shapes(
     path: [&'static str; MAX_PATH_DEPTH],
     depth: usize,
     mode: Mode,
-    diffs: &mut Diffs,
+    diffs: &mut Comparison,
 ) {
     match (producer, contract) {
         (TypeShape::Primitive(p), TypeShape::Primitive(c)) => {
@@ -941,8 +926,9 @@ where
     /// a fixed number of slots. Hand-unrolled per `MAX_DIFFS` slot, the
     /// same acceptable tradeoff already used for `MAX_PATH_DEPTH`.
     pub const CHECK: () = {
-        let diffs = diagnose_all(Producer::SHAPE, ContractT::SHAPE, Policy::POLICY);
-        if diffs.len > 0 {
+        let comparison = compare(Producer::SHAPE, ContractT::SHAPE, Policy::POLICY);
+        let diffs = comparison.diffs;
+        if comparison.rejected {
             const_panic::concat_panic!(
                 const_panic::FmtArg::DISPLAY;
                 "producer schema does not conform to the contract: ",
@@ -1213,11 +1199,12 @@ mod tests {
             id: i64,
             name: String,
         }
-        let diffs = diagnose_all(
+        let diffs = compare(
             Producer::SHAPE,
             ContractT::SHAPE,
             SchemaPolicy::ExactOrdered,
-        );
+        )
+        .diffs;
         // Index 0: producer `name`(String) vs contract `id`(i64) — name
         // mismatch AND shape mismatch. Index 1: mirror image. 4 diffs total.
         assert_eq!(diffs.len, 4);
@@ -1378,11 +1365,12 @@ mod tests {
 
         #[test]
         fn one_level_nested_mismatch_reports_dotted_path() {
-            let diffs = diagnose_all(
+            let diffs = compare(
                 ShipToProducer::SHAPE,
                 ShipToZipMismatch::SHAPE,
                 SchemaPolicy::Exact,
-            );
+            )
+            .diffs;
             assert_eq!(diffs.len, 1);
             let diff = diffs.items[0].expect("diff must be present");
             assert_eq!(diff.kind, DiffKind::Mismatch);
@@ -1393,11 +1381,12 @@ mod tests {
 
         #[test]
         fn two_level_nested_mismatch_reports_full_path() {
-            let diffs = diagnose_all(
+            let diffs = compare(
                 OrderProducer::SHAPE,
                 OrderGeoMismatch::SHAPE,
                 SchemaPolicy::Exact,
-            );
+            )
+            .diffs;
             assert_eq!(diffs.len, 1);
             let diff = diffs.items[0].expect("diff must be present");
             assert_eq!(diff.kind, DiffKind::Mismatch);
@@ -1415,11 +1404,12 @@ mod tests {
             // which inner field is the culprit: `zip` is present on the
             // producer's nested Address but absent from the contract's, so
             // it's reported as an Extra field, not a vague outer mismatch.
-            let diffs = diagnose_all(
+            let diffs = compare(
                 ShipToProducer::SHAPE,
                 ShipToMissingZip::SHAPE,
                 SchemaPolicy::Exact,
-            );
+            )
+            .diffs;
             assert_eq!(diffs.len, 1);
             let diff = diffs.items[0].expect("diff must be present");
             assert_eq!(diff.kind, DiffKind::Extra);
@@ -1448,7 +1438,7 @@ mod tests {
 
         #[test]
         fn sequence_element_mismatch_appends_bracket_segment() {
-            let diffs = diagnose_all(Producer::SHAPE, ContractT::SHAPE, SchemaPolicy::Exact);
+            let diffs = compare(Producer::SHAPE, ContractT::SHAPE, SchemaPolicy::Exact).diffs;
             let items_diff = diffs
                 .items
                 .iter()
@@ -1460,7 +1450,7 @@ mod tests {
 
         #[test]
         fn map_value_mismatch_appends_value_segment() {
-            let diffs = diagnose_all(Producer::SHAPE, ContractT::SHAPE, SchemaPolicy::Exact);
+            let diffs = compare(Producer::SHAPE, ContractT::SHAPE, SchemaPolicy::Exact).diffs;
             let scores_diff = diffs
                 .items
                 .iter()
@@ -1484,8 +1474,151 @@ mod tests {
             id: String,
             note: bool,
         }
-        let diffs = diagnose_all(Producer::SHAPE, ContractT::SHAPE, SchemaPolicy::Exact);
+        let diffs = compare(Producer::SHAPE, ContractT::SHAPE, SchemaPolicy::Exact).diffs;
         assert_eq!(diffs.len, 2);
+    }
+
+    const LATE_CONTRACT: TypeShape = TypeShape::Struct(&[
+        FieldShape {
+            name: "a",
+            shape: TypeShape::Optional(&TypeShape::Primitive("i64")),
+            has_default: false,
+        },
+        FieldShape {
+            name: "b",
+            shape: TypeShape::Optional(&TypeShape::Primitive("i64")),
+            has_default: false,
+        },
+        FieldShape {
+            name: "c",
+            shape: TypeShape::Optional(&TypeShape::Primitive("i64")),
+            has_default: false,
+        },
+        FieldShape {
+            name: "d",
+            shape: TypeShape::Optional(&TypeShape::Primitive("i64")),
+            has_default: false,
+        },
+        FieldShape {
+            name: "e",
+            shape: TypeShape::Optional(&TypeShape::Primitive("i64")),
+            has_default: false,
+        },
+        FieldShape {
+            name: "f",
+            shape: TypeShape::Optional(&TypeShape::Primitive("i64")),
+            has_default: false,
+        },
+        FieldShape {
+            name: "g",
+            shape: TypeShape::Optional(&TypeShape::Primitive("i64")),
+            has_default: false,
+        },
+        FieldShape {
+            name: "h",
+            shape: TypeShape::Optional(&TypeShape::Primitive("i64")),
+            has_default: false,
+        },
+        FieldShape {
+            name: "id",
+            shape: TypeShape::Primitive("i64"),
+            has_default: false,
+        },
+    ]);
+    const LATE_PRODUCER: TypeShape = TypeShape::Struct(&[FieldShape {
+        name: "id",
+        shape: TypeShape::Primitive("String"),
+        has_default: false,
+    }]);
+
+    #[test]
+    fn backward_rejects_mismatch_after_tolerated_missing_fields() {
+        assert!(!conforms(
+            LATE_PRODUCER,
+            LATE_CONTRACT,
+            SchemaPolicy::Backward
+        ));
+    }
+
+    #[test]
+    fn forward_rejects_mismatch_after_tolerated_missing_fields() {
+        assert!(!conforms(
+            LATE_PRODUCER,
+            LATE_CONTRACT,
+            SchemaPolicy::Forward
+        ));
+    }
+
+    #[test]
+    fn policies_keep_rejections_beyond_diagnostic_capacity() {
+        for policy in [
+            SchemaPolicy::Exact,
+            SchemaPolicy::ExactUnorderedCI,
+            SchemaPolicy::ExactOrdered,
+            SchemaPolicy::ExactOrderedCI,
+            SchemaPolicy::ExactByPosition,
+            SchemaPolicy::Backward,
+            SchemaPolicy::Forward,
+        ] {
+            assert!(
+                !conforms(LATE_PRODUCER, LATE_CONTRACT, policy),
+                "{policy:?}"
+            );
+        }
+        assert!(conforms(LATE_PRODUCER, LATE_CONTRACT, SchemaPolicy::Full));
+    }
+
+    #[test]
+    fn mismatch_below_display_path_limit_still_rejects() {
+        const PRODUCER: TypeShape = TypeShape::Struct(&[FieldShape {
+            name: "deep",
+            shape: TypeShape::Sequence(&TypeShape::Sequence(&TypeShape::Sequence(
+                &TypeShape::Sequence(&TypeShape::Sequence(&TypeShape::Sequence(
+                    &TypeShape::Sequence(&TypeShape::Primitive("String")),
+                ))),
+            ))),
+            has_default: false,
+        }]);
+        const TARGET: TypeShape = TypeShape::Struct(&[FieldShape {
+            name: "deep",
+            shape: TypeShape::Sequence(&TypeShape::Sequence(&TypeShape::Sequence(
+                &TypeShape::Sequence(&TypeShape::Sequence(&TypeShape::Sequence(
+                    &TypeShape::Sequence(&TypeShape::Primitive("i64")),
+                ))),
+            ))),
+            has_default: false,
+        }]);
+        assert!(!conforms(PRODUCER, TARGET, SchemaPolicy::Exact));
+        assert_eq!(compare(PRODUCER, TARGET, SchemaPolicy::Exact).diffs.len, 1);
+    }
+
+    #[test]
+    fn backward_rejects_after_tolerated_nested_extras() {
+        const PRODUCER: TypeShape = TypeShape::Struct(&[
+            FieldShape {
+                name: "group",
+                shape: LATE_CONTRACT,
+                has_default: false,
+            },
+            FieldShape {
+                name: "id",
+                shape: TypeShape::Primitive("String"),
+                has_default: false,
+            },
+        ]);
+        const TARGET: TypeShape = TypeShape::Struct(&[
+            FieldShape {
+                name: "group",
+                shape: TypeShape::Struct(&[]),
+                has_default: false,
+            },
+            FieldShape {
+                name: "id",
+                shape: TypeShape::Primitive("i64"),
+                has_default: false,
+            },
+        ]);
+        assert!(!conforms(PRODUCER, TARGET, SchemaPolicy::Backward));
     }
 
     #[test]
