@@ -27,3 +27,4 @@ supersedes it, and mark the old one's Status as `Superseded by ADR-XXXX`.
 - [0012. Completion manifest for S3 output](0012-completion-manifest-for-s3-output.md)
 - [0013. Real MinIO container for failure-path tests](0013-real-minio-container-for-failure-path-tests.md)
 - [0014. Defer readiness findings with explicit guarantee boundaries](0014-defer-readiness-findings-with-explicit-guarantee-boundaries.md)
+- [0015. Strengthen contract and pipeline boundaries using Rust traits and const evaluation](0015-strengthen-contract-and-pipeline-boundaries-from-rust-trait-and-const-design.md)
