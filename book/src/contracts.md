@@ -151,3 +151,8 @@ Compatibility verdicts visit the relevant shape tree independently of the displa
 limits. Policies filter tolerated differences before they consume diagnostic
 slots. At most eight rejecting differences and six path segments are rendered;
 additional differences or deeper paths still reject the declaration.
+
+Name-based policies reject duplicate matching names on either side, including
+ASCII case collisions under `Exact` and `ExactUnorderedCI`. Ordered and positional
+policies retain index-based pairing. Case-insensitive matching folds ASCII only;
+non-ASCII names must match exactly. `Full` remains an unchecked escape hatch.

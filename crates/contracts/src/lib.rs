@@ -511,6 +511,16 @@ const fn compare_by_name(
     mode: Mode,
     diffs: &mut Comparison,
 ) {
+    if let Some(name) = duplicate_field_name(producer, mode.ci) {
+        let (field_path, _) = append_segment(path, depth, name);
+        diffs.push(mismatch_diff_labeled(field_path, "unique field name", name));
+        return;
+    }
+    if let Some(name) = duplicate_field_name(contract, mode.ci) {
+        let (field_path, _) = append_segment(path, depth, name);
+        diffs.push(mismatch_diff_labeled(field_path, "unique field name", name));
+        return;
+    }
     let mut i = 0;
     while i < contract.len() {
         let c = &contract[i];
@@ -709,6 +719,27 @@ const fn sep(segment: &'static str) -> &'static str {
     if segment.is_empty() { "" } else { "." }
 }
 
+/// Name-based matching requires a one-to-one correspondence on each side.
+const fn duplicate_field_name(fields: &[FieldShape], ci: bool) -> Option<&'static str> {
+    let mut i = 0;
+    while i < fields.len() {
+        let mut j = i + 1;
+        while j < fields.len() {
+            let same = if ci {
+                str_eq_ci(fields[i].name, fields[j].name)
+            } else {
+                str_eq(fields[i].name, fields[j].name)
+            };
+            if same {
+                return Some(fields[j].name);
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    None
+}
+
 const fn find_field_mode<'a>(
     fields: &'a [FieldShape],
     name: &str,
@@ -777,8 +808,8 @@ const fn str_eq(a: &str, b: &str) -> bool {
     true
 }
 
-/// ASCII case-insensitive byte comparison — sufficient here since field
-/// names are Rust identifiers, always ASCII.
+/// ASCII case-insensitive byte comparison. Non-ASCII identifier bytes must
+/// match exactly; this does not perform Unicode case folding.
 const fn str_eq_ci(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
     if a.len() != b.len() {
