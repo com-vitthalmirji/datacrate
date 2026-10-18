@@ -59,18 +59,22 @@ pub fn derive_contract(input: TokenStream) -> TokenStream {
         }
     };
 
-    let field_entries = fields.iter().map(|f| {
+    let mut field_entries = Vec::with_capacity(fields.len());
+    for f in fields {
         let field_name = f
             .ident
             .as_ref()
             .expect("named field guaranteed by Fields::Named")
             .to_string();
         let shape = shape_tokens(&f.ty);
-        let has_default = has_default_attr(f);
-        quote! {
+        let has_default = match has_default_attr(f) {
+            Ok(value) => value,
+            Err(error) => return error.to_compile_error().into(),
+        };
+        field_entries.push(quote! {
             ::contracts::FieldShape { name: #field_name, shape: #shape, has_default: #has_default }
-        }
-    });
+        });
+    }
 
     let expanded = quote! {
         impl ::contracts::Contract for #name {
@@ -170,19 +174,41 @@ fn shape_tokens(ty: &Type) -> TokenStream2 {
 /// Scala default value, which has no runtime-inspectable equivalent here.
 /// A field carrying this attribute is treated as tolerable-if-missing under
 /// `SchemaPolicy::Backward`, the same way an `Option<T>` field already is.
-fn has_default_attr(field: &syn::Field) -> bool {
+fn has_default_attr(field: &syn::Field) -> syn::Result<bool> {
     let mut found = false;
     for attr in &field.attrs {
-        if attr.path().is_ident("contract") {
-            let _ = attr.parse_nested_meta(|meta| {
-                if meta.path.is_ident("default") {
-                    found = true;
-                }
-                Ok(())
-            });
+        if !attr.path().is_ident("contract") {
+            continue;
         }
+        if found {
+            return Err(syn::Error::new_spanned(
+                attr,
+                "duplicate contract attribute",
+            ));
+        }
+        let mut parsed_default = false;
+        attr.parse_nested_meta(|meta| {
+            if !meta.path.is_ident("default") {
+                return Err(meta.error("expected `default`"));
+            }
+            if parsed_default {
+                return Err(meta.error("duplicate `default`"));
+            }
+            if !meta.input.is_empty() && !meta.input.peek(syn::Token![,]) {
+                return Err(meta.error("`default` does not accept a value or arguments"));
+            }
+            parsed_default = true;
+            Ok(())
+        })?;
+        if !parsed_default {
+            return Err(syn::Error::new_spanned(
+                attr,
+                "expected `contract(default)`",
+            ));
+        }
+        found = true;
     }
-    found
+    Ok(found)
 }
 
 /// Rust/std primitive type names left as opaque `Primitive` shapes rather
