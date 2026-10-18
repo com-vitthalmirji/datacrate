@@ -91,6 +91,17 @@ pub trait Contract {
     const SHAPE: TypeShape;
 }
 
+/// Evaluates declaration compatibility for an instantiated generic call.
+///
+/// An incompatible call fails during a build's const evaluation. `cargo check`
+/// alone may not instantiate the call, and unused generic code is not proof.
+/// For a concrete unconditional check, prefer an item-level
+/// `const _: () = SchemaConforms::<P, C, M>::CHECK;`.
+/// This checks declarations, not external data or transformed batches.
+pub fn enforce<P: Contract, C: Contract, M: SchemaPolicyMarker>() {
+    const { SchemaConforms::<P, C, M>::CHECK };
+}
+
 /// How strictly a producer's shape must match a contract's shape.
 ///
 /// Every field comparison, at every nesting level, is governed by the same
