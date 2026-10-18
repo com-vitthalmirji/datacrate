@@ -24,11 +24,10 @@ use object_store::{ObjectMeta, ObjectStore, ObjectStoreExt, WriteMultipart};
 use crate::PipelineIoError;
 use crate::manifest::CompletionManifest;
 
-/// Chunk size for both directions: how much of the object/file is held in
-/// memory at once. Comfortably above `object_store`'s 5 MiB multipart-part
-/// minimum so `upload_from_temp` doesn't pay a part-per-tiny-chunk penalty,
-/// small enough that peak RSS tracks this constant, not the file size.
+/// File read size and multipart part size. Above the 5 MiB S3 part minimum.
 const CHUNK_BYTES: usize = 8 * 1024 * 1024;
+/// Limits scheduled upload parts independently of the pipeline batch channel.
+const MAX_UPLOAD_PARTS: usize = 2;
 
 fn block_on<F: std::future::Future>(future: F) -> F::Output {
     assert!(
@@ -136,10 +135,19 @@ pub fn upload_from_temp(
                     key: key.clone(),
                     source,
                 })?;
-        let mut writer = WriteMultipart::new(upload);
+        let mut writer = WriteMultipart::new_with_chunk_size(upload, CHUNK_BYTES);
 
         let mut buf = vec![0u8; CHUNK_BYTES];
         loop {
+            // One aligned write can schedule at most one part. Waiting here also
+            // leaves capacity for a final partial part scheduled by finish().
+            writer
+                .wait_for_capacity(MAX_UPLOAD_PARTS)
+                .await
+                .map_err(|source| PipelineIoError::UploadObject {
+                    key: key.clone(),
+                    source,
+                })?;
             let read = file
                 .read(&mut buf)
                 .map_err(|source| PipelineIoError::OpenInput {

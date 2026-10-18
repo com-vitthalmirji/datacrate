@@ -130,14 +130,12 @@ const CHUNK_BYTES: usize = 8 * 1024 * 1024;
 and write the whole object to disk in one shot - it reads the object's size
 via `store.head(key)`, then walks it in `CHUNK_BYTES`-sized `get_range`
 calls, writing each chunk to the destination file as it arrives.
-`upload_from_temp` (`object_store_io.rs:120`) is the mirror: it reads the
-local file in `CHUNK_BYTES` chunks and feeds each one to a
-`WriteMultipart` upload, never holding more than one chunk plus the
-in-flight multipart state in memory. This matters concretely: a whole-file
-`get`/`bytes()` implementation measures peak RSS scaling linearly with input
-size - the chunked version doesn't, because it never materializes more than
-one 8 MiB window at a time regardless of whether the object is 10 MB or
-10 GB.
+`upload_from_temp` reads the local file in 8 MiB chunks and uses the same size
+for multipart parts. It awaits capacity before each write, allowing at most two
+scheduled parts, including the final partial part. This bound is independent of
+the producer/consumer batch channel. The local read buffer, multipart buffer and
+backend/runtime allocations add memory beyond the outstanding part payloads;
+this is not an exact process RSS ceiling.
 
 `CHUNK_BYTES` is chosen deliberately, not arbitrarily: 8 MiB sits comfortably
 above `object_store`'s 5 MiB multipart-part minimum, so uploads don't pay a
