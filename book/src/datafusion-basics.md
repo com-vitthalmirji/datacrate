@@ -412,3 +412,10 @@ between how a hash join and a hash aggregate behave once memory runs out.
 row-level Parquet filter pushdown, and `explain_analyze`
 (`datafusion_query.rs:404`), which reads `EXPLAIN ANALYZE` plans for runtime
 metrics, both live in that next chapter too.
+
+Orders CSV amounts accept `[+-]?[0-9]+\.[0-9]{2}` with no whitespace or exponent.
+The parser preserves negative fractions such as `-0.01` and enforces the
+Decimal128(10,2) range from `-99999999.99` through `99999999.99` before array
+construction. Invalid syntax or precision returns `InvalidAmount` with the row
+and original value. Setting Arrow precision/scale metadata alone is not value
+validation.

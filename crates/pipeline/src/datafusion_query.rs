@@ -91,14 +91,23 @@ struct OrderRow {
 
 /// Parses a fixed-scale-2 decimal string (e.g. `"100.00"`, `"0.01"`) into its
 /// unscaled `i128` representation (e.g. `10000`, `1`), matching
-/// `Decimal128(_, 2)`.
+/// `Decimal128(10, 2)`. Accepts an optional leading sign and ASCII digits.
+/// Values outside the declared precision are rejected before building arrays.
 fn parse_amount(row: usize, value: &str) -> Result<i128, PipelineIoError> {
     let invalid = || PipelineIoError::InvalidAmount {
         row,
         value: value.to_string(),
     };
     let (whole, frac) = value.split_once('.').ok_or_else(invalid)?;
-    if frac.len() != 2 {
+    let digits = whole
+        .strip_prefix('-')
+        .or_else(|| whole.strip_prefix('+'))
+        .unwrap_or(whole);
+    if digits.is_empty()
+        || !digits.bytes().all(|byte| byte.is_ascii_digit())
+        || frac.len() != 2
+        || !frac.bytes().all(|byte| byte.is_ascii_digit())
+    {
         return Err(invalid());
     }
     let whole: i128 = whole.parse().map_err(|_| invalid())?;
@@ -107,6 +116,7 @@ fn parse_amount(row: usize, value: &str) -> Result<i128, PipelineIoError> {
     whole
         .checked_mul(100)
         .and_then(|scaled| scaled.checked_add(sign * frac))
+        .filter(|amount| (-9_999_999_999..=9_999_999_999).contains(amount))
         .ok_or_else(invalid)
 }
 
