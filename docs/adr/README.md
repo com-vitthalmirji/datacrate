@@ -26,3 +26,4 @@ supersedes it, and mark the old one's Status as `Superseded by ADR-XXXX`.
 - [0011. Align local and CI build profiles](0011-align-local-and-ci-build-profiles.md)
 - [0012. Completion manifest for S3 output](0012-completion-manifest-for-s3-output.md)
 - [0013. Real MinIO container for failure-path tests](0013-real-minio-container-for-failure-path-tests.md)
+- [0014. Defer readiness findings with explicit guarantee boundaries](0014-defer-readiness-findings-with-explicit-guarantee-boundaries.md)

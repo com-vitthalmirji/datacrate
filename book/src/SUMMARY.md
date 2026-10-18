@@ -39,4 +39,5 @@
   - [0011. Align local and CI build profiles](adr/0011-align-local-and-ci-build-profiles.md)
   - [0012. Completion manifest for S3 output](adr/0012-completion-manifest-for-s3-output.md)
   - [0013. Real MinIO container for failure-path tests](adr/0013-real-minio-container-for-failure-path-tests.md)
+  - [0014. Defer readiness findings with explicit guarantee boundaries](adr/0014-defer-readiness-findings-with-explicit-guarantee-boundaries.md)
   - [ADR template](adr/TEMPLATE.md)
