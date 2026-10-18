@@ -5,6 +5,7 @@
 //! input, with S3 I/O excluded from both sides. See
 //! docs/adr/0005.1-stream-object-store-io-in-chunks.md.
 
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -27,8 +28,8 @@ struct Args {
     output: PathBuf,
 
     /// Rows per `RecordBatch`.
-    #[arg(long, default_value_t = 1_000)]
-    batch_size: usize,
+    #[arg(long, default_value = "1000")]
+    batch_size: NonZeroUsize,
 
     /// Capacity of the channel between the reader and writer threads.
     #[arg(long, default_value_t = 4)]
