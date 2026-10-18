@@ -313,8 +313,8 @@ A closure is an anonymous function that can capture variables from its
 surrounding scope - `|args| { ... }`, same shape as Scala's
 `(args) => { ... }` or Python's `lambda args: ...`. [The typestate pipeline
 builder](typestate.md) stores closures behind
-`Box<dyn FnOnce(RecordBatch) -> RecordBatch>`: `Box` puts the closure on the heap
-and erases its concrete type behind `dyn FnOnce`. The builder can store
+`Box<dyn FnOnce(RecordBatch) -> RecordBatch>`: `Box` puts the closure on the heap,
+and `dyn FnOnce` erases its concrete type. The builder can store
 caller-supplied closures of different sizes behind one pointer type without
 adding the closure's concrete type to its generic parameters. Generic structs
 can store closures directly; boxing is the choice this builder makes.
@@ -331,12 +331,11 @@ types are reference types by default, so you get the heap allocation and
 dynamic dispatch for free; Rust makes both explicit in the type because it
 otherwise defaults to zero-cost, statically-dispatched closures.
 
-**Python bridge**: every Python function is already this - a first-class
-object living on the heap, dispatched dynamically, no annotation needed.
-`Box<dyn Fn(...)>` is Rust spelling out, in the type signature, the exact
-runtime shape Python gives you for free by default. A PySpark `udf` passed a
-`lambda` is doing the same job as a closure stored in `typestate`'s
-transform step - a function value handed to something else to call later.
+**Python bridge**: Python functions are first-class objects living on the heap
+and dispatched dynamically. A boxed Rust call trait makes those allocation and
+dispatch choices explicit. `FnOnce` additionally allows ownership of captures to
+be consumed by the call. A PySpark `udf` passed a `lambda` supplies the familiar
+part of the comparison: a function value handed to another component to call.
 
 ## Two smart pointers worth knowing: `Box` and `Arc`
 

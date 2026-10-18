@@ -96,8 +96,8 @@ one and that corner of the type space simply has no `build` method.
 ## From free functions to real closures
 
 The builder's `Transform`/`Sink` types started out as bare
-`fn(RecordBatch) -> RecordBatch` pointers - only free functions could serve
-as a stage, so a transform needing state from its call site (a captured
+`fn(RecordBatch) -> RecordBatch` pointers - free functions and noncapturing
+closures could serve as stages, but a transform needing captured state (a
 column name, say) couldn't be expressed at all. Widening both to
 `Box<dyn Fn(RecordBatch) -> RecordBatch>`, and having `.transform()`/`.sink()`
 accept `impl Fn(RecordBatch) -> RecordBatch + 'static` generically before
