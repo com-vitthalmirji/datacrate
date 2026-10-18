@@ -31,13 +31,16 @@ pub struct Present<T>(T);
 /// read from config) — a plain `fn(RecordBatch) -> RecordBatch` can only
 /// ever be a free function, which is too narrow for any transform that
 /// needs state from its call site.
-pub type Transform = Box<dyn Fn(RecordBatch) -> RecordBatch>;
+pub type Transform = Box<dyn FnOnce(RecordBatch) -> RecordBatch>;
+
+/// A repeatable transform applied to each batch in a remote pipeline.
+pub type RemoteTransform = Box<dyn Fn(RecordBatch) -> RecordBatch>;
 
 /// A batch-to-batch step applied last, before the pipeline returns.
 ///
 /// Boxed for the same reason as [`Transform`]: capturing closures, not just
 /// free functions, need to be usable as a sink.
-pub type Sink = Box<dyn Fn(RecordBatch) -> RecordBatch>;
+pub type Sink = Box<dyn FnOnce(RecordBatch) -> RecordBatch>;
 
 /// Builds a pipeline that reads a CSV fixture, applies a transform, then a
 /// sink. `Src`, `Xf`, and `Snk` each track whether their stage has been
@@ -77,13 +80,13 @@ impl<Xf, Snk> PipelineBuilder<Missing, Xf, Snk> {
 impl<Src, Snk> PipelineBuilder<Src, Missing, Snk> {
     /// Supplies the transform applied to the batch read from the source.
     ///
-    /// Accepts any `Fn(RecordBatch) -> RecordBatch`, not just free
+    /// Accepts any `FnOnce(RecordBatch) -> RecordBatch`, not just free
     /// functions — a closure that captures its call site's state (e.g. a
     /// column name) works here too.
     #[must_use]
     pub fn transform<F>(self, f: F) -> PipelineBuilder<Src, Present<Transform>, Snk>
     where
-        F: Fn(RecordBatch) -> RecordBatch + 'static,
+        F: FnOnce(RecordBatch) -> RecordBatch + 'static,
     {
         PipelineBuilder {
             source: self.source,
@@ -96,12 +99,12 @@ impl<Src, Snk> PipelineBuilder<Src, Missing, Snk> {
 impl<Src, Xf> PipelineBuilder<Src, Xf, Missing> {
     /// Supplies the sink applied to the transformed batch before it's returned.
     ///
-    /// Accepts any `Fn(RecordBatch) -> RecordBatch`, not just free
+    /// Accepts any `FnOnce(RecordBatch) -> RecordBatch`, not just free
     /// functions — see [`PipelineBuilder::transform`].
     #[must_use]
     pub fn sink<F>(self, f: F) -> PipelineBuilder<Src, Xf, Present<Sink>>
     where
-        F: Fn(RecordBatch) -> RecordBatch + 'static,
+        F: FnOnce(RecordBatch) -> RecordBatch + 'static,
     {
         PipelineBuilder {
             source: self.source,
@@ -179,7 +182,7 @@ impl<Src, Snk> RemotePipelineBuilder<Src, Missing, Snk> {
     /// Accepts any `Fn(RecordBatch) -> RecordBatch` — see
     /// [`PipelineBuilder::transform`] for why it's not a bare `fn` pointer.
     #[must_use]
-    pub fn transform<F>(self, f: F) -> RemotePipelineBuilder<Src, Present<Transform>, Snk>
+    pub fn transform<F>(self, f: F) -> RemotePipelineBuilder<Src, Present<RemoteTransform>, Snk>
     where
         F: Fn(RecordBatch) -> RecordBatch + 'static,
     {
@@ -207,7 +210,7 @@ impl<Src, Xf> RemotePipelineBuilder<Src, Xf, Missing> {
     }
 }
 
-impl RemotePipelineBuilder<Present<ObjectPath>, Present<Transform>, Present<ObjectPath>> {
+impl RemotePipelineBuilder<Present<ObjectPath>, Present<RemoteTransform>, Present<ObjectPath>> {
     /// Runs the pipeline: downloads the source object, applies the
     /// transform, writes Parquet to the sink object, and publishes a
     /// completion manifest.

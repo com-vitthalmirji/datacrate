@@ -115,3 +115,8 @@ This runs the happy-path tests plus a `trybuild` suite
 (`crates/typestate/tests/compile_fail/`) that asserts `.build()` is a
 compile error when any one stage is missing - proof that the guarantee is
 real, not just documented.
+
+Local callbacks are `FnOnce`: the consuming `build` calls each callback once,
+so it may consume captured resources. Remote transforms remain repeatable `Fn`
+callbacks because they run once per batch. These bounds do not add thread-sharing
+requirements or imply schema validation.

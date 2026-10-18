@@ -1,4 +1,4 @@
-error[E0599]: no method named `build` found for struct `PipelineBuilder<Present<PathBuf>, Present<Box<(dyn Fn(arrow::array::RecordBatch) -> arrow::array::RecordBatch + 'static)>>, Missing>` in the current scope
+error[E0599]: no method named `build` found for struct `PipelineBuilder<Present<PathBuf>, Present<Box<(dyn FnOnce(arrow::array::RecordBatch) -> arrow::array::RecordBatch + 'static)>>, Missing>` in the current scope
   --> tests/compile_fail/missing_sink.rs:13:10
    |
 10 |       let _ = PipelineBuilder::new()
@@ -6,8 +6,8 @@ error[E0599]: no method named `build` found for struct `PipelineBuilder<Present<
 11 | |         .source(PathBuf::from("fixtures/m1/headers.csv"))
 12 | |         .transform(identity)
 13 | |         .build();
-   | |         -^^^^^ method not found in `PipelineBuilder<Present<PathBuf>, Present<Box<(dyn Fn(arrow::array::RecordBatch) -> arrow::array::RecordBatch + 'static)>>, Missing>`
+   | |         -^^^^^ method not found in `PipelineBuilder<Present<PathBuf>, Present<Box<(dyn FnOnce(arrow::array::RecordBatch) -> arrow::array::RecordBatch + 'static)>>, Missing>`
    | |_________|
    |
    |
-   = note: the method was found for `PipelineBuilder<Present<PathBuf>, Present<Box<(dyn Fn(arrow::array::RecordBatch) -> arrow::array::RecordBatch + 'static)>>, Present<Box<(dyn Fn(arrow::array::RecordBatch) -> arrow::array::RecordBatch + 'static)>>>`
+   = note: the method was found for `PipelineBuilder<Present<PathBuf>, Present<Box<(dyn FnOnce(arrow::array::RecordBatch) -> arrow::array::RecordBatch + 'static)>>, Present<Box<(dyn FnOnce(arrow::array::RecordBatch) -> arrow::array::RecordBatch + 'static)>>>`
