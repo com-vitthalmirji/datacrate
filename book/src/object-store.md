@@ -130,8 +130,10 @@ const CHUNK_BYTES: usize = 8 * 1024 * 1024;
 and write the whole object to disk in one shot - it reads the object's size
 via `store.head(key)`, then walks it in `CHUNK_BYTES`-sized `get_range`
 calls, writing each chunk to the destination file as it arrives.
-`upload_from_temp` reads the local file in 8 MiB chunks and uses the same size
-for multipart parts. It awaits capacity before each write, allowing at most two
+The first upload loop limited reads but left multipart scheduling unbounded.
+It now waits for capacity before writing; limiting the read size alone was
+insufficient. `upload_from_temp` reads the local file in 8 MiB chunks and uses
+the same size for multipart parts. It awaits capacity before each write, allowing at most two
 scheduled parts, including the final partial part. This bound is independent of
 the producer/consumer batch channel. The local read buffer, multipart buffer and
 backend/runtime allocations add memory beyond the outstanding part payloads;
@@ -139,13 +141,14 @@ this is not an exact process RSS ceiling.
 
 `CHUNK_BYTES` is chosen deliberately, not arbitrarily: 8 MiB sits comfortably
 above `object_store`'s 5 MiB multipart-part minimum, so uploads don't pay a
-part-per-tiny-chunk penalty, while staying small enough that peak memory
-tracks this one constant instead of the file size.
+part-per-tiny-chunk penalty, while staying small enough to limit each payload
+buffer. The part concurrency limit and backend allocations also contribute to
+peak memory.
 
 **Scala/Spark bridge**: this is the same shape as Spark reading a file in
 partition-sized blocks rather than collecting it to the driver - the size of
-the whole object is irrelevant to memory pressure as long as you never hold
-more than one window of it at a time. The difference is that Spark makes
+the whole object does not need to reside in memory when both reads and
+in-flight uploads are bounded. The difference is that Spark makes
 this the default behavior of `spark.read`, invisible to the caller; here,
 `CHUNK_BYTES` and the `while offset < size` loop are visible, hand-written,
 and exactly as large as they need to be for this specific edge.
