@@ -1,0 +1,5 @@
+error: expected `default`
+ --> tests/compile_fail/unknown_contract_attribute.rs:3:28
+  |
+3 | struct Target { #[contract(unknown)] id: i64 }
+  |                            ^^^^^^^

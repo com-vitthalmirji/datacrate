@@ -1,0 +1,5 @@
+error: duplicate `default`
+ --> tests/compile_fail/duplicate_contract_default.rs:3:37
+  |
+3 | struct Target { #[contract(default, default)] id: i64 }
+  |                                     ^^^^^^^

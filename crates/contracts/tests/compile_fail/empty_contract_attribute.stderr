@@ -1,0 +1,5 @@
+error: expected `contract(default)`
+ --> tests/compile_fail/empty_contract_attribute.rs:3:17
+  |
+3 | struct Target { #[contract()] id: i64 }
+  |                 ^^^^^^^^^^^^^
