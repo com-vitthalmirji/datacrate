@@ -2485,3 +2485,61 @@ mod tests {
         assert_eq!(pipe_batches, standard_batches);
     }
 }
+
+#[cfg(test)]
+mod amount_regressions {
+    use super::*;
+    #[test]
+    fn malformed_amounts_report_the_original_input() {
+        for value in [
+            "1.-1", "1.+1", "1.2", "1.234", " 1.23", "1.23 ", "1e2.00", ".01", "1.", "+.01",
+            "--1.00", "١.00", "1.０１",
+        ] {
+            match parse_amount(13, value) {
+                Err(PipelineIoError::InvalidAmount { row, value: actual }) => {
+                    assert_eq!(row, 13);
+                    assert_eq!(actual, value);
+                }
+                other => panic!("{value}: {other:?}"),
+            }
+        }
+    }
+    #[test]
+    fn valid_signs_and_precision_edges_preserve_unscaled_values() {
+        for (value, expected) in [
+            ("-0.01", -1),
+            ("-1.23", -123),
+            ("+1.23", 123),
+            ("-0.00", 0),
+            ("0001.23", 123),
+            ("99999999.99", 9_999_999_999),
+            ("-99999999.99", -9_999_999_999),
+        ] {
+            assert_eq!(parse_amount(0, value).expect("valid amount"), expected);
+        }
+        for value in [
+            "100000000.00",
+            "-100000000.00",
+            "170141183460469231731687303715884105727.99",
+        ] {
+            assert!(matches!(
+                parse_amount(0, value),
+                Err(PipelineIoError::InvalidAmount { .. })
+            ));
+        }
+    }
+    #[test]
+    fn csv_ingestion_rejects_values_outside_decimal_precision() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let path = dir.path().join("amount.csv");
+        std::fs::write(
+            &path,
+            "id,amount,placed_at,note\n1,100000000.00,2026-01-01T00:00:00,\n",
+        )
+        .expect("write CSV");
+        assert!(matches!(
+            fixture_to_orders_batch(&path),
+            Err(PipelineIoError::InvalidAmount { .. })
+        ));
+    }
+}
