@@ -752,3 +752,28 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod config_regressions {
+    use super::*;
+    #[test]
+    fn one_row_batches_complete_over_a_rendezvous_channel() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let input = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/m1/headers.csv");
+        let config = PipelineConfig {
+            batch_size: NonZeroUsize::new(1).expect("positive"),
+            channel_capacity: 0,
+            ..PipelineConfig::default()
+        };
+        let report = run_bounded_pipeline(
+            &input,
+            &dir.path().join("output.parquet"),
+            &config,
+            None,
+            &CancellationToken::new(),
+        )
+        .expect("rendezvous pipeline completes");
+        assert_eq!(report.rows_written, 3);
+        assert_eq!(report.batches_written, 3);
+    }
+}
