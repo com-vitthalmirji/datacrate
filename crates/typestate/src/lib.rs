@@ -294,6 +294,53 @@ mod tests {
     }
 
     #[test]
+    fn local_callbacks_can_consume_captured_resources() {
+        let transform_capture = String::from("transform");
+        let sink_capture = String::from("sink");
+        let batch = PipelineBuilder::new()
+            .source(fixture_path("headers.csv"))
+            .transform(move |batch| {
+                assert_eq!(transform_capture.into_bytes(), b"transform");
+                batch
+            })
+            .sink(move |batch| {
+                assert_eq!(sink_capture.into_bytes(), b"sink");
+                batch
+            })
+            .build()
+            .expect("one-shot pipeline");
+        assert_eq!(batch.num_rows(), 3);
+    }
+
+    #[test]
+    fn remote_transform_is_repeated_for_each_batch() {
+        use object_store::ObjectStoreExt;
+        use std::num::NonZeroUsize;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let store = object_store::memory::InMemory::new();
+        let key = ObjectPath::from("input.csv");
+        let bytes = std::fs::read(fixture_path("headers.csv")).expect("fixture");
+        block_on(store.put(&key, bytes.into())).expect("seed input");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        let config = PipelineConfig {
+            batch_size: NonZeroUsize::new(1).expect("positive"),
+            ..PipelineConfig::default()
+        };
+        let report = RemotePipelineBuilder::new(Arc::new(store), config)
+            .source(key)
+            .transform(move |batch| {
+                observed.fetch_add(1, Ordering::Relaxed);
+                batch
+            })
+            .sink(ObjectPath::from("output.parquet"))
+            .build(&pipeline::bounded::CancellationToken::new())
+            .expect("remote pipeline");
+        assert_eq!(report.batches_written, 3);
+        assert_eq!(calls.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
     fn compile_fail_incomplete_builders_have_no_build_method() {
         let t = trybuild::TestCases::new();
         t.compile_fail("tests/compile_fail/*.rs");
