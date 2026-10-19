@@ -206,7 +206,10 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), CliError> {
-    let args = Args::parse();
+    run_with_args(Args::parse())
+}
+
+fn run_with_args(args: Args) -> Result<(), CliError> {
     if args.rows > i64::MAX as u64 {
         return Err(CliError::RowsExceedI64Max { rows: args.rows });
     }
@@ -256,4 +259,78 @@ fn run() -> Result<(), CliError> {
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod input_regressions {
+    use super::*;
+    #[test]
+    fn zero_batch_size_is_rejected_during_argument_parsing() {
+        assert!(
+            Args::try_parse_from([
+                "generator",
+                "--output",
+                "unused",
+                "--rows",
+                "0",
+                "--batch-size",
+                "0"
+            ])
+            .is_err()
+        );
+    }
+    #[test]
+    fn invalid_ranges_are_rejected_before_any_output_is_created() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let path = dir.path().join("absent");
+        let args = Args::try_parse_from([
+            "generator",
+            "--output",
+            path.to_str().expect("UTF8 temporary path"),
+            "--rows",
+            "1",
+            "--partitions",
+            "0",
+        ])
+        .expect("syntactically valid arguments");
+        assert!(matches!(run_with_args(args), Err(CliError::ZeroPartitions)));
+        assert!(!path.exists());
+        let args = Args::try_parse_from([
+            "generator",
+            "--output",
+            path.to_str().expect("UTF8 temporary path"),
+            "--rows",
+            "18446744073709551615",
+        ])
+        .expect("u64 argument");
+        assert!(run_with_args(args).is_err());
+        assert!(!path.exists());
+    }
+    #[test]
+    fn timestamp_generation_is_correct_at_large_and_empty_ranges() {
+        use arrow::array::Array;
+        let batch = synthetic_batch(6_599_999_999, 1, 6_600_000_000);
+        let timestamps = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .expect("timestamp column");
+        assert_eq!(timestamps.value(0), 86_399_999_986);
+        let maximum = synthetic_batch(i64::MAX as u64 - 1, 1, i64::MAX as u64);
+        let timestamps = maximum
+            .column(2)
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .expect("timestamp column");
+        assert_eq!(timestamps.value(0), 86_399_999_999);
+        assert_eq!(synthetic_batch(0, 0, 0).num_rows(), 0);
+        let small = synthetic_batch(9, 1, 10);
+        let timestamps = small
+            .column(2)
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .expect("timestamp column");
+        assert_eq!(timestamps.value(0), 77_760_000_000);
+        assert_eq!(timestamps.len(), 1);
+    }
 }

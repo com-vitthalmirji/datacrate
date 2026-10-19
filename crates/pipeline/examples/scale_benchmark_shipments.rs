@@ -222,7 +222,10 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), CliError> {
-    let args = Args::parse();
+    run_with_args(Args::parse())
+}
+
+fn run_with_args(args: Args) -> Result<(), CliError> {
     if args.order_rows > i64::MAX as u64 {
         return Err(CliError::OrderRowsExceedI64Max {
             order_rows: args.order_rows,
@@ -280,4 +283,98 @@ fn run() -> Result<(), CliError> {
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod input_regressions {
+    use super::*;
+    #[test]
+    fn zero_batch_size_is_rejected_during_argument_parsing() {
+        assert!(
+            Args::try_parse_from([
+                "generator",
+                "--output",
+                "unused",
+                "--order-rows",
+                "0",
+                "--batch-size",
+                "0"
+            ])
+            .is_err()
+        );
+    }
+    #[test]
+    fn invalid_ranges_are_rejected_before_any_output_is_created() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let path = dir.path().join("absent");
+        let args = Args::try_parse_from([
+            "generator",
+            "--output",
+            path.to_str().expect("UTF8 temporary path"),
+            "--order-rows",
+            "1",
+            "--partitions",
+            "0",
+        ])
+        .expect("syntactically valid arguments");
+        assert!(matches!(run_with_args(args), Err(CliError::ZeroPartitions)));
+        assert!(!path.exists());
+        let args = Args::try_parse_from([
+            "generator",
+            "--output",
+            path.to_str().expect("UTF8 temporary path"),
+            "--order-rows",
+            "18446744073709551615",
+        ])
+        .expect("u64 argument");
+        assert!(run_with_args(args).is_err());
+        assert!(!path.exists());
+    }
+    #[test]
+    fn shipment_counts_and_timestamp_offsets_are_preserved() {
+        assert!(
+            shipment_rows_for_order(0)
+                .expect("zero shipments")
+                .is_empty()
+        );
+        assert_eq!(
+            shipment_rows_for_order(1).expect("one shipment")[0].2,
+            86_400_000_086
+        );
+        let two = shipment_rows_for_order(2).expect("two shipments");
+        assert_eq!(two.len(), 2);
+        assert_eq!(two[0].2, 86_400_000_172);
+        assert_eq!(two[1].2, 172_800_000_172);
+        let large = shipment_rows_for_order(6_599_999_999).expect("large ID");
+        assert_eq!(large[0].2, 656_639_999_913);
+        assert_eq!(large[1].2, 743_039_999_913);
+        assert_eq!(synthetic_batch(0, 0).expect("empty batch").num_rows(), 0);
+    }
+    #[test]
+    fn unrepresentable_timestamps_fail_without_wrapping() {
+        assert_eq!(
+            shipment_timestamp(106751989167300645, 2).expect("last representable timestamp"),
+            9223372036854775728
+        );
+        assert!(matches!(
+            shipment_timestamp(106751989167300646, 2),
+            Err(CliError::TimestampOutOfRange { .. })
+        ));
+        assert!(matches!(
+            shipment_timestamp(i64::MAX as u64 - 1, 2),
+            Err(CliError::TimestampOutOfRange { .. })
+        ));
+        let args = Args::try_parse_from([
+            "generator",
+            "--output",
+            "unused",
+            "--order-rows",
+            "9223372036854775807",
+        ])
+        .expect("valid row argument");
+        assert!(matches!(
+            run_with_args(args),
+            Err(CliError::TimestampOutOfRange { .. })
+        ));
+    }
 }
