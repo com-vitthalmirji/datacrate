@@ -119,6 +119,21 @@ pub enum PipelineIoError {
         /// The version declared in the manifest.
         version: u32,
     },
+    /// A supported manifest lacks required protocol information.
+    InvalidManifest {
+        /// The violated version-specific requirement.
+        violation: manifest::ManifestViolation,
+    },
+    /// The reader does not implement the declared digest interpretation.
+    UnsupportedDigestScheme {
+        /// The scheme named in the persisted record.
+        scheme: String,
+    },
+    /// Publication is not yet enabled for this manifest version.
+    UnsupportedManifestWriteVersion {
+        /// The requested write version.
+        version: u32,
+    },
     /// A [`manifest::CompletionManifest`] could not be serialized to JSON.
     WriteManifest {
         /// The underlying `serde_json` error.
@@ -177,6 +192,16 @@ impl std::fmt::Display for PipelineIoError {
             PipelineIoError::UnsupportedManifestVersion { version } => {
                 write!(f, "unsupported completion manifest version {version}")
             }
+            PipelineIoError::InvalidManifest { violation } => {
+                write!(f, "invalid completion manifest: {violation}")
+            }
+            PipelineIoError::UnsupportedDigestScheme { scheme } => {
+                write!(f, "unsupported digest scheme {scheme:?}")
+            }
+            PipelineIoError::UnsupportedManifestWriteVersion { version } => write!(
+                f,
+                "completion manifest version {version} publication is not enabled"
+            ),
             PipelineIoError::WriteManifest { source } => {
                 write!(f, "failed to serialize completion manifest: {source}")
             }
@@ -202,7 +227,10 @@ impl std::error::Error for PipelineIoError {
             | PipelineIoError::HeadObject { source, .. } => Some(source),
             PipelineIoError::ReadManifest { source }
             | PipelineIoError::WriteManifest { source } => Some(source),
-            PipelineIoError::UnsupportedManifestVersion { .. } => None,
+            PipelineIoError::InvalidManifest { violation } => Some(violation),
+            PipelineIoError::UnsupportedManifestVersion { .. }
+            | PipelineIoError::UnsupportedManifestWriteVersion { .. }
+            | PipelineIoError::UnsupportedDigestScheme { .. } => None,
         }
     }
 }

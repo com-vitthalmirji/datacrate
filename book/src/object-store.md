@@ -365,13 +365,29 @@ format. It is neither an equality proof nor an authenticity check.
 
 Earlier, readers decoded JSON directly and could accept any numeric
 `schema_version`. Use `manifest::decode_completion_manifest` now: it checks
-the supported version before returning a usable manifest. The publisher
+the supported version and version-specific fields before returning a usable manifest. The publisher
 also refuses unsupported versions. Malformed JSON and missing required
 fields retain JSON error sources; an unsupported numeric version has a
 separate typed error. The persisted version-1 fixture keeps the original
 field values and hexadecimal digest string. Raw `serde_json::from_slice`
 is still available for inspection, but does not replace supported-version
 validation.
+
+The reader accepts versions 1 and 2 and rejects other versions. Version 2
+adds `run_id`, optional `input_version`, `output_key`, `output_e_tag`,
+`output_version` and `digest_scheme`. A nonempty run ID, output key and at
+least one nonempty output identity are required. The only implemented
+scheme is `legacy-ahash-wrapping-sum-v1`, which labels the existing hash;
+it does not change its bytes or strengthen its guarantees. Unknown
+schemes have a separate typed error. Missing new fields remain valid for
+version 1, whose serialized field set stays unchanged.
+
+This slice enables version-2 decoding, not remote version-2 publication.
+The writer still emits version 1 and explicitly refuses version 2 until
+the publication and identity-aware reader protocol is connected. Existing
+readers that only deserialize JSON must migrate to the checked decoder;
+accepting extra fields is not protocol compatibility. Version 1 has no
+output identity and remains weaker completion evidence.
 
 ## Try it yourself
 
