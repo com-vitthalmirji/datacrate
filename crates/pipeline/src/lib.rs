@@ -94,6 +94,20 @@ pub enum PipelineIoError {
         /// The underlying `object_store` error.
         source: object_store::Error,
     },
+    /// A downloaded response did not satisfy the captured-object contract.
+    InvalidSnapshot {
+        /// The object being read.
+        key: object_store::path::Path,
+        /// The response or identity requirement that failed.
+        violation: object_store_io::SnapshotViolation,
+    },
+    /// The backend rejected the captured object's read condition.
+    SnapshotPrecondition {
+        /// The object being read.
+        key: object_store::path::Path,
+        /// The original backend condition failure.
+        source: object_store::Error,
+    },
     /// An object could not be uploaded to an [`object_store::ObjectStore`].
     UploadObject {
         /// The object key that could not be uploaded.
@@ -155,6 +169,12 @@ impl std::fmt::Display for PipelineIoError {
             PipelineIoError::DownloadObject { key, source } => {
                 write!(f, "failed to download {key}: {source}")
             }
+            PipelineIoError::InvalidSnapshot { key, violation } => {
+                write!(f, "invalid snapshot response for {key}: {violation}")
+            }
+            PipelineIoError::SnapshotPrecondition { key, source } => {
+                write!(f, "snapshot condition failed for {key}: {source}")
+            }
             PipelineIoError::UploadObject { key, source } => {
                 write!(f, "failed to upload {key}: {source}")
             }
@@ -181,7 +201,9 @@ impl std::error::Error for PipelineIoError {
             PipelineIoError::WriteParquet { source } | PipelineIoError::ReadParquet { source } => {
                 Some(source)
             }
-            PipelineIoError::DownloadObject { source, .. }
+            PipelineIoError::InvalidSnapshot { violation, .. } => Some(violation),
+            PipelineIoError::SnapshotPrecondition { source, .. }
+            | PipelineIoError::DownloadObject { source, .. }
             | PipelineIoError::UploadObject { source, .. }
             | PipelineIoError::HeadObject { source, .. } => Some(source),
             PipelineIoError::WriteManifest { source } => Some(source),

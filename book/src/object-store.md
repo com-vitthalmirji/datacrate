@@ -68,17 +68,17 @@ sequenceDiagram
     D->>+B: block_on(future) - blocking, caller stalls until return
     Note right of B: guarded by an assert!: panics immediately<br/>if called from inside an existing Tokio runtime<br/>(the async-blocking-async sandwich)
     B->>T: build current-thread runtime, poll the future
-    T->>S: head(key) - get object size
-    S-->>T: size
+    T->>S: head(key) - capture size and version or ETag
+    S-->>T: captured metadata
     loop while offset < size
-        T->>S: get_range(key, offset..offset+CHUNK_BYTES)
+        T->>S: get_opts(key, captured identity + bounded range)
         S-->>T: chunk bytes
         T->>T: file.write_all(chunk) - same future, local file handle
     end
     T-->>B: future resolves
     Note over T: runtime dropped once block_on returns
-    B-->>-D: Ok(())
-    D-->>P: local_input path ready
+    B-->>-D: Ok(captured metadata)
+    D-->>P: local_input ready and exact captured metadata
     P->>P: run_bounded_pipeline(local_input) - fully sync, unaware async ever happened
 ```
 
@@ -127,9 +127,24 @@ const CHUNK_BYTES: usize = 8 * 1024 * 1024;
 (`object_store_io.rs:31`)
 
 `download_to_temp` (`object_store_io.rs:77`) doesn't call `store.get(key)`
-and write the whole object to disk in one shot - it reads the object's size
-via `store.head(key)`, then walks it in `CHUNK_BYTES`-sized `get_range`
-calls, writing each chunk to the destination file as it arrives.
+and write the whole object to disk in one shot. Earlier it captured a size
+and issued unconditional range reads. Now it captures one `ObjectMeta`,
+selects its version when available or its ETag otherwise, and binds every
+bounded `GetOptions` request to that identity. It validates returned
+identity, key, total size, range and body length before reporting success.
+Body chunks are checked as they arrive, so an oversized response is not
+collected into an arbitrarily large buffer. A failed download may leave a
+partial destination; callers must discard it.
+
+`download_to_temp` returns that same captured metadata. The S3 pipeline
+uses it for the manifest and no longer performs an independent HEAD.
+Missing validators and unsupported conditional requests fail explicitly;
+there is no unconditional retry. An empty object still requires a captured
+identity but needs no data ranges. Success describes the captured empty
+object, not a guarantee that the latest key remains unchanged afterward.
+This binds one sequential object download; it does not snapshot a
+multi-file analytical dataset. Backend support for conditional/versioned
+reads remains a requirement.
 The first upload loop limited reads but left multipart scheduling unbounded.
 It now waits for capacity before writing; limiting the read size alone was
 insufficient. `upload_from_temp` reads the local file in 8 MiB chunks and uses
@@ -155,24 +170,14 @@ and exactly as large as they need to be for this specific edge.
 
 ## Errors name which side failed, not just that something did
 
-```rust
-enum DownloadStepError {
-    Store(object_store::Error),
-    Io(std::io::Error),
-}
-```
-
-(`object_store_io.rs:48`)
-
-Inside the `block_on` block, both the object-store call (`get_range`) and
-the local file write (`write_all`) can fail, and `?` needs a single error
-type to converge on. `DownloadStepError` exists solely to make that
-convergence type-checkable - then `download_to_temp`'s outer `.map_err`
-(`object_store_io.rs:98`) immediately splits it back apart into the crate's
-real error type, `PipelineIoError::DownloadObject` for a store failure,
-`PipelineIoError::OpenOutput` for a local I/O failure. A caller matching on
-the returned `PipelineIoError` sees exactly which side broke; nothing about
-`DownloadStepError` ever leaks past this function.
+Earlier, a private `DownloadStepError` combined backend and local I/O
+errors and translated them on return. The download now maps failures at
+the operation that failed, because its captured-object checks introduce
+additional protocol errors. `DownloadObject` preserves backend failures,
+`OpenOutput` preserves local file failures, `SnapshotPrecondition`
+preserves rejected read conditions, and `InvalidSnapshot` carries a typed
+`SnapshotViolation` for missing identity or malformed responses. A failed
+condition never becomes an unconditioned retry.
 
 ```console
 $ cargo test -p pipeline download_of_a_missing_key_reports_download_object_not_a_panic -- --nocapture
@@ -184,13 +189,10 @@ load-bearing guarantee that a network/store failure is just data flowing
 through `Result`, indistinguishable in kind from any other error this crate
 returns.
 
-**Scala bridge**: `DownloadStepError` is the Rust equivalent of a small
-local sealed trait scoped to one method body, used purely so a for-comprehension
-or `.flatMap` chain has one error type to converge errors from two different
-sources on - then translated back to the real domain error ADT the instant
-the method returns. The scoping is the point: it would be a mistake to
-promote `DownloadStepError` to a crate-wide type, the same way it would be a
-mistake to let a method-local error ADT escape its method in Scala.
+**Scala bridge**: these errors serve the role of a small sealed error
+hierarchy: callers distinguish local I/O, backend failures and violated
+read conditions without parsing messages. Pure comparisons validate
+metadata; the object-store and file calls remain the action boundary.
 
 ## Round-tripping through an in-memory store, not a real bucket
 
@@ -263,7 +265,7 @@ pub fn run_bounded_pipeline_s3(
     let local_input = staging_dir.path().join("input.csv");
     let local_output = staging_dir.path().join("output.parquet");
 
-    download_to_temp(store, input_key, &local_input)?;
+    let input_meta = download_to_temp(store, input_key, &local_input)?;
     let report = run_bounded_pipeline(&local_input, &local_output, config, cancel)?;
     upload_from_temp(store, &local_output, output_key)?;
 
