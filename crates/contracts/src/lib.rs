@@ -85,11 +85,20 @@ pub enum TypeShape {
 
 /// A type whose shape is known at compile time.
 ///
-/// Implemented via `#[derive(Contract)]` for structs with named fields.
+/// Implemented via `#[derive(Contract)]` for concrete structs with named fields,
+/// and for standard scalars and containers. Aliases use their resolved type.
+/// References inherit the referent's shape; separate manual reference
+/// implementations are intentionally unsupported.
 pub trait Contract {
     /// This type's normalized shape.
     const SHAPE: TypeShape;
 }
+
+mod resolved;
+
+/// Fallible physical schema mapping, enabled by the `arrow` feature.
+#[cfg(feature = "arrow")]
+pub mod arrow;
 
 /// Evaluates declaration compatibility for an instantiated generic call.
 ///
@@ -1675,13 +1684,7 @@ mod tests {
     mod shadowed_container_name {
         use super::Contract;
 
-        // A local type literally named `Vec`, with no generics. The derive
-        // macro sees only syntax (not resolved types), so it used to assume
-        // any segment named "Vec" had exactly one generic argument and
-        // panicked reaching for it. It must fall through to the
-        // primitive/nested-Contract case instead of panicking — since "Vec"
-        // isn't a recognized primitive name, that means it's now treated as
-        // a nested Contract type, which requires deriving Contract here too.
+        // A local Vec follows its own Contract instead of std's sequence shape.
         #[allow(dead_code)]
         #[derive(Contract)]
         struct Vec {
