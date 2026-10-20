@@ -899,7 +899,7 @@ mod tests {
                 .expect("manifest object bytes should be readable")
         });
         let manifest: CompletionManifest =
-            serde_json::from_slice(&manifest_bytes).expect("manifest should be valid JSON");
+            manifest::decode_completion_manifest(&manifest_bytes).expect("supported manifest");
 
         assert_eq!(manifest.input_key, input_key.to_string());
         assert_eq!(manifest.row_count, report.rows_written);
