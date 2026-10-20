@@ -33,4 +33,4 @@ supersedes it, and mark the old one's Status as `Superseded by ADR-XXXX`.
 - [0018. Preserve representations and query semantics](0018-preserve-representations-and-query-semantics.md)
 - [0019. Bind remote inputs and own publication lifecycles](0019-bind-remote-inputs-and-own-publication-lifecycles.md)
 - [0020. Measure physical policy and avoided work](0020-measure-physical-policy-and-avoided-work.md)
-- [0021. Keep resolved shapes and general Arrow mapping behind explicit migration decisions](0021-keep-shape-and-arrow-migrations-explicit.md)
+- [0021. Resolve contract shapes through traits and map Arrow schemas explicitly](0021-keep-shape-and-arrow-migrations-explicit.md)
