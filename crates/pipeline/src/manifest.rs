@@ -350,7 +350,8 @@ mod tests {
                     )
                     .expect("empty non-null notes");
                 }
-                digest = accumulate_batch_digest(digest, &value);
+                let checked = CheckedIngestBatch::try_new(value).expect("valid baseline batch");
+                digest = accumulate_batch_digest(digest, &checked);
             }
             assert_eq!(rows, observation.rows);
             assert_eq!(format!("{digest:016x}"), observation.digest);
