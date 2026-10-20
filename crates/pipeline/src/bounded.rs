@@ -22,6 +22,7 @@ use object_store::ObjectStore;
 use object_store::path::Path as ObjectPath;
 use parquet::basic::Compression;
 
+use crate::batch_contract::CheckedIngestBatch;
 use crate::manifest::{self, CompletionManifest};
 use crate::object_store_io::{
     best_effort_delete, download_to_temp, head_object, publish_staged_object, put_manifest,
@@ -127,11 +128,11 @@ impl From<PipelineIoError> for PipelineError {
     }
 }
 
-fn accumulate_batch_stats(report: PipelineReport, batch: &RecordBatch) -> PipelineReport {
+fn accumulate_batch_stats(report: PipelineReport, checked: &CheckedIngestBatch) -> PipelineReport {
     PipelineReport {
         batches_written: report.batches_written + 1,
-        rows_written: report.rows_written + batch.num_rows(),
-        content_digest: manifest::accumulate_batch_digest(report.content_digest, batch),
+        rows_written: report.rows_written + checked.batch().num_rows(),
+        content_digest: manifest::accumulate_batch_digest(report.content_digest, checked),
     }
 }
 
@@ -234,10 +235,11 @@ fn consume_batches(
             Some(f) => f(batch),
             None => batch,
         };
+        let checked = CheckedIngestBatch::try_new(batch)?;
         writer
-            .write(&batch)
+            .write(checked.batch())
             .map_err(|source| PipelineIoError::WriteParquet { source })?;
-        report = accumulate_batch_stats(report, &batch);
+        report = accumulate_batch_stats(report, &checked);
     }
 
     if cancel.is_cancelled() {
@@ -427,7 +429,10 @@ mod tests {
     fn accumulate_batch_stats_updates_counters() {
         let record = csv::StringRecord::from(vec!["1", "name-1", "note-1"]);
         let row = crate::parse_row(0, &record).expect("row should parse");
-        let batch = crate::batch_from_rows(&[row]).expect("single-row batch should build");
+        let batch = CheckedIngestBatch::try_new(
+            crate::batch_from_rows(&[row]).expect("single-row batch should build"),
+        )
+        .expect("valid ingest batch");
         let report = PipelineReport::default();
 
         let report = accumulate_batch_stats(report, &batch);
