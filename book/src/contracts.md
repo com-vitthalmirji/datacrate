@@ -161,3 +161,10 @@ A field may have one `#[contract(default)]` attribute, optionally with a trailin
 comma. Values, arguments, unknown keys, duplicates and empty attributes are
 rejected at the derive site. This attribute records compatibility metadata; it
 does not construct a default value or make a reader supply one at runtime.
+
+Generic APIs can call `contracts::enforce::<Producer, Target, Policy>()` to
+evaluate the declaration check for an instantiated use. An incompatible call
+fails during `cargo build`; `cargo check` alone may pass, and unused generic
+code is not checked this way. Keep item-level `const _: () = ...::CHECK` for
+concrete checks that must be evaluated independently of a generic call. Neither
+form validates external files or actual Arrow batches.
