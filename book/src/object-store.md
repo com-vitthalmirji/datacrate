@@ -323,7 +323,7 @@ different guarantees, and a committer that only handles the rename without
 forcing the underlying writes to disk has the identical gap this pipeline
 closes by hand.
 
-## The completion manifest: proof of what was written, not just that something was
+## The completion manifest: recorded counts, input metadata and a fingerprint
 
 `run_bounded_pipeline_s3` publishes one more object after the Parquet output
 lands: a `.manifest.json` sibling of the output key
@@ -332,8 +332,8 @@ staging-then-rename step as the output itself. Before this existed, a caller
 polling the bucket after a run had no way to confirm *what* had been
 written - row count, or whether the output's content actually matched a
 known-good input - without re-downloading and re-parsing the Parquet file.
-The manifest is proof, delivered alongside the data, so a caller can check
-it cheaply instead.
+The manifest records the writer's counts and fingerprint so a caller can
+compare them cheaply. Its presence alone does not verify the output bytes.
 
 The manifest carries a snapshot of the input object (key, size, ETag,
 last-modified) plus the output's row count and a content digest. The digest
@@ -356,9 +356,22 @@ digest never buffers more than a single row's hash regardless of how large
 the output is - it doesn't reopen the memory-envelope question the bounded
 pipeline already answered for the rest of this path.
 
-Worth naming what the digest is not: it's a content-drift fingerprint
-(dropped, duplicated, or reordered rows), not a security boundary. It
-doesn't detect adversarial tampering, and it isn't trying to.
+The digest is order-independent, so it intentionally cannot detect row
+reordering. Collisions can also hide content changes. Earlier wording in
+ADR 0012 included reordered rows among detectable changes; that exceeded
+what this combiner can establish. Fixed seeds preserve repeatability for
+the pinned build, not a portable cross-version or cross-platform hash
+format. It is neither an equality proof nor an authenticity check.
+
+Earlier, readers decoded JSON directly and could accept any numeric
+`schema_version`. Use `manifest::decode_completion_manifest` now: it checks
+the supported version before returning a usable manifest. The publisher
+also refuses unsupported versions. Malformed JSON and missing required
+fields retain JSON error sources; an unsupported numeric version has a
+separate typed error. The persisted version-1 fixture keeps the original
+field values and hexadecimal digest string. Raw `serde_json::from_slice`
+is still available for inspection, but does not replace supported-version
+validation.
 
 ## Try it yourself
 

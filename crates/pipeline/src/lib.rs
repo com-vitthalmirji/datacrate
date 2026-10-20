@@ -109,6 +109,16 @@ pub enum PipelineIoError {
         /// The underlying `object_store` error.
         source: object_store::Error,
     },
+    /// A completion manifest could not be decoded from JSON.
+    ReadManifest {
+        /// The underlying JSON decoding error.
+        source: serde_json::Error,
+    },
+    /// The persisted manifest version is not supported by this reader.
+    UnsupportedManifestVersion {
+        /// The version declared in the manifest.
+        version: u32,
+    },
     /// A [`manifest::CompletionManifest`] could not be serialized to JSON.
     WriteManifest {
         /// The underlying `serde_json` error.
@@ -161,6 +171,12 @@ impl std::fmt::Display for PipelineIoError {
             PipelineIoError::HeadObject { key, source } => {
                 write!(f, "failed to read metadata for {key}: {source}")
             }
+            PipelineIoError::ReadManifest { source } => {
+                write!(f, "failed to decode completion manifest: {source}")
+            }
+            PipelineIoError::UnsupportedManifestVersion { version } => {
+                write!(f, "unsupported completion manifest version {version}")
+            }
             PipelineIoError::WriteManifest { source } => {
                 write!(f, "failed to serialize completion manifest: {source}")
             }
@@ -184,7 +200,9 @@ impl std::error::Error for PipelineIoError {
             PipelineIoError::DownloadObject { source, .. }
             | PipelineIoError::UploadObject { source, .. }
             | PipelineIoError::HeadObject { source, .. } => Some(source),
-            PipelineIoError::WriteManifest { source } => Some(source),
+            PipelineIoError::ReadManifest { source }
+            | PipelineIoError::WriteManifest { source } => Some(source),
+            PipelineIoError::UnsupportedManifestVersion { .. } => None,
         }
     }
 }

@@ -18,6 +18,7 @@
 
 use std::hash::{BuildHasher, Hasher};
 
+use crate::PipelineIoError;
 use ahash::RandomState;
 use arrow::array::{Array, Int64Array, RecordBatch, StringArray};
 use object_store::ObjectMeta;
@@ -112,7 +113,27 @@ pub struct CompletionManifest {
     pub content_digest: String,
 }
 
+/// Decodes a persisted completion manifest.
+///
+/// # Errors
+/// Returns [`PipelineIoError::ReadManifest`] for malformed input or
+/// [`PipelineIoError::UnsupportedManifestVersion`] for an unknown version.
+/// Raw Serde decoding does not perform this supported-version check.
+pub fn decode_completion_manifest(bytes: &[u8]) -> Result<CompletionManifest, PipelineIoError> {
+    let manifest: CompletionManifest =
+        serde_json::from_slice(bytes).map_err(|source| PipelineIoError::ReadManifest { source })?;
+    manifest.validate()?;
+    Ok(manifest)
+}
+
 impl CompletionManifest {
+    pub(crate) fn validate(&self) -> Result<(), PipelineIoError> {
+        match self.schema_version {
+            1 => Ok(()),
+            version => Err(PipelineIoError::UnsupportedManifestVersion { version }),
+        }
+    }
+
     pub(crate) fn new(
         input_key: &ObjectPath,
         input_meta: &ObjectMeta,
@@ -212,5 +233,98 @@ mod tests {
             CompletionManifest::key_for(&output).as_ref(),
             "prefix/output.parquet.manifest.json"
         );
+    }
+}
+
+#[cfg(test)]
+mod version_regressions {
+    use super::*;
+    const V1: &[u8] = include_bytes!("../tests/fixtures/manifests/v1.json");
+
+    #[test]
+    fn manifest_version_one_fixture_preserves_persisted_values() {
+        let manifest = decode_completion_manifest(V1).expect("legacy manifest");
+        assert_eq!(manifest.schema_version, 1);
+        assert_eq!(manifest.input_key, "input.csv");
+        assert_eq!(manifest.input_size, 27);
+        assert_eq!(manifest.input_e_tag.as_deref(), Some("captured-etag"));
+        assert_eq!(manifest.row_count, 2);
+        assert_eq!(manifest.content_digest, "0123456789abcdef");
+        let stored: serde_json::Value = serde_json::from_slice(V1).expect("fixture JSON");
+        assert_eq!(serde_json::to_value(manifest).expect("serialize"), stored);
+        let baseline = CompletionManifest::new(
+            &ObjectPath::from("input.csv"),
+            &ObjectMeta {
+                location: ObjectPath::from("input.csv"),
+                last_modified: chrono::DateTime::parse_from_rfc3339("2026-10-20T00:00:00Z")
+                    .expect("timestamp")
+                    .to_utc(),
+                size: 27,
+                e_tag: Some("captured-etag".to_owned()),
+                version: None,
+            },
+            2,
+            0x0123_4567_89ab_cdef,
+        );
+        assert_eq!(
+            serde_json::to_value(baseline).expect("legacy constructor"),
+            stored
+        );
+    }
+
+    #[test]
+    fn manifest_version_rejects_unknown_versions() {
+        for version in [0, 2, 99, u32::MAX] {
+            let mut value: serde_json::Value = serde_json::from_slice(V1).expect("fixture");
+            value["schema_version"] = version.into();
+            assert!(matches!(
+                decode_completion_manifest(&serde_json::to_vec(&value).expect("JSON")),
+                Err(PipelineIoError::UnsupportedManifestVersion { version: actual }) if actual == version
+            ));
+        }
+    }
+
+    #[test]
+    fn manifest_version_requires_well_formed_version_and_required_fields() {
+        for invalid in [serde_json::Value::Null, (-1).into(), "1".into(), 1.5.into()] {
+            let mut value: serde_json::Value = serde_json::from_slice(V1).expect("fixture");
+            value["schema_version"] = invalid;
+            assert!(matches!(
+                decode_completion_manifest(&serde_json::to_vec(&value).expect("JSON")),
+                Err(PipelineIoError::ReadManifest { .. })
+            ));
+        }
+        for field in [
+            "schema_version",
+            "input_key",
+            "input_size",
+            "row_count",
+            "content_digest",
+        ] {
+            let mut value: serde_json::Value = serde_json::from_slice(V1).expect("fixture");
+            value.as_object_mut().expect("object").remove(field);
+            assert!(matches!(
+                decode_completion_manifest(&serde_json::to_vec(&value).expect("JSON")),
+                Err(PipelineIoError::ReadManifest { .. })
+            ));
+        }
+        assert!(matches!(
+            decode_completion_manifest(b"{"),
+            Err(PipelineIoError::ReadManifest { .. })
+        ));
+    }
+    #[test]
+    fn manifest_version_publisher_refuses_unsupported_version() {
+        let mut manifest = decode_completion_manifest(V1).expect("legacy manifest");
+        manifest.schema_version = 99;
+        let store = object_store::memory::InMemory::new();
+        assert!(matches!(
+            crate::object_store_io::put_manifest(
+                &store,
+                &manifest,
+                &ObjectPath::from("output.manifest.json")
+            ),
+            Err(PipelineIoError::UnsupportedManifestVersion { version: 99 })
+        ));
     }
 }
