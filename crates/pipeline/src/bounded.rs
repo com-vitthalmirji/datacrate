@@ -682,9 +682,7 @@ mod tests {
     fn s3_pipeline_reports_download_object_when_the_input_key_is_missing_on_a_real_backend() {
         use object_store::path::Path as ObjectPath;
 
-        let minio = crate::minio_test_support::MinioContainer::start(
-            "s3-missing-input-download",
-        );
+        let minio = crate::minio_test_support::MinioContainer::start("s3-missing-input-download");
         let store = minio.store();
         let input_key = ObjectPath::from("missing-input.csv");
         let output_key = ObjectPath::from("output.parquet");
