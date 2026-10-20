@@ -347,15 +347,7 @@ UDF - `days_since_epoch(placed_at) -> BIGINT` - built with `create_udf`:
 
 ```rust
 pub fn days_since_epoch_udf() -> ScalarUDF {
-    let implementation = Arc::new(|args: &[ColumnarValue]| {
-        let args = ColumnarValue::values_to_arrays(args)?;
-        let timestamps = args[0].as_any().downcast_ref::<TimestampMicrosecondArray>()...;
-        let days: Int64Array = timestamps
-            .iter()
-            .map(|micros| micros.map(|m| m.div_euclid(MICROS_PER_DAY)))
-            .collect();
-        Ok(ColumnarValue::from(Arc::new(days) as ArrayRef))
-    });
+    let implementation = Arc::new(invoke_days_since_epoch);
 
     create_udf(
         "days_since_epoch",
@@ -368,9 +360,14 @@ pub fn days_since_epoch_udf() -> ScalarUDF {
 ```
 
 Two things matter here beyond "how do I write a UDF." First, the
-implementation operates on whole `ArrayRef`s, not row-by-row callbacks -
-`timestamps.iter().map(...)` walks one Arrow array and produces another,
-which is what makes this vectorized rather than a per-row function call.
+implementation now branches on `ColumnarValue`: a timestamp scalar returns
+an `Int64` scalar, including typed nulls, while an array is mapped into an
+`Int64Array` with the same length and nulls. Earlier it expanded every
+input through `values_to_arrays`; preserving scalars avoids that
+intermediate array. The private invocation function also returns errors
+for wrong arity, type or timezone rather than indexing or downcasting with
+`expect`. The direct representation tests in `extending-datafusion.md`
+check execution separately from constant folding.
 Second, `Volatility::Immutable` isn't a formality: it tells DataFusion's
 optimizer the function is safe to constant-fold. `register_udf` puts it on
 the context, then it's callable from SQL like any built-in:

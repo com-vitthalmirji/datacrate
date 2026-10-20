@@ -15,16 +15,15 @@ use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
 
-#[cfg(test)]
-use arrow::array::{Array, Float64Array};
 use arrow::array::{
-    ArrayRef, Decimal128Array, Int64Array, RecordBatch, StringArray, TimestampMicrosecondArray,
+    Array, Decimal128Array, Int64Array, RecordBatch, StringArray, TimestampMicrosecondArray,
 };
+#[cfg(test)]
+use arrow::array::{ArrayRef, Float64Array};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use chrono::NaiveDateTime;
 #[cfg(test)]
 use datafusion::catalog::{Session, TableProvider};
-#[cfg(test)]
 use datafusion::common::ScalarValue;
 #[cfg(test)]
 use datafusion::common::tree_node::{Transformed, TreeNodeRecursion};
@@ -404,29 +403,13 @@ const MICROS_PER_DAY: i64 = 86_400_000_000;
 /// A single-column scalar UDF (`days_since_epoch(placed_at) -> BIGINT`)
 /// compared, in [`explain_days_since_epoch_udf_vs_builtin`], against the
 /// equivalent built-in expression `CAST(placed_at AS BIGINT) / 86400000000`
-/// to prove native Rust scalar UDFs get the same
-/// constant-folding/simplification treatment as built-ins, not a
-/// row-by-row performance penalty.
+/// to compare constant-folding/simplification with the built-in expression.
+/// This plan comparison does not measure execution cost.
 ///
-/// # Panics
-///
-/// The returned UDF's implementation panics if DataFusion invokes it with an
-/// argument that isn't a `Timestamp(Microsecond)` array — this cannot happen
-/// in practice because `create_udf` below fixes the signature to exactly
-/// that type.
+/// Scalar inputs remain scalar; arrays preserve length and nulls. Malformed
+/// direct invocations return an error instead of relying on planner coercion.
 pub fn days_since_epoch_udf() -> datafusion::logical_expr::ScalarUDF {
-    let implementation = std::sync::Arc::new(|args: &[ColumnarValue]| {
-        let args = ColumnarValue::values_to_arrays(args)?;
-        let timestamps = args[0]
-            .as_any()
-            .downcast_ref::<TimestampMicrosecondArray>()
-            .expect("days_since_epoch is registered with a Timestamp(Microsecond) signature");
-        let days: Int64Array = timestamps
-            .iter()
-            .map(|micros| micros.map(|m| m.div_euclid(MICROS_PER_DAY)))
-            .collect();
-        Ok(ColumnarValue::from(std::sync::Arc::new(days) as ArrayRef))
-    });
+    let implementation = Arc::new(invoke_days_since_epoch);
 
     create_udf(
         "days_since_epoch",
@@ -435,6 +418,47 @@ pub fn days_since_epoch_udf() -> datafusion::logical_expr::ScalarUDF {
         Volatility::Immutable,
         implementation,
     )
+}
+
+fn invoke_days_since_epoch(args: &[ColumnarValue]) -> Result<ColumnarValue, DataFusionError> {
+    let [input] = args else {
+        return Err(DataFusionError::Execution(format!(
+            "days_since_epoch expects one argument, got {}",
+            args.len()
+        )));
+    };
+    let expected = DataType::Timestamp(TimeUnit::Microsecond, None);
+    if input.data_type() != expected {
+        return Err(DataFusionError::Execution(format!(
+            "days_since_epoch expects {expected}, got {}",
+            input.data_type()
+        )));
+    }
+    match input {
+        ColumnarValue::Scalar(ScalarValue::TimestampMicrosecond(micros, None)) => {
+            Ok(ColumnarValue::Scalar(ScalarValue::Int64(
+                micros.map(|value| value.div_euclid(MICROS_PER_DAY)),
+            )))
+        }
+        ColumnarValue::Array(array) => {
+            let timestamps = array
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .ok_or_else(|| {
+                    DataFusionError::Execution(
+                        "days_since_epoch requires a timestamp microsecond array".to_owned(),
+                    )
+                })?;
+            let days: Int64Array = timestamps
+                .iter()
+                .map(|micros| micros.map(|value| value.div_euclid(MICROS_PER_DAY)))
+                .collect();
+            Ok(ColumnarValue::Array(Arc::new(days)))
+        }
+        _ => Err(DataFusionError::Execution(
+            "days_since_epoch requires a timestamp microsecond scalar".to_owned(),
+        )),
+    }
 }
 
 /// Runs `EXPLAIN` (plan-only; the comparison only needs to prove optimizer
@@ -2704,6 +2728,134 @@ mod amount_range_regressions {
         ] {
             let references = partitions.iter().map(Vec::as_slice).collect::<Vec<_>>();
             assert_range(&range_result(&references).await, Some(400));
+        }
+    }
+}
+
+
+#[cfg(test)]
+mod timestamp_representation_regressions {
+    use super::*;
+    use datafusion::common::ScalarValue;
+    use datafusion::logical_expr::ScalarFunctionArgs;
+
+    fn invoke(args: Vec<ColumnarValue>) -> Result<ColumnarValue, DataFusionError> {
+        let arg_fields = args
+            .iter()
+            .map(|arg| Arc::new(Field::new("input", arg.data_type(), true)))
+            .collect();
+        days_since_epoch_udf().invoke_with_args(ScalarFunctionArgs {
+            args,
+            arg_fields,
+            number_rows: 100_000,
+            return_field: Arc::new(Field::new("days", DataType::Int64, true)),
+            config_options: Arc::new(Default::default()),
+        })
+    }
+
+    #[test]
+    fn days_since_epoch_scalar_preserves_representation_and_values() {
+        for (micros, expected) in [
+            (None, None),
+            (Some(0), Some(0)),
+            (Some(-1), Some(-1)),
+            (Some(-86_400_000_000), Some(-1)),
+            (Some(i64::MIN), Some(-106_751_992)),
+            (Some(i64::MAX), Some(106_751_991)),
+        ] {
+            let result = invoke(vec![ColumnarValue::Scalar(
+                ScalarValue::TimestampMicrosecond(micros, None),
+            )])
+            .expect("timestamp scalar");
+            match result {
+                ColumnarValue::Scalar(value) => assert_eq!(value, ScalarValue::Int64(expected)),
+                ColumnarValue::Array(_) => panic!("scalar input was expanded to an array"),
+            }
+        }
+    }
+    #[test]
+    fn days_since_epoch_arrays_preserve_length_nulls_and_values() {
+        for values in [
+            vec![],
+            vec![None, None],
+            vec![Some(0), None, Some(-1), Some(i64::MIN), Some(i64::MAX)],
+        ] {
+            let expected = values
+                .iter()
+                .map(|value| {
+                    value.map(|micros| {
+                        let quotient = micros / 86_400_000_000;
+                        quotient - i64::from(micros % 86_400_000_000 < 0)
+                    })
+                })
+                .collect::<Vec<_>>();
+            let result = invoke(vec![ColumnarValue::Array(Arc::new(
+                TimestampMicrosecondArray::from(values),
+            ))])
+            .expect("timestamp array");
+            let ColumnarValue::Array(array) = result else {
+                panic!("array input became scalar");
+            };
+            assert_eq!(array.data_type(), &DataType::Int64);
+            let days = array
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .expect("Int64 array");
+            assert_eq!(days.iter().collect::<Vec<_>>(), expected);
+        }
+    }
+
+    #[test]
+    fn days_since_epoch_rejects_wrong_arity_type_and_timezone() {
+        let timestamp = ColumnarValue::Scalar(ScalarValue::TimestampMicrosecond(Some(0), None));
+        for args in [
+            vec![],
+            vec![timestamp.clone(), timestamp],
+            vec![ColumnarValue::Scalar(ScalarValue::Int64(Some(0)))],
+            vec![ColumnarValue::Scalar(ScalarValue::TimestampMicrosecond(
+                None,
+                Some("UTC".into()),
+            ))],
+            vec![ColumnarValue::Array(Arc::new(Int64Array::from(vec![0])))],
+            vec![ColumnarValue::Array(Arc::new(
+                TimestampMicrosecondArray::from(vec![Some(0)]).with_timezone("UTC"),
+            ))],
+        ] {
+            let error = invoke(args).expect_err("invalid invocation");
+            assert!(matches!(error, DataFusionError::Execution(_)), "{error}");
+        }
+    }
+    #[test]
+    fn days_since_epoch_representation_cost_is_explicit() {
+        let scalar = ColumnarValue::Scalar(ScalarValue::TimestampMicrosecond(Some(-1), None));
+        let expanded = ColumnarValue::values_to_arrays(std::slice::from_ref(&scalar))
+            .expect("baseline expansion");
+        assert_eq!(expanded[0].len(), 1);
+        let output = invoke(vec![scalar]).expect("scalar invocation");
+        assert!(matches!(
+            output,
+            ColumnarValue::Scalar(ScalarValue::Int64(Some(-1)))
+        ));
+        println!(
+            "baseline scalar expansion: {} rows, {} buffer bytes; current output: Int64 scalar",
+            expanded[0].len(),
+            expanded[0].get_buffer_memory_size()
+        );
+        for length in [0, 1, 1_000, 100_000] {
+            let input = TimestampMicrosecondArray::from(vec![Some(-1); length]);
+            let output =
+                invoke(vec![ColumnarValue::Array(Arc::new(input))]).expect("array invocation");
+            let ColumnarValue::Array(array) = output else {
+                panic!("array representation");
+            };
+            assert_eq!(array.len(), length);
+            assert_eq!(array.data_type(), &DataType::Int64);
+            let values = array.as_any().downcast_ref::<Int64Array>().expect("Int64");
+            assert!(values.iter().all(|value| value == Some(-1)));
+            println!(
+                "array output: {length} rows, {} buffer bytes",
+                array.get_buffer_memory_size()
+            );
         }
     }
 }
