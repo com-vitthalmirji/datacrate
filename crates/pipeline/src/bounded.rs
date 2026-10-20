@@ -10,6 +10,7 @@
 //! See docs/adr/0005-bounded-pipeline-backpressure.md.
 
 use std::fs::File;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,7 +36,7 @@ use crate::{PipelineIoError, Row, batch_from_rows, open_parquet_writer, parse_ro
 pub struct PipelineConfig {
     /// Rows per `RecordBatch`. Smaller values bound memory more tightly at
     /// the cost of more, smaller Parquet writes.
-    pub batch_size: usize,
+    pub batch_size: NonZeroUsize,
     /// Capacity of the channel between the reader and writer threads. `0`
     /// makes it a rendezvous channel (strictest possible backpressure).
     pub channel_capacity: usize,
@@ -46,7 +47,7 @@ pub struct PipelineConfig {
 impl Default for PipelineConfig {
     fn default() -> Self {
         Self {
-            batch_size: 1_000,
+            batch_size: NonZeroUsize::new(1_000).expect("default batch size is nonzero"),
             channel_capacity: 4,
             compression: Compression::SNAPPY,
         }
@@ -277,10 +278,6 @@ fn consume_batches(
 /// [`crate::fixture_to_record_batch`], plus writer/staging I/O failures, or
 /// [`PipelineError::Cancelled`] if `cancel` was set before output could be
 /// published.
-///
-/// # Panics
-///
-/// Panics if `config.batch_size` is zero.
 pub fn run_bounded_pipeline(
     input: &Path,
     output: &Path,
@@ -288,16 +285,12 @@ pub fn run_bounded_pipeline(
     transform: Option<&dyn Fn(RecordBatch) -> RecordBatch>,
     cancel: &CancellationToken,
 ) -> Result<PipelineReport, PipelineError> {
-    assert!(
-        config.batch_size > 0,
-        "config.batch_size must be greater than zero"
-    );
     let (sender, receiver) =
         sync_channel::<Result<RecordBatch, PipelineIoError>>(config.channel_capacity);
     let staging_path = staging_path_for(output);
 
     let result = thread::scope(|scope| {
-        scope.spawn(|| produce_batches(input, config.batch_size, cancel, sender));
+        scope.spawn(|| produce_batches(input, config.batch_size.get(), cancel, sender));
         consume_batches(
             receiver,
             &staging_path,
@@ -363,10 +356,6 @@ pub fn run_bounded_pipeline(
 /// input's metadata read, the publish, or the manifest write fails, or
 /// [`PipelineError::Cancelled`] if `cancel` was set before output could be
 /// published.
-///
-/// # Panics
-///
-/// Panics if `config.batch_size` is zero (same as [`run_bounded_pipeline`]).
 pub fn run_bounded_pipeline_s3(
     store: &dyn ObjectStore,
     input_key: &ObjectPath,
@@ -503,7 +492,7 @@ mod tests {
         let output = out_dir.path().join("out.parquet");
 
         let config = PipelineConfig {
-            batch_size: 250,
+            batch_size: NonZeroUsize::new(250).expect("positive batch size"),
             channel_capacity: 2,
             ..PipelineConfig::default()
         };
@@ -591,25 +580,6 @@ mod tests {
         assert!(!cancel.is_cancelled());
         cancel.cancel();
         assert!(cancel.is_cancelled());
-    }
-
-    #[test]
-    #[should_panic(expected = "config.batch_size must be greater than zero")]
-    fn zero_batch_size_panics_instead_of_silently_buffering_everything() {
-        let dir = tempfile::tempdir().expect("temp dir should be creatable");
-        let output = dir.path().join("out.parquet");
-        let config = PipelineConfig {
-            batch_size: 0,
-            ..PipelineConfig::default()
-        };
-
-        let _ = run_bounded_pipeline(
-            &fixture_path("headers.csv"),
-            &output,
-            &config,
-            None,
-            &CancellationToken::new(),
-        );
     }
 
     fn test_block_on<F: std::future::Future>(future: F) -> F::Output {
@@ -780,5 +750,30 @@ mod tests {
             staging_result.is_err(),
             "no staging key should be left behind after a failed run"
         );
+    }
+}
+
+#[cfg(test)]
+mod config_regressions {
+    use super::*;
+    #[test]
+    fn one_row_batches_complete_over_a_rendezvous_channel() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let input = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/m1/headers.csv");
+        let config = PipelineConfig {
+            batch_size: NonZeroUsize::new(1).expect("positive"),
+            channel_capacity: 0,
+            ..PipelineConfig::default()
+        };
+        let report = run_bounded_pipeline(
+            &input,
+            &dir.path().join("output.parquet"),
+            &config,
+            None,
+            &CancellationToken::new(),
+        )
+        .expect("rendezvous pipeline completes");
+        assert_eq!(report.rows_written, 3);
+        assert_eq!(report.batches_written, 3);
     }
 }
