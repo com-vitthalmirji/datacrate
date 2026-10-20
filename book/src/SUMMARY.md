@@ -42,3 +42,8 @@
   - [0014. Defer readiness findings with explicit guarantee boundaries](adr/0014-defer-readiness-findings-with-explicit-guarantee-boundaries.md)
   - [0015. Strengthen contract and pipeline boundaries using Rust traits and const evaluation](adr/0015-strengthen-contract-and-pipeline-boundaries-from-rust-trait-and-const-design.md)
   - [ADR template](adr/TEMPLATE.md)
+  - [0016. Check runtime ingest batches before writing and digesting](adr/0016-check-runtime-ingest-batches-before-writing-and-digesting.md)
+  - [0017. Account for admitted batch bytes and cancellation](adr/0017-account-for-admitted-batch-bytes-and-cancellation.md)
+  - [0018. Preserve representations and query semantics](adr/0018-preserve-representations-and-query-semantics.md)
+  - [0019. Bind remote inputs and own publication lifecycles](adr/0019-bind-remote-inputs-and-own-publication-lifecycles.md)
+  - [0020. Measure physical policy and avoided work](adr/0020-measure-physical-policy-and-avoided-work.md)

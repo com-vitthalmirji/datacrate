@@ -28,3 +28,8 @@ supersedes it, and mark the old one's Status as `Superseded by ADR-XXXX`.
 - [0013. Real MinIO container for failure-path tests](0013-real-minio-container-for-failure-path-tests.md)
 - [0014. Defer readiness findings with explicit guarantee boundaries](0014-defer-readiness-findings-with-explicit-guarantee-boundaries.md)
 - [0015. Strengthen contract and pipeline boundaries using Rust traits and const evaluation](0015-strengthen-contract-and-pipeline-boundaries-from-rust-trait-and-const-design.md)
+- [0016. Check runtime ingest batches before writing and digesting](0016-check-runtime-ingest-batches-before-writing-and-digesting.md)
+- [0017. Account for admitted batch bytes and cancellation](0017-account-for-admitted-batch-bytes-and-cancellation.md)
+- [0018. Preserve representations and query semantics](0018-preserve-representations-and-query-semantics.md)
+- [0019. Bind remote inputs and own publication lifecycles](0019-bind-remote-inputs-and-own-publication-lifecycles.md)
+- [0020. Measure physical policy and avoided work](0020-measure-physical-policy-and-avoided-work.md)
