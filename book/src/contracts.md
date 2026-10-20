@@ -188,10 +188,33 @@ intentionally unsupported. Map keys use a private atomic-type whitelist; aliases
 of supported keys work, while structured and floating-point keys fail compilation.
 
 References, including aliases of references, inherit their referent's shape.
-This is an intentional compatibility change: a downstream manual `Contract for
-&Local` conflicts with the blanket implementation. Put the shape on `Local`
-instead. A domain that needs a distinct declaration should use a newtype.
-Declaration shapes and policy semantics otherwise remain unchanged.
+This is a breaking change in `contracts` and `contracts-derive` 0.2, rather
+than a compatible 0.1 update. A downstream manual `Contract for &Local` or
+`Contract for &mut Local` conflicts with the blanket implementation, even when
+its shape equals Local's shape. Remove redundant reference implementations.
+If the reference previously carried a distinct declaration, retain that distinction
+with a newtype instead of moving its shape onto Local:
+
+```rust,ignore
+struct BorrowedContract<'a>(&'a Local);
+impl contracts::Contract for BorrowedContract<'_> {
+    const SHAPE: contracts::TypeShape = contracts::TypeShape::Primitive("reference");
+}
+```
+
+Use `BorrowedContract` in fields and contract checks that previously selected the
+separate reference shape. Local keeps its own declaration. Manual implementations
+can be generic over lifetimes; the concrete-only restriction applies to derive.
+The downstream build fixture verifies this migration, shared/mutable aliases,
+repeated references and optional borrowed fields. The old reference override is
+retained as a compile-fail fixture. Name-based policy and diagnostic limits are
+unchanged; resolved aliases and shadowed names can now expose previously hidden
+mismatches, so rebuild consumers rather than assuming old verdicts are preserved.
+
+Before merging the 0.2 change, review downstream manual reference implementations
+and struct fields that depended on spelling-based classification. Repository fixtures
+exercise these patterns but cannot establish compatibility for external consumers.
+Both crates remain unpublished; this version boundary does not publish a release.
 
 Enable `contracts`' `arrow` feature to construct physical schemas:
 

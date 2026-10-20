@@ -21,10 +21,22 @@ and nested optionality. Keep generic derives unsupported. A private atomic-key
 whitelist accepts aliases of supported keys and rejects structured or floating
 keys. Custom container names use their own Contract implementation.
 
-References transparently inherit the referent's shape. This intentionally consumes
-coherence space: a previous manual downstream Contract implementation for `&Local`
-now conflicts. Move that implementation to Local, or use a newtype for a distinct
-contract. Both shared and mutable references follow this policy, including aliases.
+References transparently inherit the referent's shape. This consumes coherence
+space: previous manual downstream Contract implementations for `&Local` and
+`&mut Local` conflict, even if they declare the same shape as Local. Remove redundant
+reference implementations. For a distinct reference declaration, put its former shape
+on a reference-holding newtype and migrate the corresponding fields/checks. Do not
+change Local's declaration to represent two different contracts. Shared and mutable
+references follow the same policy, including aliases and repeated references.
+
+Mark both contracts and contracts-derive as 0.2.0, and constrain the derive dependency
+to that version line. This is a pre-1.0 breaking change, not a compatible 0.1 update.
+Both crates remain unpublished. A downstream build fixture proves the newtype
+migration preserves a distinct shape while Local and its ordinary references retain
+Local's shape. The failing override fixture records the intentional coherence boundary.
+Merging remains the reviewer's decision; these changes do not claim external consumer
+approval or publish a release. Review manual reference implementations and declarations
+that previously depended on aliases or shadowed names before adopting 0.2.
 
 Add an opt-in `arrow` feature depending only on arrow-schema. Its pure schema and
 field functions return typed errors with paths. The consumer is schema construction
