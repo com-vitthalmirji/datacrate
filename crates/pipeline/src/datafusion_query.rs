@@ -91,14 +91,23 @@ struct OrderRow {
 
 /// Parses a fixed-scale-2 decimal string (e.g. `"100.00"`, `"0.01"`) into its
 /// unscaled `i128` representation (e.g. `10000`, `1`), matching
-/// `Decimal128(_, 2)`.
+/// `Decimal128(10, 2)`. Accepts an optional leading sign and ASCII digits.
+/// Values outside the declared precision are rejected before building arrays.
 fn parse_amount(row: usize, value: &str) -> Result<i128, PipelineIoError> {
     let invalid = || PipelineIoError::InvalidAmount {
         row,
         value: value.to_string(),
     };
     let (whole, frac) = value.split_once('.').ok_or_else(invalid)?;
-    if frac.len() != 2 {
+    let digits = whole
+        .strip_prefix('-')
+        .or_else(|| whole.strip_prefix('+'))
+        .unwrap_or(whole);
+    if digits.is_empty()
+        || !digits.bytes().all(|byte| byte.is_ascii_digit())
+        || frac.len() != 2
+        || !frac.bytes().all(|byte| byte.is_ascii_digit())
+    {
         return Err(invalid());
     }
     let whole: i128 = whole.parse().map_err(|_| invalid())?;
@@ -107,6 +116,7 @@ fn parse_amount(row: usize, value: &str) -> Result<i128, PipelineIoError> {
     whole
         .checked_mul(100)
         .and_then(|scaled| scaled.checked_add(sign * frac))
+        .filter(|amount| (-9_999_999_999..=9_999_999_999).contains(amount))
         .ok_or_else(invalid)
 }
 
@@ -2473,5 +2483,63 @@ mod tests {
             .expect("execute standard-syntax query");
 
         assert_eq!(pipe_batches, standard_batches);
+    }
+}
+
+#[cfg(test)]
+mod amount_regressions {
+    use super::*;
+    #[test]
+    fn malformed_amounts_report_the_original_input() {
+        for value in [
+            "1.-1", "1.+1", "1.2", "1.234", " 1.23", "1.23 ", "1e2.00", ".01", "1.", "+.01",
+            "--1.00", "١.00", "1.０１",
+        ] {
+            match parse_amount(13, value) {
+                Err(PipelineIoError::InvalidAmount { row, value: actual }) => {
+                    assert_eq!(row, 13);
+                    assert_eq!(actual, value);
+                }
+                other => panic!("{value}: {other:?}"),
+            }
+        }
+    }
+    #[test]
+    fn valid_signs_and_precision_edges_preserve_unscaled_values() {
+        for (value, expected) in [
+            ("-0.01", -1),
+            ("-1.23", -123),
+            ("+1.23", 123),
+            ("-0.00", 0),
+            ("0001.23", 123),
+            ("99999999.99", 9_999_999_999),
+            ("-99999999.99", -9_999_999_999),
+        ] {
+            assert_eq!(parse_amount(0, value).expect("valid amount"), expected);
+        }
+        for value in [
+            "100000000.00",
+            "-100000000.00",
+            "170141183460469231731687303715884105727.99",
+        ] {
+            assert!(matches!(
+                parse_amount(0, value),
+                Err(PipelineIoError::InvalidAmount { .. })
+            ));
+        }
+    }
+    #[test]
+    fn csv_ingestion_rejects_values_outside_decimal_precision() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let path = dir.path().join("amount.csv");
+        std::fs::write(
+            &path,
+            "id,amount,placed_at,note\n1,100000000.00,2026-01-01T00:00:00,\n",
+        )
+        .expect("write CSV");
+        assert!(matches!(
+            fixture_to_orders_batch(&path),
+            Err(PipelineIoError::InvalidAmount { .. })
+        ));
     }
 }
