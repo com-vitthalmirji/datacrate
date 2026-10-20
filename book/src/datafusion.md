@@ -391,6 +391,15 @@ moment it goes out of scope. No `.use { }` block, because there's nothing to
 opt into - it's the default behavior of every owned value in Rust, not a
 library feature layered on top.
 
+The ordered row query now has a shared `row_query_plan` used by both the
+collecting wrapper and `stream_orders` example. Its regressions check
+independent expected values, order and nulls, projection that removes the
+predicate column, empty/limited results, conditional cast errors, and
+release of query reservations after an early stream drop. These are
+consumer and semantic checks; a global sort can still buffer upstream.
+The existing constrained aggregate/spill test checks its separate cleanup
+path under the configured runtime.
+
 ## Run the whole chapter live
 
 ```console

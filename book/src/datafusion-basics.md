@@ -121,15 +121,32 @@ runs an ordinary filter/projection/ordering query through the SQL string
 API:
 
 ```rust
-pub async fn row_query_sql(ctx: &SessionContext) -> Result<Vec<RecordBatch>, DataFusionError> {
+pub async fn row_query_plan(ctx: &SessionContext) -> Result<DataFrame, DataFusionError> {
     ctx.sql(
         "SELECT id, amount, placed_at, note FROM orders \
          WHERE amount > 50.00 ORDER BY placed_at ASC",
-    )
-    .await?
-    .collect()
-    .await
+    ).await
 }
+
+pub async fn row_query_sql(ctx: &SessionContext) -> Result<Vec<RecordBatch>, DataFusionError> {
+    row_query_plan(ctx).await?.collect().await
+}
+```
+
+Earlier, `row_query_sql` constructed and collected the query in one
+function. `row_query_plan` now owns that query intent and returns a
+`DataFrame`, so the existing wrapper can collect it while a consumer can
+call `execute_stream` on the same plan. The independent DataFrame
+expression path remains a separate correctness oracle.
+
+`crates/pipeline/examples/stream_orders.rs` consumes the actual planned
+query one batch at a time and reports batch and row counts. It retains no
+whole output collection. The global `ORDER BY` may buffer or spill before
+the first output; streaming the result does not make the sort online or
+bound total query memory. Run it with a four-column orders Parquet file:
+
+```console
+$ cargo run -p pipeline --example stream_orders -- orders.parquet
 ```
 
 `row_query_dataframe` (`datafusion_query.rs:473`) runs the *identical* query
