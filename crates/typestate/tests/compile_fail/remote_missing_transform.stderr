@@ -10,4 +10,4 @@ error[E0599]: no method named `build` found for struct `RemotePipelineBuilder<Pr
    | |_________|
    |
    |
-   = note: the method was found for `RemotePipelineBuilder<Present<object_store::path::Path>, Present<Box<(dyn Fn(arrow_array::record_batch::RecordBatch) -> arrow_array::record_batch::RecordBatch + 'static)>>, Present<object_store::path::Path>>`
+   = note: the method was found for `RemotePipelineBuilder<Present<object_store::path::Path>, Present<Box<(dyn Fn(arrow_array::record_batch::RecordBatch) -> Result<arrow_array::record_batch::RecordBatch, PipelineIoError> + 'static)>>, Present<object_store::path::Path>>`

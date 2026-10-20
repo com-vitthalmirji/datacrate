@@ -28,7 +28,9 @@ use crate::object_store_io::{
     best_effort_delete, download_to_temp, head_object, publish_staged_object, put_manifest,
     upload_from_temp,
 };
-use crate::{PipelineIoError, Row, batch_from_rows, open_parquet_writer, parse_row, schema};
+use crate::{
+    CallbackStage, PipelineIoError, Row, batch_from_rows, open_parquet_writer, parse_row, schema,
+};
 
 /// Tuning for [`run_bounded_pipeline`]: how many rows make one `RecordBatch`,
 /// and how many batches may be in flight between the reader and writer at
@@ -213,7 +215,7 @@ fn consume_batches(
     receiver: Receiver<Result<RecordBatch, PipelineIoError>>,
     staging_path: &Path,
     compression: Compression,
-    transform: Option<&dyn Fn(RecordBatch) -> RecordBatch>,
+    transform: Option<&dyn Fn(RecordBatch) -> Result<RecordBatch, PipelineIoError>>,
     cancel: &CancellationToken,
 ) -> Result<PipelineReport, PipelineError> {
     if cancel.is_cancelled() {
@@ -232,7 +234,11 @@ fn consume_batches(
         // Applied before the digest, not after: the manifest must audit what
         // was actually written, not the raw input.
         let batch = match transform {
-            Some(f) => f(batch),
+            Some(f) => f(batch).map_err(|source| PipelineIoError::Callback {
+                stage: CallbackStage::Transform,
+                batch_index: report.batches_written,
+                source: Box::new(source),
+            })?,
             None => batch,
         };
         let checked = CheckedIngestBatch::try_new(batch)?;
@@ -284,7 +290,7 @@ pub fn run_bounded_pipeline(
     input: &Path,
     output: &Path,
     config: &PipelineConfig,
-    transform: Option<&dyn Fn(RecordBatch) -> RecordBatch>,
+    transform: Option<&dyn Fn(RecordBatch) -> Result<RecordBatch, PipelineIoError>>,
     cancel: &CancellationToken,
 ) -> Result<PipelineReport, PipelineError> {
     let (sender, receiver) =
@@ -363,7 +369,7 @@ pub fn run_bounded_pipeline_s3(
     input_key: &ObjectPath,
     output_key: &ObjectPath,
     config: &PipelineConfig,
-    transform: Option<&dyn Fn(RecordBatch) -> RecordBatch>,
+    transform: Option<&dyn Fn(RecordBatch) -> Result<RecordBatch, PipelineIoError>>,
     cancel: &CancellationToken,
 ) -> Result<PipelineReport, PipelineError> {
     let staging_dir = tempfile::tempdir().map_err(|source| PipelineIoError::OpenOutput {

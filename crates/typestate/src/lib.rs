@@ -15,6 +15,7 @@ use arrow::array::RecordBatch;
 use object_store::ObjectStore;
 use object_store::path::Path as ObjectPath;
 use pipeline::bounded::PipelineConfig;
+use pipeline::{CallbackStage, PipelineIoError, validate_ingest_batch};
 
 /// Marks a builder stage that has not been supplied yet.
 #[derive(Debug, Default)]
@@ -28,19 +29,17 @@ pub struct Present<T>(T);
 ///
 /// Boxed rather than a bare `fn` pointer so a caller can supply a capturing
 /// closure (e.g. a transform parameterized by a column name or threshold
-/// read from config) — a plain `fn(RecordBatch) -> RecordBatch` can only
-/// ever be a free function, which is too narrow for any transform that
-/// needs state from its call site.
-pub type Transform = Box<dyn FnOnce(RecordBatch) -> RecordBatch>;
+/// read from config). A bare function pointer cannot capture that state.
+pub type Transform = Box<dyn FnOnce(RecordBatch) -> Result<RecordBatch, PipelineIoError>>;
 
 /// A repeatable transform applied to each batch in a remote pipeline.
-pub type RemoteTransform = Box<dyn Fn(RecordBatch) -> RecordBatch>;
+pub type RemoteTransform = Box<dyn Fn(RecordBatch) -> Result<RecordBatch, PipelineIoError>>;
 
 /// A batch-to-batch step applied last, before the pipeline returns.
 ///
 /// Boxed for the same reason as [`Transform`]: capturing closures, not just
 /// free functions, need to be usable as a sink.
-pub type Sink = Box<dyn FnOnce(RecordBatch) -> RecordBatch>;
+pub type Sink = Box<dyn FnOnce(RecordBatch) -> Result<RecordBatch, PipelineIoError>>;
 
 /// Builds a pipeline that reads a CSV fixture, applies a transform, then a
 /// sink. `Src`, `Xf`, and `Snk` each track whether their stage has been
@@ -80,13 +79,13 @@ impl<Xf, Snk> PipelineBuilder<Missing, Xf, Snk> {
 impl<Src, Snk> PipelineBuilder<Src, Missing, Snk> {
     /// Supplies the transform applied to the batch read from the source.
     ///
-    /// Accepts any `FnOnce(RecordBatch) -> RecordBatch`, not just free
+    /// Accepts any `FnOnce(RecordBatch) -> Result<RecordBatch, PipelineIoError>`, not just free
     /// functions — a closure that captures its call site's state (e.g. a
     /// column name) works here too.
     #[must_use]
     pub fn transform<F>(self, f: F) -> PipelineBuilder<Src, Present<Transform>, Snk>
     where
-        F: FnOnce(RecordBatch) -> RecordBatch + 'static,
+        F: FnOnce(RecordBatch) -> Result<RecordBatch, PipelineIoError> + 'static,
     {
         PipelineBuilder {
             source: self.source,
@@ -99,12 +98,12 @@ impl<Src, Snk> PipelineBuilder<Src, Missing, Snk> {
 impl<Src, Xf> PipelineBuilder<Src, Xf, Missing> {
     /// Supplies the sink applied to the transformed batch before it's returned.
     ///
-    /// Accepts any `FnOnce(RecordBatch) -> RecordBatch`, not just free
+    /// Accepts any `FnOnce(RecordBatch) -> Result<RecordBatch, PipelineIoError>`, not just free
     /// functions — see [`PipelineBuilder::transform`].
     #[must_use]
     pub fn sink<F>(self, f: F) -> PipelineBuilder<Src, Xf, Present<Sink>>
     where
-        F: FnOnce(RecordBatch) -> RecordBatch + 'static,
+        F: FnOnce(RecordBatch) -> Result<RecordBatch, PipelineIoError> + 'static,
     {
         PipelineBuilder {
             source: self.source,
@@ -124,8 +123,19 @@ impl PipelineBuilder<Present<PathBuf>, Present<Transform>, Present<Sink>> {
     /// parsed into a `RecordBatch`.
     pub fn build(self) -> Result<RecordBatch, pipeline::PipelineIoError> {
         let batch = pipeline::fixture_to_record_batch(&self.source.0)?;
-        let batch = (self.transform.0)(batch);
-        Ok((self.sink.0)(batch))
+        let batch = (self.transform.0)(batch).map_err(|source| PipelineIoError::Callback {
+            stage: CallbackStage::Transform,
+            batch_index: 0,
+            source: Box::new(source),
+        })?;
+        validate_ingest_batch(&batch)?;
+        let batch = (self.sink.0)(batch).map_err(|source| PipelineIoError::Callback {
+            stage: CallbackStage::Sink,
+            batch_index: 0,
+            source: Box::new(source),
+        })?;
+        validate_ingest_batch(&batch)?;
+        Ok(batch)
     }
 }
 
@@ -179,12 +189,12 @@ impl<Xf, Snk> RemotePipelineBuilder<Missing, Xf, Snk> {
 impl<Src, Snk> RemotePipelineBuilder<Src, Missing, Snk> {
     /// Supplies the transform applied to each batch before it's written.
     ///
-    /// Accepts any `Fn(RecordBatch) -> RecordBatch` — see
+    /// Accepts any `Fn(RecordBatch) -> Result<RecordBatch, PipelineIoError>` — see
     /// [`PipelineBuilder::transform`] for why it's not a bare `fn` pointer.
     #[must_use]
     pub fn transform<F>(self, f: F) -> RemotePipelineBuilder<Src, Present<RemoteTransform>, Snk>
     where
-        F: Fn(RecordBatch) -> RecordBatch + 'static,
+        F: Fn(RecordBatch) -> Result<RecordBatch, PipelineIoError> + 'static,
     {
         RemotePipelineBuilder {
             store: self.store,
@@ -246,8 +256,8 @@ mod tests {
             .join(name)
     }
 
-    fn identity(batch: RecordBatch) -> RecordBatch {
-        batch
+    fn identity(batch: RecordBatch) -> Result<RecordBatch, PipelineIoError> {
+        Ok(batch)
     }
 
     #[test]
@@ -284,7 +294,7 @@ mod tests {
             .source(fixture_path("headers.csv"))
             .transform(move |batch| {
                 assert_eq!(batch.num_rows(), expected_rows);
-                batch
+                Ok(batch)
             })
             .sink(identity)
             .build()
@@ -301,11 +311,11 @@ mod tests {
             .source(fixture_path("headers.csv"))
             .transform(move |batch| {
                 assert_eq!(transform_capture.into_bytes(), b"transform");
-                batch
+                Ok(batch)
             })
             .sink(move |batch| {
                 assert_eq!(sink_capture.into_bytes(), b"sink");
-                batch
+                Ok(batch)
             })
             .build()
             .expect("one-shot pipeline");
@@ -331,7 +341,7 @@ mod tests {
             .source(key)
             .transform(move |batch| {
                 observed.fetch_add(1, Ordering::Relaxed);
-                batch
+                Ok(batch)
             })
             .sink(ObjectPath::from("output.parquet"))
             .build(&pipeline::bounded::CancellationToken::new())

@@ -16,7 +16,10 @@ fn runtime_contract_rejects_renamed_fields_before_publication() {
             Field::new("name", DataType::Utf8, false),
             Field::new("note", DataType::Utf8, true),
         ]);
-        RecordBatch::try_new(Arc::new(schema), batch.columns().to_vec()).expect("renamed batch")
+        Ok(
+            RecordBatch::try_new(Arc::new(schema), batch.columns().to_vec())
+                .expect("renamed batch"),
+        )
     };
     let result = run_bounded_pipeline(
         &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/m1/headers.csv"),
@@ -148,4 +151,68 @@ fn runtime_contract_accepts_empty_batches_and_ignores_uninterpreted_metadata() {
     let with_metadata =
         RecordBatch::try_new(Arc::new(schema), batch.columns().to_vec()).expect("metadata");
     validate_ingest_batch(&with_metadata).expect("metadata is not part of ingest contract");
+}
+
+#[test]
+fn callback_error_releases_waiting_producer_and_preserves_context() {
+    use pipeline::bounded::PipelineError;
+    use pipeline::{CallbackStage, PipelineIoError};
+    use std::num::NonZeroUsize;
+    use std::sync::mpsc;
+    use std::time::Duration;
+    for capacity in [0, 1] {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let output = dir.path().join("output.parquet");
+        std::fs::write(&output, b"previous output").expect("previous output");
+        let input = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/m1/headers.csv");
+        let destination = output.clone();
+        let (sent, received) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let calls = std::cell::Cell::new(0);
+            let transform = |batch| {
+                let index = calls.get();
+                calls.set(index + 1);
+                if index == 1 {
+                    Err(PipelineIoError::InvalidId {
+                        row: 7,
+                        value: "callback input".into(),
+                    })
+                } else {
+                    Ok(batch)
+                }
+            };
+            let config = PipelineConfig {
+                batch_size: NonZeroUsize::new(1).expect("positive"),
+                channel_capacity: capacity,
+                ..PipelineConfig::default()
+            };
+            let result = run_bounded_pipeline(
+                &input,
+                &destination,
+                &config,
+                Some(&transform),
+                &CancellationToken::new(),
+            );
+            sent.send(result).expect("result receiver");
+        });
+        let result = received
+            .recv_timeout(Duration::from_secs(5))
+            .expect("producer must terminate after consumer error");
+        worker.join().expect("pipeline thread");
+        match result {
+            Err(PipelineError::Io(PipelineIoError::Callback {
+                stage: CallbackStage::Transform,
+                batch_index: 1,
+                source,
+            })) => {
+                assert!(matches!(*source, PipelineIoError::InvalidId { row: 7, .. }));
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read(&output).expect("old output"),
+            b"previous output"
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).expect("outputs").count(), 1);
+    }
 }

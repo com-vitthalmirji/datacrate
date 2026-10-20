@@ -30,10 +30,37 @@ use parquet::basic::Compression;
 use parquet::errors::ParquetError;
 use parquet::file::properties::WriterProperties;
 
+/// A configured callback's position in the pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallbackStage {
+    /// The transform after reading input.
+    Transform,
+    /// The local final callback.
+    Sink,
+}
+
+impl std::fmt::Display for CallbackStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transform => f.write_str("transform"),
+            Self::Sink => f.write_str("sink"),
+        }
+    }
+}
+
 /// Errors that can occur while converting a CSV fixture into a `RecordBatch`,
 /// or while writing/reading that batch as Parquet.
 #[derive(Debug)]
 pub enum PipelineIoError {
+    /// A configured callback returned an error.
+    Callback {
+        /// The failing stage.
+        stage: CallbackStage,
+        /// Zero-based input batch index.
+        batch_index: usize,
+        /// The original callback failure.
+        source: Box<PipelineIoError>,
+    },
     /// A batch violates the fixed ingest schema.
     InvalidBatch {
         /// The violated invariant.
@@ -127,6 +154,11 @@ pub enum PipelineIoError {
 impl std::fmt::Display for PipelineIoError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            PipelineIoError::Callback {
+                stage,
+                batch_index,
+                source,
+            } => write!(f, "{stage} callback at batch {batch_index}: {source}"),
             PipelineIoError::InvalidBatch { violation } => {
                 write!(f, "invalid ingest batch: {violation}")
             }
@@ -182,6 +214,7 @@ impl std::fmt::Display for PipelineIoError {
 impl std::error::Error for PipelineIoError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            PipelineIoError::Callback { source, .. } => Some(source.as_ref()),
             PipelineIoError::InvalidBatch { violation } => Some(violation),
             PipelineIoError::OpenInput { source, .. } => Some(source),
             PipelineIoError::ReadRecord { source } => Some(source),

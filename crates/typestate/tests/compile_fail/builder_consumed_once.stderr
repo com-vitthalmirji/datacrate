@@ -2,14 +2,14 @@ error[E0382]: use of moved value: `builder`
  --> tests/compile_fail/builder_consumed_once.rs:8:13
   |
 3 |     let builder = PipelineBuilder::new()
-  |         ------- move occurs because `builder` has type `PipelineBuilder<Present<PathBuf>, Present<Box<dyn FnOnce(arrow_array::record_batch::RecordBatch) -> arrow_array::record_batch::RecordBatch>>, Present<Box<dyn FnOnce(arrow_array::record_batch::RecordBatch) -> arrow_array::record_batch::RecordBatch>>>`, which does not implement the `Copy` trait
+  |         ------- move occurs because `builder` has type `PipelineBuilder<Present<PathBuf>, Present<Box<dyn FnOnce(arrow_array::record_batch::RecordBatch) -> Result<arrow_array::record_batch::RecordBatch, pipeline::PipelineIoError>>>, Present<Box<dyn FnOnce(arrow_array::record_batch::RecordBatch) -> Result<arrow_array::record_batch::RecordBatch, pipeline::PipelineIoError>>>>`, which does not implement the `Copy` trait
 ...
 7 |     let _ = builder.build();
   |                     ------- `builder` moved due to this method call
 8 |     let _ = builder.build();
   |             ^^^^^^^ value used here after move
   |
-note: `PipelineBuilder::<Present<PathBuf>, Present<Box<(dyn FnOnce(arrow_array::record_batch::RecordBatch) -> arrow_array::record_batch::RecordBatch + 'static)>>, Present<Box<(dyn FnOnce(arrow_array::record_batch::RecordBatch) -> arrow_array::record_batch::RecordBatch + 'static)>>>::build` takes ownership of the receiver `self`, which moves `builder`
+note: `PipelineBuilder::<Present<PathBuf>, Present<Box<(dyn FnOnce(arrow_array::record_batch::RecordBatch) -> Result<arrow_array::record_batch::RecordBatch, pipeline::PipelineIoError> + 'static)>>, Present<Box<(dyn FnOnce(arrow_array::record_batch::RecordBatch) -> Result<arrow_array::record_batch::RecordBatch, pipeline::PipelineIoError> + 'static)>>>::build` takes ownership of the receiver `self`, which moves `builder`
  --> src/lib.rs
   |
   |     pub fn build(self) -> Result<RecordBatch, pipeline::PipelineIoError> {
