@@ -352,3 +352,79 @@ fn byte_admission_callback_error_releases_budget_and_keeps_source() {
         );
     }
 }
+
+#[test]
+fn runtime_contract_rejects_malformed_callback_shapes_with_typed_errors() {
+    use arrow::array::UInt64Array;
+    use pipeline::bounded::PipelineError;
+    use pipeline::{BatchViolation, PipelineIoError};
+    for shape in 0..3 {
+        for budget in [None, std::num::NonZeroUsize::new(16_384)] {
+            let dir = tempfile::tempdir().expect("directory");
+            let output = dir.path().join("output");
+            std::fs::write(&output, b"old").expect("old output");
+            let transform = |batch: RecordBatch| {
+                if shape == 0 {
+                    return Ok(batch.project(&[0, 1]).expect("two columns"));
+                }
+                let fields = vec![
+                    Field::new(
+                        "id",
+                        if shape == 1 {
+                            DataType::UInt64
+                        } else {
+                            DataType::Int64
+                        },
+                        shape == 2,
+                    ),
+                    Field::new("name", DataType::Utf8, false),
+                    Field::new("note", DataType::Utf8, true),
+                ];
+                let mut columns = batch.columns().to_vec();
+                if shape == 1 {
+                    columns[0] = Arc::new(UInt64Array::from(vec![1; batch.num_rows()]));
+                }
+                Ok(RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
+                    .expect("safely constructible drift"))
+            };
+            let input = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/m1/headers.csv");
+            let config = PipelineConfig {
+                max_admitted_bytes: budget,
+                ..PipelineConfig::default()
+            };
+            let error = run_bounded_pipeline(
+                &input,
+                &output,
+                &config,
+                Some(&transform),
+                &CancellationToken::new(),
+            )
+            .expect_err("reject callback drift");
+            match (shape, error) {
+                (
+                    0,
+                    PipelineError::Io(PipelineIoError::InvalidBatch {
+                        violation: BatchViolation::ColumnCount { .. },
+                    }),
+                )
+                | (
+                    1,
+                    PipelineError::Io(PipelineIoError::InvalidBatch {
+                        violation: BatchViolation::DataType { index: 0, .. },
+                    }),
+                )
+                | (
+                    2,
+                    PipelineError::Io(PipelineIoError::InvalidBatch {
+                        violation: BatchViolation::Nullability { index: 0, .. },
+                    }),
+                ) => (),
+                (_, error) => {
+                    panic!("expected contract rejection before writer/digest, got {error:?}")
+                }
+            }
+            assert_eq!(std::fs::read(output).expect("previous output"), b"old");
+            assert_eq!(std::fs::read_dir(dir.path()).expect("directory").count(), 1);
+        }
+    }
+}
