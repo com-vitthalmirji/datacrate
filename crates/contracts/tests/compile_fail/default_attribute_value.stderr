@@ -1,0 +1,5 @@
+error: `default` does not accept a value or arguments
+ --> tests/compile_fail/default_attribute_value.rs:3:28
+  |
+3 | struct Target { #[contract(default = false)] id: i64 }
+  |                            ^^^^^^^

@@ -156,3 +156,8 @@ Name-based policies reject duplicate matching names on either side, including
 ASCII case collisions under `Exact` and `ExactUnorderedCI`. Ordered and positional
 policies retain index-based pairing. Case-insensitive matching folds ASCII only;
 non-ASCII names must match exactly. `Full` remains an unchecked escape hatch.
+
+A field may have one `#[contract(default)]` attribute, optionally with a trailing
+comma. Values, arguments, unknown keys, duplicates and empty attributes are
+rejected at the derive site. This attribute records compatibility metadata; it
+does not construct a default value or make a reader supply one at runtime.
