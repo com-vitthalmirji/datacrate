@@ -363,6 +363,17 @@ what this combiner can establish. Fixed seeds preserve repeatability for
 the pinned build, not a portable cross-version or cross-platform hash
 format. It is neither an equality proof nor an authenticity check.
 
+The original JSON fixture preserved a supplied digest string, which did not test
+whether the hashing implementation still produced that value. An independent
+baseline executable now supplies 36 captured observations covering empty input,
+null and empty notes, empty names, field boundaries, duplicates, Unicode, integer
+extrema and different batch sizes. The candidate reproduces them on the same
+compiler and target configuration. A committed regression fixture is limited to
+AES-enabled aarch64 macOS with the pinned Rust and ahash versions. Changing a seed
+makes that regression fail. Other targets still need their own baseline captures;
+this evidence does not turn the legacy scheme into a portable format.
+
+
 Earlier, readers decoded JSON directly and could accept any numeric
 `schema_version`. Use `manifest::decode_completion_manifest` now: it checks
 the supported version and version-specific fields before returning a usable manifest. The publisher
