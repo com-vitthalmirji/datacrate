@@ -424,3 +424,10 @@ receiver. Other tests cover exact and oversized budgets, retained charges after
 receive, transform growth/failure, shared buffers and cancellation registration
 races. A producer admission error also prevents publishing a closed partial file.
 These are retention and progress guarantees within the named transport boundary.
+
+The multipart progress test holds the first upload part pending while releasing
+later parts independently. It observes submission of the next full part, then the
+17-byte final part, before releasing the first. This establishes slot refill despite
+a straggler, alongside the separate two-outstanding-part bound. Forcing one serial
+slot makes the progress test fail. These permits control the fake backend's futures;
+they do not establish physical abort behavior in a remote S3 service.

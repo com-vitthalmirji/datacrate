@@ -473,6 +473,107 @@ mod multipart_regressions {
             Ok(())
         }
     }
+    #[derive(Debug)]
+    struct GatedUpload {
+        next: usize,
+        submitted: std::sync::mpsc::Sender<(usize, tokio::sync::oneshot::Sender<()>)>,
+        completed: Arc<Vec<AtomicBool>>,
+        lengths: Arc<std::sync::Mutex<Vec<usize>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl MultipartUpload for GatedUpload {
+        fn put_part(&mut self, payload: PutPayload) -> UploadPart {
+            let index = self.next;
+            self.next += 1;
+            let (permit, received) = tokio::sync::oneshot::channel();
+            self.lengths
+                .lock()
+                .expect("lengths")
+                .push(payload.content_length());
+            self.submitted.send((index, permit)).expect("observer");
+            let completed = Arc::clone(&self.completed);
+            Box::pin(async move {
+                received.await.map_err(|_| injected())?;
+                drop(payload);
+                completed[index].store(true, Ordering::SeqCst);
+                Ok(())
+            })
+        }
+
+        async fn complete(&mut self) -> object_store::Result<PutResult> {
+            assert!(
+                self.completed
+                    .iter()
+                    .all(|part| part.load(Ordering::SeqCst))
+            );
+            Ok(PutResult {
+                e_tag: None,
+                version: None,
+            })
+        }
+
+        async fn abort(&mut self) -> object_store::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn multipart_progress_refills_before_straggler_finishes() {
+        use std::time::Duration;
+        let (submitted, observed) = std::sync::mpsc::channel();
+        let completed = Arc::new((0..4).map(|_| AtomicBool::new(false)).collect::<Vec<_>>());
+        let lengths = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let upload = GatedUpload {
+            next: 0,
+            submitted,
+            completed: Arc::clone(&completed),
+            lengths: Arc::clone(&lengths),
+        };
+        let (finished, result) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut reader = std::io::repeat(7).take((CHUNK_BYTES * 3 + 17) as u64);
+            finished
+                .send(block_on(write_multipart(
+                    &mut reader,
+                    Path::new("input"),
+                    &ObjectPath::from("output"),
+                    Box::new(upload),
+                )))
+                .expect("result observer");
+        });
+        let next = || {
+            observed
+                .recv_timeout(Duration::from_secs(5))
+                .expect("next part submission")
+        };
+        let (first, hold) = next();
+        let (second, release) = next();
+        assert_eq!((first, second), (0, 1));
+        release.send(()).expect("release second");
+        let (third, release) = next();
+        assert_eq!(third, 2);
+        assert!(
+            !completed[0].load(Ordering::SeqCst),
+            "a free slot must refill with the first part still held"
+        );
+        release.send(()).expect("release third");
+        let (last, release) = next();
+        assert_eq!(last, 3);
+        assert!(!completed[0].load(Ordering::SeqCst));
+        release.send(()).expect("release partial final part");
+        hold.send(()).expect("release straggler");
+        result
+            .recv_timeout(Duration::from_secs(5))
+            .expect("upload completion")
+            .expect("upload");
+        worker.join().expect("upload thread");
+        assert_eq!(
+            *lengths.lock().expect("lengths"),
+            [CHUNK_BYTES, CHUNK_BYTES, CHUNK_BYTES, 17]
+        );
+    }
+
     #[test]
     fn outstanding_parts_and_final_partial_part_stay_bounded() {
         for size in [0, CHUNK_BYTES / 2, CHUNK_BYTES * 3, CHUNK_BYTES * 3 + 17] {

@@ -3,7 +3,7 @@
 ## Status
 
 Proposed - 20 October 2026. The optional byte-budget transport is implemented.
-Controlled multipart straggler progress remains a separate acceptance gate.
+Controlled multipart straggler progress is covered by independently released parts.
 Full integration and physical memory measurements remain separate evidence gates.
 Extends ADR 0005 and ADR 0015; the existing multipart fix is a prerequisite, not new work here.
 
