@@ -149,6 +149,25 @@ bound total query memory. Run it with a four-column orders Parquet file:
 $ cargo run -p pipeline --example stream_orders -- orders.parquet
 ```
 
+Earlier, the ordered stream had only tiny-fixture and cooperative-yield evidence.
+Two controlled regressions now exercise the missing boundaries. A counted streaming
+source shows that the global sort consumes all 32 input batches before returning
+its first row. A sink held on a zero-permit semaphore pauses after one output batch;
+releasing it resumes consumption of all 160 matching rows. This proves consumer
+pacing at that boundary, not upstream source pacing through a global sort.
+
+A separate 65,536-row reverse-ordered fixture forces the same query to spill under
+a 2 MiB tracked pool with explicit 64 KiB sort reservation and in-place threshold.
+The test verifies a real spill metric and live spill ownership before dropping the
+first 256-row output batch and stream. It waits for zero reservations and spill
+files. The disk manager's empty namespace remains until runtime teardown, then it
+also disappears. The fixture itself is preloaded test data outside the tracked
+pool; these settings are regression controls, not production recommendations.
+
+```console
+$ cargo test -p pipeline --lib ordered_stream_tests --locked
+```
+
 `row_query_dataframe` (`datafusion_query.rs:473`) runs the *identical* query
 through the DataFrame builder API instead - `.filter(...)`, `.select(...)`,
 `.sort(...)` - and a test

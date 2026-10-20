@@ -762,3 +762,6 @@ mod tests {
 
 #[cfg(test)]
 mod query_io_tests;
+
+#[cfg(test)]
+mod ordered_stream_tests;
