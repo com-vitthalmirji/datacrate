@@ -4,7 +4,8 @@
 
 Proposed - 20 October 2026. The bounded physical-layout comparison is implemented;
 production defaults remain unchanged. Evidence retains stage versus process measurement
-boundaries and unavailable metrics. Other conditional evaluations remain separate.
+boundaries and unavailable metrics. Initial host-contended timings are exploratory;
+performance acceptance awaits controlled reruns. Other conditional evaluations remain separate.
 Extends ADR 0006 and preserves ADR 0007/0007.1 resource-control limitations.
 
 ## Context
