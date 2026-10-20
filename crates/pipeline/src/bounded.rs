@@ -683,7 +683,7 @@ mod tests {
         use object_store::path::Path as ObjectPath;
 
         let minio = crate::minio_test_support::MinioContainer::start(
-            "s3-pipeline-reports-download-object-when-the-input-key-is-missing",
+            "s3-missing-input-download",
         );
         let store = minio.store();
         let input_key = ObjectPath::from("missing-input.csv");
