@@ -34,6 +34,10 @@ struct Args {
     /// Capacity of the channel between the reader and writer threads.
     #[arg(long, default_value_t = 4)]
     channel_capacity: usize,
+
+    /// Ceiling on admitted Arrow bytes, excluding parser, callback and Parquet buffers.
+    #[arg(long)]
+    max_admitted_bytes: Option<NonZeroUsize>,
 }
 
 fn main() -> ExitCode {
@@ -42,6 +46,7 @@ fn main() -> ExitCode {
         batch_size: args.batch_size,
         channel_capacity: args.channel_capacity,
         compression: Compression::SNAPPY,
+        max_admitted_bytes: args.max_admitted_bytes,
     };
 
     match run_bounded_pipeline(

@@ -385,3 +385,42 @@ Writer and digest share that checked output. Invalid names, types or nullability
 `InvalidBatch` before writing transformed data; schema metadata is not interpreted.
 This validates the fixed ingest representation, not business rules or arbitrary declared
 contracts. The digest's typed views share Arrow buffers instead of copying payloads.
+
+## A batch count does not bound variable-width bytes
+
+Earlier, the channel limited only the number of batches. A thousand short strings
+and a thousand multi-megabyte strings occupy very different amounts of memory, so
+that count alone could not express an operator's retention budget. The optional
+`PipelineConfig.max_admitted_bytes` now admits each finished producer batch against
+an Arrow array memory charge. Both pipeline CLIs expose `--max-admitted-bytes` as a
+positive byte count. The default remains count-only.
+
+The charge sums each column's `get_array_memory_size()` with checked addition.
+Shared or sliced buffers can be counted repeatedly. It is a conservative declared
+accounting rule, not unique allocated bytes or process RSS. One batch being built,
+CSV parser records, callback internals, Parquet buffers, network/runtime buffers and
+allocator overhead remain outside it. Admission after construction cannot prevent
+one extremely large input record from allocating memory first.
+
+A private lease retains the reservation while queued, during a transform, and
+through validation, writing and hashing. Receiving a batch frees a count slot but
+does not free its bytes. Dropping its reservation releases them once. A returned
+transform may grow only if the extra charge is immediately available; otherwise it
+returns `BatchGrowthExceedsBudget`. Waiting there could deadlock because only that
+consumer can drain the queued batches holding the remaining bytes. Shrinking keeps
+the original charge conservatively until the lease ends.
+
+The budgeted route uses one mutex and condition variable for count, rendezvous and
+byte predicates. Capacity zero still requires receiver acknowledgment. Cancellation
+wakes registered budgeted transports, including runs sharing one token; receiver
+closure discards only that transport's queued work. It does not interrupt arbitrary
+callbacks, file reads or backend I/O. The count-only route retains its existing
+cooperative cancellation behavior. Successful reports expose current and peak
+charges as `Some`; count-only reports use `None`, so unavailable accounting is not
+reported as a measured zero.
+
+Controlled tests observe an outstanding send before cancelling or dropping the
+receiver. Other tests cover exact and oversized budgets, retained charges after
+receive, transform growth/failure, shared buffers and cancellation registration
+races. A producer admission error also prevents publishing a closed partial file.
+These are retention and progress guarantees within the named transport boundary.

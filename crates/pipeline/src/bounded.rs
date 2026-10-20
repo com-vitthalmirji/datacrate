@@ -1,6 +1,6 @@
 //! A bounded input -> Arrow transform -> Parquet output pipeline. Synchronous
 //! by design — backpressure and bounded memory come from a bounded
-//! `mpsc::sync_channel`, not from an executor.
+//! count-limited channel or the optional byte-budget transport, not an executor.
 //!
 //! Output is staged: the writer targets a `.tmp` sibling of the requested
 //! output path and is renamed into place only after a full, successful
@@ -12,15 +12,18 @@
 use std::fs::File;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 
 use arrow::array::RecordBatch;
 use object_store::ObjectStore;
 use object_store::path::Path as ObjectPath;
 use parquet::basic::Compression;
+
+#[path = "bounded/transport.rs"]
+mod transport;
 
 use crate::batch_contract::CheckedIngestBatch;
 use crate::manifest::{self, CompletionManifest};
@@ -34,7 +37,8 @@ use crate::{
 
 /// Tuning for [`run_bounded_pipeline`]: how many rows make one `RecordBatch`,
 /// and how many batches may be in flight between the reader and writer at
-/// once. Both bound the pipeline's peak memory independently of input size.
+/// once. The optional byte budget limits admitted Arrow array charges, excluding
+/// batch construction, callback internals, Parquet buffers and allocator overhead.
 #[derive(Debug, Clone)]
 pub struct PipelineConfig {
     /// Rows per `RecordBatch`. Smaller values bound memory more tightly at
@@ -43,6 +47,9 @@ pub struct PipelineConfig {
     /// Capacity of the channel between the reader and writer threads. `0`
     /// makes it a rendezvous channel (strictest possible backpressure).
     pub channel_capacity: usize,
+    /// Optional ceiling on admitted Arrow array memory charges. Construction,
+    /// callbacks, Parquet buffers and allocator overhead are outside this budget.
+    pub max_admitted_bytes: Option<NonZeroUsize>,
     /// Parquet compression for the output file.
     pub compression: Compression,
 }
@@ -52,6 +59,7 @@ impl Default for PipelineConfig {
         Self {
             batch_size: NonZeroUsize::new(1_000).expect("default batch size is nonzero"),
             channel_capacity: 4,
+            max_admitted_bytes: None,
             compression: Compression::SNAPPY,
         }
     }
@@ -62,7 +70,10 @@ impl Default for PipelineConfig {
 /// (or immediately, if none was ever sent) and reports
 /// [`PipelineError::Cancelled`] instead of publishing output.
 #[derive(Debug, Clone, Default)]
-pub struct CancellationToken(Arc<AtomicBool>);
+pub struct CancellationToken {
+    cancelled: Arc<AtomicBool>,
+    transports: Arc<Mutex<Vec<Weak<transport::Control>>>>,
+}
 
 impl CancellationToken {
     /// Creates a token that is not yet cancelled.
@@ -72,12 +83,35 @@ impl CancellationToken {
 
     /// Requests cancellation. Idempotent.
     pub fn cancel(&self) {
-        self.0.store(true, Ordering::Relaxed);
+        self.cancelled.store(true, Ordering::Release);
+        let controls = {
+            let mut registry = self.transports.lock().unwrap_or_else(|p| p.into_inner());
+            registry
+                .drain(..)
+                .filter_map(|weak| weak.upgrade())
+                .collect::<Vec<_>>()
+        };
+        for control in controls {
+            control.cancel();
+        }
+    }
+
+    fn register(&self, control: &Arc<transport::Control>) {
+        {
+            let mut registry = self.transports.lock().unwrap_or_else(|p| p.into_inner());
+            registry.retain(|weak| weak.strong_count() > 0);
+            registry.push(Arc::downgrade(control));
+        }
+        // Cancellation sets the flag before visiting registrations. This second check
+        // covers registration after that visit, without acquiring locks in reverse order.
+        if self.is_cancelled() {
+            control.cancel();
+        }
     }
 
     /// Reports whether [`cancel`](Self::cancel) has been called.
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
+        self.cancelled.load(Ordering::Acquire)
     }
 }
 
@@ -91,11 +125,31 @@ pub struct PipelineReport {
     /// `manifest::accumulate_batch_digest`'s final value over every row
     /// written — order- and batch-boundary-independent.
     pub content_digest: u64,
+    /// Retained charge at successful completion (zero); None when budgeting is disabled.
+    pub admitted_bytes: Option<usize>,
+    /// Highest simultaneous admitted Arrow charge; None when budgeting is disabled.
+    pub peak_admitted_bytes: Option<usize>,
 }
 
 /// Errors from [`run_bounded_pipeline`].
 #[derive(Debug)]
 pub enum PipelineError {
+    /// A finished producer batch cannot fit in the configured byte budget.
+    BatchTooLarge {
+        /// Estimated retained Arrow bytes.
+        bytes: usize,
+        /// Configured admission ceiling.
+        limit: usize,
+    },
+    /// A transformed batch cannot grow without exceeding the retained byte budget.
+    BatchGrowthExceedsBudget {
+        /// Estimated transformed batch bytes.
+        bytes: usize,
+        /// Bytes available to this lease, including its existing reservation.
+        available: usize,
+    },
+    /// The declared Arrow memory charges cannot be added in usize.
+    ByteChargeOverflow,
     /// The reader or writer failed for a reason [`PipelineIoError`] already
     /// models (I/O, malformed CSV, schema mismatch, Parquet errors).
     Io(PipelineIoError),
@@ -107,6 +161,14 @@ pub enum PipelineError {
 impl std::fmt::Display for PipelineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            PipelineError::BatchTooLarge { bytes, limit } => {
+                write!(f, "batch charge {bytes} exceeds byte budget {limit}")
+            }
+            PipelineError::BatchGrowthExceedsBudget { bytes, available } => write!(
+                f,
+                "transformed batch charge {bytes} exceeds available budget {available}"
+            ),
+            PipelineError::ByteChargeOverflow => f.write_str("batch byte charge overflow"),
             PipelineError::Io(source) => write!(f, "{source}"),
             PipelineError::Cancelled => {
                 write!(f, "pipeline was cancelled before output was published")
@@ -119,7 +181,10 @@ impl std::error::Error for PipelineError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             PipelineError::Io(source) => Some(source),
-            PipelineError::Cancelled => None,
+            PipelineError::Cancelled
+            | PipelineError::BatchTooLarge { .. }
+            | PipelineError::BatchGrowthExceedsBudget { .. }
+            | PipelineError::ByteChargeOverflow => None,
         }
     }
 }
@@ -135,6 +200,7 @@ fn accumulate_batch_stats(report: PipelineReport, checked: &CheckedIngestBatch) 
         batches_written: report.batches_written + 1,
         rows_written: report.rows_written + checked.batch().num_rows(),
         content_digest: manifest::accumulate_batch_digest(report.content_digest, checked),
+        ..report
     }
 }
 
@@ -150,24 +216,57 @@ fn staging_key_for(output_key: &ObjectPath) -> ObjectPath {
     ObjectPath::from(format!("{output_key}.staging"))
 }
 
+enum BatchSender {
+    Count(SyncSender<Result<RecordBatch, PipelineIoError>>),
+    Budgeted(transport::Sender),
+}
+
+impl BatchSender {
+    fn send(&self, batch: Result<RecordBatch, PipelineIoError>) -> Result<(), PipelineError> {
+        match self {
+            Self::Count(sender) => sender.send(batch).map_err(|_| PipelineError::Cancelled),
+            Self::Budgeted(sender) => sender.send(batch),
+        }
+    }
+}
+
+enum BatchReceiver {
+    Count(Receiver<Result<RecordBatch, PipelineIoError>>),
+    Budgeted(transport::Receiver),
+}
+
+impl BatchReceiver {
+    fn recv(&self) -> Result<Option<transport::BatchLease>, PipelineError> {
+        match self {
+            Self::Count(receiver) => match receiver.recv() {
+                Ok(batch) => batch
+                    .map(transport::BatchLease::uncharged)
+                    .map(Some)
+                    .map_err(PipelineError::Io),
+                Err(_) => Ok(None),
+            },
+            Self::Budgeted(receiver) => receiver.recv(),
+        }
+    }
+}
+
 /// Reads `path` row by row, grouping every `batch_size` rows into a
 /// `RecordBatch` and sending it on `sender`. Never holds more than
-/// `batch_size` rows in memory at once. Stops early, without error, if
-/// `cancel` is set or the receiving end has gone away.
+/// `batch_size` owned rows at once. Checks cancellation between CSV records;
+/// reports admission failure, and stops when the receiving end closes.
 fn produce_batches(
     path: &Path,
     batch_size: usize,
     cancel: &CancellationToken,
-    sender: SyncSender<Result<RecordBatch, PipelineIoError>>,
-) {
+    sender: BatchSender,
+) -> Result<(), PipelineError> {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(source) => {
-            let _ = sender.send(Err(PipelineIoError::OpenInput {
+            return sender.send(Err(PipelineIoError::OpenInput {
                 path: path.to_path_buf(),
                 source,
             }));
-            return;
         }
     };
     let mut reader = csv::Reader::from_reader(file);
@@ -175,7 +274,7 @@ fn produce_batches(
 
     for (row_index, record) in reader.records().enumerate() {
         if cancel.is_cancelled() {
-            return;
+            return Ok(());
         }
         let row = match record
             .map_err(|source| PipelineIoError::ReadRecord { source })
@@ -183,8 +282,7 @@ fn produce_batches(
         {
             Ok(row) => row,
             Err(err) => {
-                let _ = sender.send(Err(err));
-                return;
+                return sender.send(Err(err));
             }
         };
         chunk.push(row);
@@ -192,15 +290,14 @@ fn produce_batches(
         if chunk.len() == batch_size {
             let batch = batch_from_rows(&chunk);
             chunk.clear();
-            if sender.send(batch).is_err() {
-                return;
-            }
+            sender.send(batch)?;
         }
     }
 
     if !chunk.is_empty() && !cancel.is_cancelled() {
-        let _ = sender.send(batch_from_rows(&chunk));
+        sender.send(batch_from_rows(&chunk))?;
     }
+    Ok(())
 }
 
 /// Receives batches from `receiver`, writing each to a Parquet writer over
@@ -212,7 +309,7 @@ fn produce_batches(
 /// that drop is what unblocks [`produce_batches`] if it's parked in a
 /// blocking `sender.send()` on a full channel, rather than deadlocking.
 fn consume_batches(
-    receiver: Receiver<Result<RecordBatch, PipelineIoError>>,
+    receiver: BatchReceiver,
     staging_path: &Path,
     compression: Compression,
     transform: Option<&dyn Fn(RecordBatch) -> Result<RecordBatch, PipelineIoError>>,
@@ -226,21 +323,23 @@ fn consume_batches(
 
     let mut report = PipelineReport::default();
 
-    for received in receiver {
+    while let Some(lease) = receiver.recv()? {
         if cancel.is_cancelled() {
             return Err(PipelineError::Cancelled);
         }
-        let batch = received?;
         // Applied before the digest, not after: the manifest must audit what
         // was actually written, not the raw input.
-        let batch = match transform {
-            Some(f) => f(batch).map_err(|source| PipelineIoError::Callback {
-                stage: CallbackStage::Transform,
-                batch_index: report.batches_written,
-                source: Box::new(source),
+        let lease = match transform {
+            Some(f) => lease.transform(|batch| {
+                f(batch).map_err(|source| PipelineIoError::Callback {
+                    stage: CallbackStage::Transform,
+                    batch_index: report.batches_written,
+                    source: Box::new(source),
+                })
             })?,
-            None => batch,
+            None => lease,
         };
+        let (batch, _reservation) = lease.into_parts();
         let checked = CheckedIngestBatch::try_new(batch)?;
         writer
             .write(checked.batch())
@@ -293,12 +392,30 @@ pub fn run_bounded_pipeline(
     transform: Option<&dyn Fn(RecordBatch) -> Result<RecordBatch, PipelineIoError>>,
     cancel: &CancellationToken,
 ) -> Result<PipelineReport, PipelineError> {
-    let (sender, receiver) =
-        sync_channel::<Result<RecordBatch, PipelineIoError>>(config.channel_capacity);
+    let (sender, receiver, accounting) = match config.max_admitted_bytes {
+        Some(limit) => {
+            let (sender, receiver, control) =
+                transport::channel(config.channel_capacity, limit.get(), cancel);
+            (
+                BatchSender::Budgeted(sender),
+                BatchReceiver::Budgeted(receiver),
+                Some(control),
+            )
+        }
+        None => {
+            let (sender, receiver) = sync_channel(config.channel_capacity);
+            (
+                BatchSender::Count(sender),
+                BatchReceiver::Count(receiver),
+                None,
+            )
+        }
+    };
     let staging_path = staging_path_for(output);
-
+    let mut production = Ok(());
     let result = thread::scope(|scope| {
-        scope.spawn(|| produce_batches(input, config.batch_size.get(), cancel, sender));
+        scope
+            .spawn(|| production = produce_batches(input, config.batch_size.get(), cancel, sender));
         consume_batches(
             receiver,
             &staging_path,
@@ -306,6 +423,16 @@ pub fn run_bounded_pipeline(
             transform,
             cancel,
         )
+    });
+    // A producer admission error must not publish a successfully closed partial file.
+    let result = result.and_then(|mut report| {
+        production?;
+        if let Some(control) = accounting {
+            let (current, peak) = control.metrics();
+            report.admitted_bytes = Some(current);
+            report.peak_admitted_bytes = Some(peak);
+        }
+        Ok(report)
     });
 
     match result {
