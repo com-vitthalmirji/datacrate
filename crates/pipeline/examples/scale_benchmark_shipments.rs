@@ -13,6 +13,7 @@
 //!   --output benchmark/m3.8/shipments.parquet --order-rows 5000000`
 //! Partitioned: `... --output benchmark/m3.8/shipments --order-rows 5000000 --partitions 4`
 
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -43,8 +44,8 @@ struct Args {
     order_rows: u64,
     /// Order ids per streamed batch/row-group (bounds peak memory; does not
     /// affect the generated data).
-    #[arg(long, default_value_t = 2_000_000)]
-    batch_size: u64,
+    #[arg(long, default_value = "2000000")]
+    batch_size: NonZeroU64,
     /// Number of output Parquet files; the order-id range is split evenly
     /// across them.
     #[arg(long, default_value_t = 1)]
@@ -62,6 +63,9 @@ enum CliError {
         order_rows: u64,
     },
     ZeroPartitions,
+    TimestampOutOfRange {
+        order_id: u64,
+    },
 }
 
 impl std::fmt::Display for CliError {
@@ -79,43 +83,55 @@ impl std::fmt::Display for CliError {
                 )
             }
             Self::ZeroPartitions => write!(f, "--partitions must be at least 1"),
+            Self::TimestampOutOfRange { order_id } => {
+                write!(
+                    f,
+                    "shipment timestamp for order {order_id} exceeds i64 microseconds"
+                )
+            }
         }
     }
+}
+
+/// Retains the fixture's billion-order divisor and rejects unrepresentable results.
+fn shipment_timestamp(id: u64, delay_days: i64) -> Result<i64, CliError> {
+    let micros = i128::from(id) * i128::from(MICROS_PER_DAY) / 1_000_000_000
+        + i128::from(delay_days) * i128::from(MICROS_PER_DAY);
+    i64::try_from(micros).map_err(|_| CliError::TimestampOutOfRange { order_id: id })
 }
 
 /// Shipment rows for a single order id: `id % 3 == 0` ships zero times,
 /// `== 1` ships once, `== 2` ships twice — same mix
 /// `fixtures/m3/shipments.csv` already established at small scale.
-fn shipment_rows_for_order(id: u64) -> Vec<(i64, String, i64)> {
-    let placed_at = (id as i64) * MICROS_PER_DAY / 1_000_000_000;
-    match id % 3 {
+fn shipment_rows_for_order(id: u64) -> Result<Vec<(i64, String, i64)>, CliError> {
+    Ok(match id % 3 {
         0 => Vec::new(),
         1 => vec![(
             id as i64,
             format!("carrier-{}", id % 5),
-            placed_at + MICROS_PER_DAY,
+            shipment_timestamp(id, 1)?,
         )],
         _ => vec![
             (
                 id as i64,
                 format!("carrier-{}", id % 5),
-                placed_at + MICROS_PER_DAY,
+                shipment_timestamp(id, 1)?,
             ),
             (
                 id as i64,
                 format!("carrier-{}", (id + 1) % 5),
-                placed_at + 2 * MICROS_PER_DAY,
+                shipment_timestamp(id, 2)?,
             ),
         ],
-    }
+    })
 }
 
-fn synthetic_batch(start_id: u64, len: u64) -> RecordBatch {
+fn synthetic_batch(start_id: u64, len: u64) -> Result<RecordBatch, CliError> {
     let mut order_ids = Vec::new();
     let mut carriers = Vec::new();
     let mut shipped_ats = Vec::new();
     for id in start_id..start_id + len {
-        for (order_id, carrier, shipped_at) in shipment_rows_for_order(id) {
+        for (order_id, carrier, shipped_at) in shipment_rows_for_order(id)? {
             order_ids.push(order_id);
             carriers.push(carrier);
             shipped_ats.push(shipped_at);
@@ -126,7 +142,7 @@ fn synthetic_batch(start_id: u64, len: u64) -> RecordBatch {
     let carrier_array: StringArray = carriers.into_iter().map(Some).collect();
     let shipped_at_array: TimestampMicrosecondArray = shipped_ats.into_iter().map(Some).collect();
 
-    RecordBatch::try_new(
+    Ok(RecordBatch::try_new(
         shipments_schema(),
         vec![
             Arc::new(order_id_array),
@@ -134,7 +150,7 @@ fn synthetic_batch(start_id: u64, len: u64) -> RecordBatch {
             Arc::new(shipped_at_array),
         ],
     )
-    .expect("synthetic columns match shipments_schema")
+    .expect("synthetic columns match shipments_schema"))
 }
 
 /// Splits `order_rows` into `partitions` near-equal, contiguous
@@ -169,7 +185,7 @@ fn write_partition(
     path: &Path,
     start_id: u64,
     len: u64,
-    batch_size: u64,
+    batch_size: NonZeroU64,
     mut on_batch: impl FnMut(u64),
 ) -> Result<u64, CliError> {
     let file = std::fs::File::create(path).map_err(|source| CliError::OpenOutput {
@@ -184,8 +200,8 @@ fn write_partition(
 
     let mut processed = 0u64;
     while processed < len {
-        let batch_len = batch_size.min(len - processed);
-        let batch = synthetic_batch(start_id + processed, batch_len);
+        let batch_len = batch_size.get().min(len - processed);
+        let batch = synthetic_batch(start_id + processed, batch_len)?;
         writer.write(&batch).map_err(CliError::WriteParquet)?;
         processed += batch_len;
         on_batch(processed);
@@ -206,7 +222,10 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), CliError> {
-    let args = Args::parse();
+    run_with_args(Args::parse())
+}
+
+fn run_with_args(args: Args) -> Result<(), CliError> {
     if args.order_rows > i64::MAX as u64 {
         return Err(CliError::OrderRowsExceedI64Max {
             order_rows: args.order_rows,
@@ -214,6 +233,14 @@ fn run() -> Result<(), CliError> {
     }
     if args.partitions == 0 {
         return Err(CliError::ZeroPartitions);
+    }
+    // The final three IDs include the latest occurrence of each shipment count.
+    // Earlier timestamps within each count are monotonic, so these bound all rows.
+    for id in args.order_rows.saturating_sub(3)..args.order_rows {
+        let delay_days = (id % 3) as i64;
+        if delay_days != 0 {
+            shipment_timestamp(id, delay_days)?;
+        }
     }
     if args.partitions > 1 {
         std::fs::create_dir_all(&args.output).map_err(|source| CliError::OpenOutput {
@@ -256,4 +283,98 @@ fn run() -> Result<(), CliError> {
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod input_regressions {
+    use super::*;
+    #[test]
+    fn zero_batch_size_is_rejected_during_argument_parsing() {
+        assert!(
+            Args::try_parse_from([
+                "generator",
+                "--output",
+                "unused",
+                "--order-rows",
+                "0",
+                "--batch-size",
+                "0"
+            ])
+            .is_err()
+        );
+    }
+    #[test]
+    fn invalid_ranges_are_rejected_before_any_output_is_created() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let path = dir.path().join("absent");
+        let args = Args::try_parse_from([
+            "generator",
+            "--output",
+            path.to_str().expect("UTF8 temporary path"),
+            "--order-rows",
+            "1",
+            "--partitions",
+            "0",
+        ])
+        .expect("syntactically valid arguments");
+        assert!(matches!(run_with_args(args), Err(CliError::ZeroPartitions)));
+        assert!(!path.exists());
+        let args = Args::try_parse_from([
+            "generator",
+            "--output",
+            path.to_str().expect("UTF8 temporary path"),
+            "--order-rows",
+            "18446744073709551615",
+        ])
+        .expect("u64 argument");
+        assert!(run_with_args(args).is_err());
+        assert!(!path.exists());
+    }
+    #[test]
+    fn shipment_counts_and_timestamp_offsets_are_preserved() {
+        assert!(
+            shipment_rows_for_order(0)
+                .expect("zero shipments")
+                .is_empty()
+        );
+        assert_eq!(
+            shipment_rows_for_order(1).expect("one shipment")[0].2,
+            86_400_000_086
+        );
+        let two = shipment_rows_for_order(2).expect("two shipments");
+        assert_eq!(two.len(), 2);
+        assert_eq!(two[0].2, 86_400_000_172);
+        assert_eq!(two[1].2, 172_800_000_172);
+        let large = shipment_rows_for_order(6_599_999_999).expect("large ID");
+        assert_eq!(large[0].2, 656_639_999_913);
+        assert_eq!(large[1].2, 743_039_999_913);
+        assert_eq!(synthetic_batch(0, 0).expect("empty batch").num_rows(), 0);
+    }
+    #[test]
+    fn unrepresentable_timestamps_fail_without_wrapping() {
+        assert_eq!(
+            shipment_timestamp(106751989167300645, 2).expect("last representable timestamp"),
+            9223372036854775728
+        );
+        assert!(matches!(
+            shipment_timestamp(106751989167300646, 2),
+            Err(CliError::TimestampOutOfRange { .. })
+        ));
+        assert!(matches!(
+            shipment_timestamp(i64::MAX as u64 - 1, 2),
+            Err(CliError::TimestampOutOfRange { .. })
+        ));
+        let args = Args::try_parse_from([
+            "generator",
+            "--output",
+            "unused",
+            "--order-rows",
+            "9223372036854775807",
+        ])
+        .expect("valid row argument");
+        assert!(matches!(
+            run_with_args(args),
+            Err(CliError::TimestampOutOfRange { .. })
+        ));
+    }
 }

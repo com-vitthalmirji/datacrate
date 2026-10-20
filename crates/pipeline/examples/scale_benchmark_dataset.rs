@@ -23,6 +23,7 @@
 //!   --output benchmark/m3.6/orders.parquet --rows 5000000`
 //! Partitioned: `... --output benchmark/m3.6/orders --rows 5000000 --partitions 4`
 
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -54,8 +55,8 @@ struct Args {
     rows: u64,
     /// Rows per streamed batch/row-group (bounds peak memory; does not
     /// affect the generated data).
-    #[arg(long, default_value_t = 2_000_000)]
-    batch_size: u64,
+    #[arg(long, default_value = "2000000")]
+    batch_size: NonZeroU64,
     /// Number of output Parquet files; `--rows` is split evenly across them.
     #[arg(long, default_value_t = 1)]
     partitions: u64,
@@ -102,16 +103,18 @@ fn amount_cents(id: u64) -> i128 {
 }
 
 /// `start_id + len <= total_rows` and `total_rows <= i64::MAX` (checked once
-/// by `run()` before the write loop), so every `id as i64` / `total_rows as
-/// i64` below is a lossless cast, not a truncation.
+/// by `run()` before the write loop), so each ID cast is lossless. Timestamp
+/// multiplication uses i128 before division to avoid intermediate overflow.
 fn synthetic_batch(start_id: u64, len: u64, total_rows: u64) -> RecordBatch {
     let ids: Int64Array = (start_id..start_id + len).map(|id| id as i64).collect();
     let amounts = Decimal128Array::from_iter_values((start_id..start_id + len).map(amount_cents))
         .with_precision_and_scale(10, 2)
         .expect("cents in 100..=10000 fit Decimal128(10, 2)");
-    let placed_ats = TimestampMicrosecondArray::from_iter_values(
-        (start_id..start_id + len).map(|id| (id as i64) * MICROS_PER_DAY / total_rows as i64),
-    );
+    let placed_ats =
+        TimestampMicrosecondArray::from_iter_values((start_id..start_id + len).map(|id| {
+            let micros = i128::from(id) * i128::from(MICROS_PER_DAY) / i128::from(total_rows);
+            i64::try_from(micros).expect("orders timestamps stay within one day")
+        }));
     let note_array: StringArray = (start_id..start_id + len)
         .map(|id| {
             if id % 7 == 0 {
@@ -166,7 +169,7 @@ fn write_partition(
     start_id: u64,
     len: u64,
     total_rows: u64,
-    batch_size: u64,
+    batch_size: NonZeroU64,
     mut on_batch: impl FnMut(u64),
 ) -> Result<u64, CliError> {
     let file = std::fs::File::create(path).map_err(|source| CliError::OpenOutput {
@@ -181,7 +184,7 @@ fn write_partition(
 
     let mut written = 0u64;
     while written < len {
-        let batch_len = batch_size.min(len - written);
+        let batch_len = batch_size.get().min(len - written);
         let batch = synthetic_batch(start_id + written, batch_len, total_rows);
         writer.write(&batch).map_err(CliError::WriteParquet)?;
         written += batch_len;
@@ -203,7 +206,10 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), CliError> {
-    let args = Args::parse();
+    run_with_args(Args::parse())
+}
+
+fn run_with_args(args: Args) -> Result<(), CliError> {
     if args.rows > i64::MAX as u64 {
         return Err(CliError::RowsExceedI64Max { rows: args.rows });
     }
@@ -253,4 +259,78 @@ fn run() -> Result<(), CliError> {
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod input_regressions {
+    use super::*;
+    #[test]
+    fn zero_batch_size_is_rejected_during_argument_parsing() {
+        assert!(
+            Args::try_parse_from([
+                "generator",
+                "--output",
+                "unused",
+                "--rows",
+                "0",
+                "--batch-size",
+                "0"
+            ])
+            .is_err()
+        );
+    }
+    #[test]
+    fn invalid_ranges_are_rejected_before_any_output_is_created() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let path = dir.path().join("absent");
+        let args = Args::try_parse_from([
+            "generator",
+            "--output",
+            path.to_str().expect("UTF8 temporary path"),
+            "--rows",
+            "1",
+            "--partitions",
+            "0",
+        ])
+        .expect("syntactically valid arguments");
+        assert!(matches!(run_with_args(args), Err(CliError::ZeroPartitions)));
+        assert!(!path.exists());
+        let args = Args::try_parse_from([
+            "generator",
+            "--output",
+            path.to_str().expect("UTF8 temporary path"),
+            "--rows",
+            "18446744073709551615",
+        ])
+        .expect("u64 argument");
+        assert!(run_with_args(args).is_err());
+        assert!(!path.exists());
+    }
+    #[test]
+    fn timestamp_generation_is_correct_at_large_and_empty_ranges() {
+        use arrow::array::Array;
+        let batch = synthetic_batch(6_599_999_999, 1, 6_600_000_000);
+        let timestamps = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .expect("timestamp column");
+        assert_eq!(timestamps.value(0), 86_399_999_986);
+        let maximum = synthetic_batch(i64::MAX as u64 - 1, 1, i64::MAX as u64);
+        let timestamps = maximum
+            .column(2)
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .expect("timestamp column");
+        assert_eq!(timestamps.value(0), 86_399_999_999);
+        assert_eq!(synthetic_batch(0, 0, 0).num_rows(), 0);
+        let small = synthetic_batch(9, 1, 10);
+        let timestamps = small
+            .column(2)
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .expect("timestamp column");
+        assert_eq!(timestamps.value(0), 77_760_000_000);
+        assert_eq!(timestamps.len(), 1);
+    }
 }
