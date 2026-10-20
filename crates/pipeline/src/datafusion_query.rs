@@ -3038,7 +3038,6 @@ mod amount_range_regressions {
     }
 }
 
-
 #[cfg(test)]
 mod timestamp_representation_regressions {
     use super::*;
