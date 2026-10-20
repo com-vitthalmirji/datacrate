@@ -124,6 +124,22 @@ into a fresh accumulator, and checks the merged min/max match the full
 fixture's actual range - proving the combine logic that an 8-row fixture's
 SQL plan would otherwise never exercise.
 
+Earlier, `amount_range` declared the same `Decimal128(10,2)` type for its
+input, partial state and result. The result now uses `Decimal128(11,2)`:
+subtracting the legal minimum `-99,999,999.99` from the legal maximum
+`99,999,999.99` yields `199,999,999.98`, which needs eleven digits. Input
+and partial min/max state remain precision 10 because they hold original
+values. The declared result type and evaluated scalar both use precision
+11, so the Arrow output describes the actual value correctly.
+
+The regression checks an engine-returned batch, its declared precision,
+and its value against that independent bound. Empty and all-null inputs
+return null; a single value returns zero. Partition permutations check
+that merging partial states preserves the same extrema. Direct merge tests also
+exercise all six orders of negative, all-null and positive partial states, both
+one state at a time and in a combined state batch. This closes a
+correctness gap; it makes no performance claim.
+
 **Scala/Spark bridge**: this is exactly Spark's own
 `Aggregator`/`UserDefinedAggregateFunction` contract -
 `update`/`merge`/`evaluate`, with `merge` existing specifically because

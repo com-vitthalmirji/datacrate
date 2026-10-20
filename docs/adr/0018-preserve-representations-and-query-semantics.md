@@ -34,7 +34,7 @@ For precision-10 scale-2 inputs, unscaled extrema `-9_999_999_999` and `9_999_99
 have range `19_999_999_998`. Prefer an exact precision-11/scale-2 result over retaining
 precision 10 and rejecting valid inputs. Keep min/max partial state precision 10.
 Change both declared return type and evaluated scalar, then test merged/partitioned output.
-This is currently a source observation, not a newly executed reproduction.
+The regression checks an engine-returned batch, including its declared type and actual value.
 
 ### Direct construction, only where earned
 
