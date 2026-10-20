@@ -135,7 +135,9 @@ values. The declared result type and evaluated scalar both use precision
 The regression checks an engine-returned batch, its declared precision,
 and its value against that independent bound. Empty and all-null inputs
 return null; a single value returns zero. Partition permutations check
-that merging partial states preserves the same extrema. This closes a
+that merging partial states preserves the same extrema. Direct merge tests also
+exercise all six orders of negative, all-null and positive partial states, both
+one state at a time and in a combined state batch. This closes a
 correctness gap; it makes no performance claim.
 
 **Scala/Spark bridge**: this is exactly Spark's own

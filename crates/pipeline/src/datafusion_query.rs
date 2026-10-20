@@ -2089,6 +2089,66 @@ mod tests {
     }
 
     #[test]
+    fn amount_range_partial_merge_orders_preserve_extremes_and_null_state() {
+        use datafusion::common::ScalarValue;
+        use datafusion::logical_expr::Accumulator;
+        let mut states = Vec::new();
+        for values in [
+            vec![Some(-9_999_999_999)],
+            vec![None],
+            vec![Some(9_999_999_999)],
+        ] {
+            let mut partial = AmountRangeAccumulator::default();
+            partial
+                .update_batch(&[Arc::new(
+                    Decimal128Array::from(values)
+                        .with_precision_and_scale(10, 2)
+                        .expect("valid input"),
+                )])
+                .expect("update partial");
+            states.push(partial.state().expect("serialize partial"));
+        }
+        let expected = ScalarValue::Decimal128(Some(19_999_999_998), 11, 2);
+        for order in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            let mut merged = AmountRangeAccumulator::default();
+            for index in order {
+                let columns = states[index]
+                    .iter()
+                    .map(|value| value.to_array_of_size(1).expect("state array"))
+                    .collect::<Vec<_>>();
+                merged.merge_batch(&columns).expect("merge ordered state");
+            }
+            assert_eq!(
+                merged.evaluate().expect("merged range"),
+                expected,
+                "order {order:?}"
+            );
+            let columns = (0..2)
+                .map(|column| {
+                    ScalarValue::iter_to_array(
+                        order.into_iter().map(|index| states[index][column].clone()),
+                    )
+                    .expect("combined state array")
+                })
+                .collect::<Vec<_>>();
+            let mut batched = AmountRangeAccumulator::default();
+            batched.merge_batch(&columns).expect("merge batched states");
+            assert_eq!(
+                batched.evaluate().expect("batched range"),
+                expected,
+                "batched order {order:?}"
+            );
+        }
+    }
+
+    #[test]
     fn amount_range_accumulator_merge_batch_combines_partial_states() {
         use datafusion::logical_expr::Accumulator;
 
