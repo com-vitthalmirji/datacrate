@@ -1,7 +1,8 @@
 # The object-store edge: bridging sync and async without a sandwich
 
 `crates/pipeline/src/object_store_io.rs` is the one place in this codebase
-where `async` exists at all. Every other pipeline stage is synchronous by
+that bridges synchronous ingest with asynchronous storage calls. DataFusion
+queries also use async; the bounded CSV pipeline stays synchronous by
 design; this module's whole job is to let a synchronous pipeline read from
 and write to S3 (or a MinIO-compatible bucket) without dragging `async` into
 the rest of the call stack. Read it alongside `crates/pipeline/src/bin/run-s3-pipeline.rs`
@@ -118,7 +119,7 @@ constraint Rust's type system doesn't encode on its own: nothing in
 module defends the invariant explicitly instead of hoping callers remember
 it.
 
-## Streaming both directions keeps peak memory flat
+## Bound transfer buffers independently of object size
 
 ```rust
 const CHUNK_BYTES: usize = 8 * 1024 * 1024;
@@ -146,13 +147,19 @@ This binds one sequential object download; it does not snapshot a
 multi-file analytical dataset. Backend support for conditional/versioned
 reads remains a requirement.
 The first upload loop limited reads but left multipart scheduling unbounded.
-It now waits for capacity before writing; limiting the read size alone was
-insufficient. `upload_from_temp` reads the local file in 8 MiB chunks and uses
-the same size for multipart parts. It awaits capacity before each write, allowing at most two
-scheduled parts, including the final partial part. This bound is independent of
-the producer/consumer batch channel. The local read buffer, multipart buffer and
-backend/runtime allocations add memory beyond the outstanding part payloads;
-this is not an exact process RSS ceiling.
+It now owns at most two outstanding 8 MiB parts and refills a free slot even
+while another part stalls. Short local reads are accumulated into aligned parts;
+only the final part may be smaller. One additional part buffer is filled locally.
+Backend/runtime allocations remain outside this accounting, so this is not an
+exact process RSS ceiling.
+
+Earlier error paths could drop the upload without aborting its remote multipart
+session. The private helper now retains the upload, drops outstanding part futures,
+and explicitly attempts abort after a read, part or completion failure. If abort
+also fails, `MultipartAbort` retains the original error and the secondary abort
+error. A process crash cannot run this async recovery. Configure backend lifecycle
+rules for abandoned multipart uploads; deleting an object key does not abort an
+incomplete multipart session.
 
 `CHUNK_BYTES` is chosen deliberately, not arbitrarily: 8 MiB sits comfortably
 above `object_store`'s 5 MiB multipart-part minimum, so uploads don't pay a
@@ -253,39 +260,29 @@ sync/async boundary, and error translation already happened inside
 
 ## `run_bounded_pipeline_s3` doesn't rewrite the pipeline for S3
 
-```rust
-pub fn run_bounded_pipeline_s3(
-    store: &dyn ObjectStore,
-    input_key: &ObjectPath,
-    output_key: &ObjectPath,
-    config: &PipelineConfig,
-    cancel: &CancellationToken,
-) -> Result<PipelineReport, PipelineError> {
-    let staging_dir = tempfile::tempdir()...;
-    let local_input = staging_dir.path().join("input.csv");
-    let local_output = staging_dir.path().join("output.parquet");
+The remote entry point still stages input and output on local disk and reuses
+`run_bounded_pipeline`. Earlier, its final upload and manifest handling hid remote
+publication boundaries behind rename-like operations. Now it passes the completed
+local file and the captured input metadata into one private publication owner:
 
-    let input_meta = download_to_temp(store, input_key, &local_input)?;
-    let report = run_bounded_pipeline(&local_input, &local_output, config, cancel)?;
-    upload_from_temp(store, &local_output, output_key)?;
+1. Upload to this run's unique `<output>.staging/<run-id>` key.
+2. Remove the previous completion marker.
+3. Copy the staged object to the fixed final key.
+4. Capture the final object's version or ETag.
+5. PUT a version-2 completion record bound to that identity.
+6. Delete only this run's staging object.
 
-    Ok(report)
-}
-```
+This keeps CSV batching and local publication in their existing owner. Remote
+publication has its own failures because an object store cannot commit output and
+completion in one transaction. The protocol requires externally enforced **one
+writer per output key**. Random run namespaces prevent staging collisions; they
+provide no distributed lock. Bucket permissions and key-length limits must allow
+the longer staging keys as well as final and manifest keys.
 
-(`bounded.rs:323`)
-
-This is the whole point made concrete: `run_bounded_pipeline_s3` is
-download, then call the *unmodified* local `run_bounded_pipeline`, then
-upload. It doesn't know about batching, cancellation checks, staged writes,
-or partial-output safety - all of that already exists in
-`run_bounded_pipeline` and is reused verbatim. The doc comment on this
-function names the deliberate consequence directly: "local disk staging
-keeps the bounded pipeline's memory envelope unchanged from the local-file
-case - only the two ends of the pipe move." The same cancellation and
-staged-write guarantees datacrate's DataFusion chapter demonstrates for the
-local pipeline apply here unchanged, because it's the same function running
-underneath, not a parallel S3-flavored reimplementation.
+A pre-cancelled run returns before storage access. Cancellation is checked again
+before remote publication starts. Once that protocol starts, it finishes or returns
+its actual phase error; cancellation does not roll back remote effects or interrupt
+arbitrary backend I/O. Local disk must accommodate the captured input and output.
 
 **Scala/Spark bridge**: this is the shape of writing one Spark job against
 `DataFrameReader`/`DataFrameWriter` and letting the `s3a://` vs `file://`
@@ -327,15 +324,11 @@ closes by hand.
 
 ## The completion manifest: recorded counts, input metadata and a fingerprint
 
-`run_bounded_pipeline_s3` publishes one more object after the Parquet output
-lands: a `.manifest.json` sibling of the output key
-(`CompletionManifest::key_for`, `manifest.rs:128`), written through the same
-staging-then-rename step as the output itself. Before this existed, a caller
-polling the bucket after a run had no way to confirm *what* had been
-written - row count, or whether the output's content actually matched a
-known-good input - without re-downloading and re-parsing the Parquet file.
-The manifest records the writer's counts and fingerprint so a caller can
-compare them cheaply. Its presence alone does not verify the output bytes.
+`run_bounded_pipeline_s3` publishes a `.manifest.json` sibling after the final
+Parquet object. Earlier this record carried only counts, input metadata and a
+fingerprint. Now version 2 also binds completion to the output identity observed
+after copy. The record is a separate PUT, not a staged rename and not a transaction
+with the output. Its presence alone does not verify output bytes.
 
 The manifest carries a snapshot of the input object (key, size, ETag,
 last-modified) plus the output's row count and a content digest. The digest
@@ -395,12 +388,38 @@ it does not change its bytes or strengthen its guarantees. Unknown
 schemes have a separate typed error. Missing new fields remain valid for
 version 1, whose serialized field set stays unchanged.
 
-This slice enables version-2 decoding, not remote version-2 publication.
-The writer still emits version 1 and explicitly refuses version 2 until
-the publication and identity-aware reader protocol is connected. Existing
-readers that only deserialize JSON must migrate to the checked decoder;
-accepting extra fields is not protocol compatibility. Version 1 has no
-output identity and remains weaker completion evidence.
+The remote pipeline now emits version 2. `put_manifest` accepts validated versions
+1 and 2 for callers that need either format; unknown versions are rejected.
+`download_completed_output` requires version 2 and checks the recorded output key.
+It reads the recorded version when available, otherwise enforces the recorded ETag
+on HEAD and every bounded range. It refuses version 1 with
+`CompletionIdentityRequired`; the checked decoder still reads those legacy records.
+Existing JSON-only consumers must migrate to the protocol-aware reader.
+
+A versioned bucket can return the completed historical version after the latest
+key changes. An ETag-only bucket rejects a changed object. Neither behavior proves
+that the record is the newest successful run. Conditional/version request support
+is a backend prerequisite. Reader errors can leave a partial local destination,
+which callers must discard. Identity checks do not recompute row count or digest.
+The `verify_completion` example additionally decodes bounded Parquet batches and
+checks row count; it prints the recorded fingerprint without recomputing it.
+
+`RemotePublication` errors expose the failed phase, output/manifest/staging keys,
+primary source and any secondary staging-delete failure. Before copy, the outcome
+is `NotPublished`. A failed copy is `PublicationUnknown`, because the request may
+have taken effect. After successful copy, identity failures report
+`PublishedWithoutCompletion`. A failed completion PUT is `CompletionUnknown`.
+After successful completion, a staging-delete error is
+`CompletedCleanupUnknown`: deletion may itself have taken effect. Recovery must
+inspect these states. It must never blindly delete the shared final key; an older
+failed run could otherwise remove a newer output.
+
+Owned staging is deleted explicitly on success and attempted on ordinary failure.
+No remote I/O runs from `Drop`. Crashes can leave orphan objects or multipart
+sessions, so retention/recovery procedures remain operational responsibilities.
+This buys detectable, identity-bound completion at the cost of a temporary missing
+completion signal during overwrite and external writer coordination. It supplies
+neither exactly-once execution nor multi-object atomicity.
 
 ## Try it yourself
 
@@ -408,6 +427,7 @@ output identity and remains weaker completion evidence.
 cargo test -p pipeline object_store_io::
 docker compose -f docker-compose.minio.yml up -d
 cargo run --bin run-s3-pipeline -- --bucket demo --input-key input.csv --output-key output.parquet
+cargo run -p pipeline --example verify_completion -- --bucket demo --output-key output.parquet --destination /tmp/completed.parquet
 docker compose -f docker-compose.minio.yml down
 ```
 
@@ -484,6 +504,6 @@ On Unix, the published mode follows the prior `0666`-and-umask creation policy.
 A failure before persist preserves the existing destination; a failure synchronizing
 the directory afterward reports `PublishedDurabilityUncertain` because the new file
 is already visible. Relative filenames synchronize `.`. This fixes local ownership
-and error classification; remote fixed-key staging and completion publication have
-separate requirements. See [failure paths and resource control](datafusion.md) for
+and error classification. Remote completion uses the separate identity-bound
+protocol described above. See [failure paths and resource control](datafusion.md) for
 runnable local failure and ownership tests.

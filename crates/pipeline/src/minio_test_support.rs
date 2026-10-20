@@ -84,6 +84,14 @@ impl MinioContainer {
         }
     }
 
+    /// Enables version retention for tests of reads bound to historical versions.
+    pub(crate) fn enable_versioning(&self) {
+        run_mc(
+            &self.container,
+            ["mc", "version", "enable", &format!("local/{}", self.bucket)],
+        );
+    }
+
     /// An `ObjectStore` handle for this container's bucket, using the correct
     /// MinIO root credentials.
     pub(crate) fn store(&self) -> Arc<dyn ObjectStore> {

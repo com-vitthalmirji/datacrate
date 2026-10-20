@@ -27,9 +27,12 @@ use parquet::basic::Compression;
 mod transport;
 
 use crate::batch_contract::CheckedIngestBatch;
-use crate::manifest::{self, CompletionManifest};
-use crate::object_store_io::{
-    best_effort_delete, download_to_temp, publish_staged_object, put_manifest, upload_from_temp,
+use crate::manifest;
+#[cfg(test)]
+use crate::manifest::CompletionManifest;
+use crate::object_store_io::download_to_temp;
+pub use crate::publication::{
+    RemotePublicationError, RemotePublicationOutcome, RemotePublicationPhase,
 };
 pub use crate::staging::{LocalPublicationOutcome, LocalPublicationPhase};
 use crate::{
@@ -135,6 +138,8 @@ pub struct PipelineReport {
 /// Errors from [`run_bounded_pipeline`].
 #[derive(Debug)]
 pub enum PipelineError {
+    /// A remote publication operation failed with explicit recovery information.
+    RemotePublication(Box<RemotePublicationError>),
     /// A local staging or publication operation failed with known visibility.
     LocalPublication {
         /// Failed operation.
@@ -191,6 +196,7 @@ impl std::fmt::Display for PipelineError {
                 "transformed batch charge {bytes} exceeds available budget {available}"
             ),
             PipelineError::ByteChargeOverflow => f.write_str("batch byte charge overflow"),
+            PipelineError::RemotePublication(error) => write!(f, "{error}"),
             PipelineError::Io(source) => write!(f, "{source}"),
             PipelineError::Cancelled => {
                 write!(f, "pipeline was cancelled before output was published")
@@ -202,6 +208,7 @@ impl std::fmt::Display for PipelineError {
 impl std::error::Error for PipelineError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            PipelineError::RemotePublication(error) => Some(error.as_ref()),
             PipelineError::Io(source) => Some(source),
             PipelineError::LocalPublication { source, .. } => Some(source.as_ref()),
             PipelineError::Cancelled
@@ -225,11 +232,6 @@ fn accumulate_batch_stats(report: PipelineReport, checked: &CheckedIngestBatch) 
         content_digest: manifest::accumulate_batch_digest(report.content_digest, checked),
         ..report
     }
-}
-
-/// Deterministic remote staging remains separate from owned local files.
-fn staging_key_for(output_key: &ObjectPath) -> ObjectPath {
-    ObjectPath::from(format!("{output_key}.staging"))
 }
 
 enum BatchSender {
@@ -463,23 +465,25 @@ pub fn run_bounded_pipeline(
 /// Local disk staging keeps the bounded pipeline's memory envelope unchanged
 /// from the local-file case — only the two ends of the pipe move.
 ///
-/// Publishing mirrors [`run_bounded_pipeline`]'s local staging pattern on the
-/// object-store side: the upload lands at a `.staging` sibling key first,
-/// then [`publish_staged_object`] renames it to `output_key` — so a reader
-/// never observes a partially-uploaded object at the final key. Only once
-/// that rename succeeds is a [`CompletionManifest`] (row count and an
-/// order-independent content digest) written to `output_key`'s
-/// `.manifest.json` sibling; its presence is the completion signal a reader
-/// should wait for. If the manifest write fails, the published output is
-/// removed (best-effort) rather than left behind without a valid completion
-/// signal.
+/// Each run uploads to a unique owned staging key, invalidates the old
+/// completion marker, copies final output, captures its identity and writes a
+/// version-2 completion record. This requires external single-writer coordination
+/// per output key. Copy and completion are separate publications, not a transaction.
+/// Readers must use [`crate::object_store_io::download_completed_output`] to bind
+/// output reads to the recorded version or ETag. Versioned readers may observe a
+/// completed historical version; this does not promise the latest generation.
+///
+/// Cancellation is checked before input access and before remote publication.
+/// Once publication starts, it finishes or returns explicit recovery state; it is
+/// not interrupted midway and never rolls back by deleting the shared final key.
+/// Owned staging cleanup is attempted explicitly; process failure can leave orphans.
 ///
 /// # Errors
 ///
-/// Returns [`PipelineError::Io`] if the download, the local pipeline run, the
-/// input's metadata read, the publish, or the manifest write fails, or
-/// [`PipelineError::Cancelled`] if `cancel` was set before output could be
-/// published.
+/// Returns download/ingest errors, local publication errors, or
+/// [`PipelineError::RemotePublication`] with phase, known/unknown outcome and
+/// primary/secondary cleanup sources. [`PipelineError::Cancelled`] means a
+/// cooperative cancellation check stopped before remote publication began.
 pub fn run_bounded_pipeline_s3(
     store: &dyn ObjectStore,
     input_key: &ObjectPath,
@@ -488,6 +492,9 @@ pub fn run_bounded_pipeline_s3(
     transform: Option<&dyn Fn(RecordBatch) -> Result<RecordBatch, PipelineIoError>>,
     cancel: &CancellationToken,
 ) -> Result<PipelineReport, PipelineError> {
+    if cancel.is_cancelled() {
+        return Err(PipelineError::Cancelled);
+    }
     let staging_dir = tempfile::tempdir().map_err(|source| PipelineIoError::OpenOutput {
         path: std::env::temp_dir(),
         source,
@@ -498,23 +505,20 @@ pub fn run_bounded_pipeline_s3(
     let input_meta = download_to_temp(store, input_key, &local_input)?;
     let report = run_bounded_pipeline(&local_input, &local_output, config, transform, cancel)?;
 
-    let staging_key = staging_key_for(output_key);
-    upload_from_temp(store, &local_output, &staging_key)?;
-    if let Err(err) = publish_staged_object(store, &staging_key, output_key) {
-        best_effort_delete(store, &staging_key);
-        return Err(err.into());
+    if cancel.is_cancelled() {
+        return Err(PipelineError::Cancelled);
     }
-
-    let manifest = CompletionManifest::new(
+    // Once this sequence starts, complete it or return an explicit partial outcome.
+    // Cancellation cannot roll back a successful or ambiguous remote publication.
+    crate::publication::publish(
+        store,
+        &local_output,
+        output_key,
         input_key,
         &input_meta,
         report.rows_written,
         report.content_digest,
-    );
-    if let Err(err) = put_manifest(store, &manifest, &CompletionManifest::key_for(output_key)) {
-        best_effort_delete(store, output_key);
-        return Err(err.into());
-    }
+    )?;
 
     Ok(report)
 }
@@ -906,12 +910,18 @@ mod tests {
             format!("{:016x}", report.content_digest)
         );
 
-        let staging_key = staging_key_for(&output_key);
-        let staging_result = test_block_on(store.head(&staging_key));
-        assert!(
-            staging_result.is_err(),
-            "the staging key should be renamed away, not left behind after a successful publish"
-        );
+        let objects = test_block_on(async {
+            use futures_util::TryStreamExt;
+            store.list(None).try_collect::<Vec<_>>().await
+        })
+        .expect("objects");
+        assert!(!objects.iter().any(|object| {
+            object
+                .location
+                .to_string()
+                .starts_with(&format!("{output_key}.staging/"))
+        }));
+        assert_eq!(manifest.schema_version, 2);
     }
 
     #[test]
@@ -977,11 +987,17 @@ mod tests {
             "the final key must not exist after a run that failed before any upload"
         );
 
-        let staging_result = test_block_on(store.head(&staging_key_for(&output_key)));
-        assert!(
-            staging_result.is_err(),
-            "no staging key should be left behind after a failed run"
-        );
+        let objects = test_block_on(async {
+            use futures_util::TryStreamExt;
+            store.list(None).try_collect::<Vec<_>>().await
+        })
+        .expect("objects");
+        assert!(!objects.iter().any(|object| {
+            object
+                .location
+                .to_string()
+                .starts_with(&format!("{output_key}.staging/"))
+        }));
     }
 }
 
