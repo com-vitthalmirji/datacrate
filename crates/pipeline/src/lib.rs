@@ -9,6 +9,7 @@
 #![warn(missing_docs)]
 
 mod batch_contract;
+mod staging;
 pub use batch_contract::{BatchViolation, validate_ingest_batch};
 
 pub mod bounded;
@@ -370,6 +371,15 @@ pub(crate) fn open_parquet_writer(
         path: path.to_path_buf(),
         source,
     })?;
+    parquet_writer(file, schema, compression)
+}
+
+/// Opens an encoded writer on an already-owned file, without creating a path.
+pub(crate) fn parquet_writer(
+    file: File,
+    schema: SchemaRef,
+    compression: Compression,
+) -> Result<ArrowWriter<File>, PipelineIoError> {
     let props = WriterProperties::builder()
         .set_compression(compression)
         .build();

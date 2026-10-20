@@ -296,7 +296,7 @@ which one it's talking to.
 
 ## Atomic isn't durable: fsync before the rename
 
-The staged-write-then-rename pattern above (write to `.tmp`, rename into
+The local owned-staging pattern (write a unique sibling, persist into
 place) guarantees a reader never observes a half-written file - that's
 atomicity. It does not by itself guarantee durability: a crash right after
 the rename "succeeds" can still lose bytes that were buffered in the OS page
@@ -431,3 +431,17 @@ later parts independently. It observes submission of the next full part, then th
 a straggler, alongside the separate two-outstanding-part bound. Forcing one serial
 slot makes the progress test fail. These permits control the fake backend's futures;
 they do not establish physical abort behavior in a remote S3 service.
+
+
+## Local staging has an owner and a visible publication boundary
+
+Earlier local runs shared a deterministic temporary path. They now create unique
+files in the destination directory and retain their cleanup owner until publication.
+Parquet completion precedes file synchronization, persist and parent-directory sync.
+On Unix, the published mode follows the prior `0666`-and-umask creation policy.
+A failure before persist preserves the existing destination; a failure synchronizing
+the directory afterward reports `PublishedDurabilityUncertain` because the new file
+is already visible. Relative filenames synchronize `.`. This fixes local ownership
+and error classification; remote fixed-key staging and completion publication have
+separate requirements. See [failure paths and resource control](datafusion.md) for
+runnable local failure and ownership tests.

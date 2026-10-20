@@ -2,156 +2,93 @@
 
 `crates/pipeline` is where the CSV/Arrow fundamentals turn into an actual
 query engine: `bounded.rs` runs a bounded CSV → Parquet pipeline with
-cancellation and crash-safe output, `datafusion_query.rs` runs real SQL
+cancellation and staged output, `datafusion_query.rs` runs real SQL
 through DataFusion under a configurable memory limit. This chapter walks
 both, live-test by live-test - code first, then the misconception a
 Scala/Spark background invites, then the correction, then the bridge back to
 something you already know.
 
-## Cancellation leaves no partial output behind
+## Cancellation and unique owned staging
 
-**Claim**: cancelling before output is published leaves no partial output -
-the pipeline either finishes cleanly or leaves nothing.
-
-**Code**: `crates/pipeline/src/bounded.rs`, the `CancellationToken` type and
-`run_bounded_pipeline`'s check of it (`bounded.rs:256`), plus the test
-`a_pre_cancelled_token_stops_the_pipeline_before_any_output_is_published`
-(`bounded.rs:461`).
+Earlier, the local pipeline wrote to a deterministic `.tmp` sibling. Two runs
+could open the same staging path, and cleanup by one could remove the other's
+file. Each run now owns a unique file in the destination directory through a
+private `LocalStagedOutput`. It reopens that owned file for the Parquet writer,
+then publishes it only after successful encoding and file synchronization.
+Using the destination directory keeps staging and publication on one filesystem.
+Unique staging prevents name collisions; it does not coordinate concurrent writers
+to the final path. The existing last-writer replacement policy still applies.
 
 ```console
-$ cargo test -p pipeline a_pre_cancelled_token_stops_the_pipeline_before_any_output_is_published -- --nocapture
+$ cargo test -p pipeline a_pre_cancelled_token_stops_the_pipeline_before_any_output_is_published
+$ cargo test -p pipeline owned_staging_unique_creation_and_drop_preserve_other_owners
 ```
 
-The test creates a `CancellationToken`, calls `.cancel()` on it *before*
-calling `run_bounded_pipeline`, then asserts three things: the call returns
-`Err`, the error matches `PipelineError::Cancelled`, and - the part worth
-pausing on - **both** `!output.exists()` **and**
-`!staging_path_for(&output).exists()`. Not just "no final file," but "no
-final file *and* no leftover staging file either." The writer stages its
-output under a separate temp path and only renames it into place after every
-batch has been consumed successfully - cancellation short-circuits before
-that rename happens, so neither path is ever left behind.
+A pre-cancelled token returns `PipelineError::Cancelled` before creating staging.
+Later cooperative checks stop between records and batches and before publication.
+Dropping an unpublished owner removes its own temporary file, best effort. It does
+not delete another run's staging or an existing destination. Abrupt process failure
+can leave temporary files; ordinary `Drop` does not run after every kind of crash.
 
-**Scala/Spark bridge**: `CancellationToken` is the same idea as checking
-`TaskContext.get().isInterrupted()` inside a long-running Spark task, or
-racing a fiber against a `Deferred`/cancel signal in Cats Effect - a
-cooperative flag that owning code must check at safe points, not a
-preemptive kill. The more interesting difference is the stage-then-rename
-pattern: Spark's own output committers (`FileOutputCommitter` et al.) solve
-the same "don't publish a partial file" problem at the *job/task* level via
-a two-phase commit (write to a task-attempt directory, promote to the final
-path only once the task/job commits). `run_bounded_pipeline` does the same
-two-phase idea - stage under a temp path, rename into place only after
-success - at the scale of a single process's single output file, with no
-separate commit coordinator needed because there's no distributed set of
-tasks to reconcile.
+**Scala/Spark bridge**: the token serves the same purpose as checking a task's
+interrupted flag. It does not preempt an arbitrary callback or blocking I/O. The
+staging owner serves the local resource role often expressed by `try/finally` or
+`Resource`: scope exit releases that run's unpublished file.
 
-## A rename alone doesn't survive a crash - `fsync` does
+## File visibility and durability are separate outcomes
 
-**Claim**: staging-then-renaming (above) is enough to stop a *reader* from
-ever seeing a partial file. It is not, by itself, enough to stop a *power
-loss or OS crash* from losing the bytes entirely - that guarantee comes from
-two explicit `fsync` calls, added directly for this reason.
-
-**Code**: `bounded.rs:218-228` (inside `consume_batches`) and
-`bounded.rs:283-298` (inside `run_bounded_pipeline`):
-
-```rust
-// 1. Force the Parquet bytes themselves out of the OS page cache and
-//    onto disk, before the rename below can make the file visible.
-let file = writer.into_inner()?;
-file.sync_all()?;
-
-// 2. Publish atomically.
-std::fs::rename(&staging_path, output)?;
-
-// 3. A rename is itself a metadata change to the *directory*, not the
-//    file - fsync the directory too, so that change also survives a crash.
-let dir = File::open(parent)?;
-dir.sync_all()?;
-```
-
-The reason two syncs are needed, not one: on Linux/macOS, a normal
-`write()` only lands in the OS page cache by default - other processes on
-the same machine see the new bytes immediately, but the kernel is free to
-delay writing them to the physical disk. If the machine loses power right
-after the `rename()` call returns but before the kernel has flushed its
-caches, you could end up with a file at the *final* path whose *directory
-entry* exists but whose *content* is stale, truncated, or (on some
-filesystems) not yet on disk at all - `rename()` on its own has no opinion
-about the durability of either the file's bytes or its own directory
-update. `file.sync_all()` forces step 1 (the content) to disk *before* the
-rename runs; `dir.sync_all()` forces step 3 (the fact that the rename
-happened) to disk afterward.
+A rename alone does not establish durability. The consumer first completes the
+Parquet footer with `ArrowWriter::into_inner`. The staging owner then synchronizes
+the file, persists it to the destination, and synchronizes the parent directory.
+A bare relative filename uses `.` as its parent, so it takes the same directory
+sync path. On Unix, staging preserves the earlier `File::create` permission policy:
+mode `0666` restricted by the process umask. It does not silently switch published
+files to tempfile's default owner-only mode.
 
 ```mermaid
 sequenceDiagram
-    participant W as consume_batches
-    participant PC as OS page cache
-    participant Disk as Physical disk
-    participant RP as run_bounded_pipeline
-
-    W->>PC: write Parquet bytes to staging file
-    W->>Disk: file.sync_all()
-    Note over Disk: staging file content durable
-    RP->>PC: std::fs::rename(staging, output)
-    Note over PC: rename visible to other readers immediately
-    RP->>Disk: dir.sync_all()
-    Note over Disk: the rename itself is now durable
+    participant C as Consumer
+    participant S as LocalStagedOutput
+    participant F as Filesystem
+    C->>F: Complete Parquet footer on owned file
+    S->>F: Synchronize staged contents
+    S->>F: Persist staged file to destination
+    Note over F: New complete file is visible
+    S->>F: Synchronize parent directory
+    Note over S,F: Failure here means published, durability uncertain
 ```
 
-This only applies to `run_bounded_pipeline`'s
-local-disk path - the S3 variant (`run_bounded_pipeline_s3`, see
-[The object-store edge](object-store.md)) has no matching `fsync` call
-because S3 (and every object store `object_store` targets) already
-durability-guarantees an object the moment a `PUT` succeeds; there is no
-local page cache for datacrate to be responsible for.
+Earlier, generic output errors obscured whether rename had already succeeded.
+`PipelineError::LocalPublication` now carries the failed phase, final path,
+visibility outcome and original source. A create, write, footer-close, file-sync
+or rename failure reports `NotPublished`. If parent sync fails after successful
+rename, the outcome is `PublishedDurabilityUncertain`: callers must inspect the
+new destination rather than assume the old output remains unchanged.
 
-**Scala/Spark bridge**: Spark jobs essentially never write this code,
-because Spark's output committers write through HDFS or an object store -
-systems that durability their own bytes server-side, so "the file is
-visible" already implies "the bytes are safe." `run_bounded_pipeline`
-writes to the *local* filesystem instead, so it's on the hook for a
-guarantee HDFS/S3 give a Spark job for free. The closer analogue isn't
-Spark at all - it's why Kafka calls `fsync` on its log segments before
-acknowledging a produce request under `acks=all`, or why Postgres `fsync`s
-its write-ahead log before acknowledging a `COMMIT`: the moment you own
-local disk I/O directly instead of delegating it to a distributed storage
-layer, "renamed" and "durable" become two separate guarantees you have to
-ask for individually, not one you get automatically.
+These are local filesystem operations under the same-filesystem assumption.
+Their durability depends on the filesystem and storage honoring synchronization.
+The object-store route has its own backend and completion protocol; it cannot
+inherit a transaction guarantee from local rename or Rust ownership.
 
-## A failed writer publishes nothing, not a truncated file
-
-**Claim**: if the writer fails partway through, the pipeline never leaves a
-truncated, corrupt-looking file where a caller might mistake it for
-complete output.
-
-**Code**: `bounded.rs:481`, `writer_open_failure_cleans_up_and_publishes_nothing`.
-It builds an output path *inside a subdirectory that doesn't exist*, so
-`File::create` for the staging file fails before any row is written.
+## Failed encoding preserves the previous destination
 
 ```console
-$ cargo test -p pipeline writer_open_failure_cleans_up_and_publishes_nothing -- --nocapture
+$ cargo test -p pipeline owned_staging_
+$ cargo test -p pipeline writer_open_failure_cleans_up_and_publishes_nothing
 ```
 
-The assertion: `err` matches
-`PipelineError::Io(PipelineIoError::OpenOutput { .. })` and
-`!output.exists()`. Contrast this with a naive `File::create(output_path)` +
-write-as-you-go implementation, which would leave a partial file at exactly
-the path callers expect complete output to be - dangerous specifically
-because a downstream job polling for the output path existing would pick up
-a truncated file and silently process incomplete data. The staged-then-
-renamed pattern makes "the file exists at the final path" and "the file is
-complete" the same guarantee.
+The missing-directory regression checks `LocalPublication` at phase `Create` and
+outcome `NotPublished`. Injected write and footer-close failures exercise both the
+count-only and byte-budgeted consumers, preserve the prior destination and release
+all admitted charges. Separate filesystem-edge injections cover file sync, persist
+and parent sync; the last deliberately observes the newly published bytes despite
+returning an error. Concurrent creation and drop tests verify distinct staging
+paths and cleanup limited to the owner. Source-chain checks retain the underlying
+I/O error kind for creation and reopening failures.
 
-**Scala/Spark bridge**: this is exactly the failure mode Spark's output
-committers exist to prevent - a job that crashes mid-write without a commit
-protocol can leave a partial part-file in the output directory, which is why
-`_SUCCESS` marker files exist: not a log line, but the one signal a
-downstream job should poll for instead of trusting "the directory has files
-in it." `!output.exists()` here is the same idea taken one step further:
-there's no stray part-file left behind *at all*, even for a caller that
-doesn't check for a marker.
+A reader of the final local file avoids partially encoded output under normal
+same-filesystem rename semantics. An error after publication is still an error,
+with a different recovery decision from an error before publication.
 
 ## Slicing shares the buffer - provably, not just by claim
 

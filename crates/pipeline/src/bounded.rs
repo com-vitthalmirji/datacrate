@@ -2,10 +2,9 @@
 //! by design — backpressure and bounded memory come from a bounded
 //! count-limited channel or the optional byte-budget transport, not an executor.
 //!
-//! Output is staged: the writer targets a `.tmp` sibling of the requested
-//! output path and is renamed into place only after a full, successful
-//! close. Any error or cancellation removes the staged file instead of
-//! publishing partial output.
+//! Each local run owns a unique staged file in the output directory. It is
+//! published only after encoding and file synchronization succeed. A parent
+//! sync error after publication reports uncertain durability explicitly.
 //!
 //! See docs/adr/0005-bounded-pipeline-backpressure.md.
 
@@ -17,9 +16,11 @@ use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 
+use crate::staging::LocalStagedOutput;
 use arrow::array::RecordBatch;
 use object_store::ObjectStore;
 use object_store::path::Path as ObjectPath;
+use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 
 #[path = "bounded/transport.rs"]
@@ -31,8 +32,9 @@ use crate::object_store_io::{
     best_effort_delete, download_to_temp, head_object, publish_staged_object, put_manifest,
     upload_from_temp,
 };
+pub use crate::staging::{LocalPublicationOutcome, LocalPublicationPhase};
 use crate::{
-    CallbackStage, PipelineIoError, Row, batch_from_rows, open_parquet_writer, parse_row, schema,
+    CallbackStage, PipelineIoError, Row, batch_from_rows, parquet_writer, parse_row, schema,
 };
 
 /// Tuning for [`run_bounded_pipeline`]: how many rows make one `RecordBatch`,
@@ -134,6 +136,17 @@ pub struct PipelineReport {
 /// Errors from [`run_bounded_pipeline`].
 #[derive(Debug)]
 pub enum PipelineError {
+    /// A local staging or publication operation failed with known visibility.
+    LocalPublication {
+        /// Failed operation.
+        phase: LocalPublicationPhase,
+        /// Final-path visibility known after failure.
+        outcome: LocalPublicationOutcome,
+        /// Requested final output path.
+        output: PathBuf,
+        /// Original I/O or encoding failure.
+        source: Box<PipelineIoError>,
+    },
     /// A finished producer batch cannot fit in the configured byte budget.
     BatchTooLarge {
         /// Estimated retained Arrow bytes.
@@ -161,6 +174,16 @@ pub enum PipelineError {
 impl std::fmt::Display for PipelineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            PipelineError::LocalPublication {
+                phase,
+                outcome,
+                output,
+                source,
+            } => write!(
+                f,
+                "local publication {phase:?} for {} ({outcome:?}): {source}",
+                output.display()
+            ),
             PipelineError::BatchTooLarge { bytes, limit } => {
                 write!(f, "batch charge {bytes} exceeds byte budget {limit}")
             }
@@ -181,6 +204,7 @@ impl std::error::Error for PipelineError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             PipelineError::Io(source) => Some(source),
+            PipelineError::LocalPublication { source, .. } => Some(source.as_ref()),
             PipelineError::Cancelled
             | PipelineError::BatchTooLarge { .. }
             | PipelineError::BatchGrowthExceedsBudget { .. }
@@ -204,14 +228,7 @@ fn accumulate_batch_stats(report: PipelineReport, checked: &CheckedIngestBatch) 
     }
 }
 
-fn staging_path_for(output: &Path) -> PathBuf {
-    let mut staging = output.as_os_str().to_owned();
-    staging.push(".tmp");
-    PathBuf::from(staging)
-}
-
-/// The object-store-side counterpart to [`staging_path_for`]: a `.staging`
-/// sibling key, published to `output_key` only after the upload succeeds.
+/// Deterministic remote staging remains separate from owned local files.
 fn staging_key_for(output_key: &ObjectPath) -> ObjectPath {
     ObjectPath::from(format!("{output_key}.staging"))
 }
@@ -300,26 +317,23 @@ fn produce_batches(
     Ok(())
 }
 
-/// Receives batches from `receiver`, writing each to a Parquet writer over
-/// `staging_path`. Reports [`PipelineError::Cancelled`] if `cancel` is set
+/// Receives batches from `receiver` and writes them through the owned writer. Reports [`PipelineError::Cancelled`] if `cancel` is set
 /// either before the first batch or between batches, without writing
 /// anything further.
 ///
 /// `receiver` is taken by value so that every early return below drops it:
 /// that drop is what unblocks [`produce_batches`] if it's parked in a
 /// blocking `sender.send()` on a full channel, rather than deadlocking.
-fn consume_batches(
+fn consume_batches<W: std::io::Write + Send>(
     receiver: BatchReceiver,
-    staging_path: &Path,
-    compression: Compression,
+    mut writer: ArrowWriter<W>,
+    output: &Path,
     transform: Option<&dyn Fn(RecordBatch) -> Result<RecordBatch, PipelineIoError>>,
     cancel: &CancellationToken,
 ) -> Result<PipelineReport, PipelineError> {
     if cancel.is_cancelled() {
         return Err(PipelineError::Cancelled);
     }
-
-    let mut writer = open_parquet_writer(staging_path, schema(), compression)?;
 
     let mut report = PipelineReport::default();
 
@@ -341,9 +355,13 @@ fn consume_batches(
         };
         let (batch, _reservation) = lease.into_parts();
         let checked = CheckedIngestBatch::try_new(batch)?;
-        writer
-            .write(checked.batch())
-            .map_err(|source| PipelineIoError::WriteParquet { source })?;
+        writer.write(checked.batch()).map_err(|source| {
+            crate::staging::failure(
+                output,
+                LocalPublicationPhase::Write,
+                PipelineIoError::WriteParquet { source },
+            )
+        })?;
         report = accumulate_batch_stats(report, &checked);
     }
 
@@ -351,17 +369,13 @@ fn consume_batches(
         return Err(PipelineError::Cancelled);
     }
 
-    let file = writer
-        .into_inner()
-        .map_err(|source| PipelineIoError::WriteParquet { source })?;
-    // Durability: the rename in `run_bounded_pipeline` only makes the staged
-    // file visible atomically, it doesn't guarantee the file's bytes survive
-    // a crash. fsync here forces them to disk before that rename happens.
-    file.sync_all()
-        .map_err(|source| PipelineIoError::OpenOutput {
-            path: staging_path.to_path_buf(),
-            source,
-        })?;
+    drop(writer.into_inner().map_err(|source| {
+        crate::staging::failure(
+            output,
+            LocalPublicationPhase::Close,
+            PipelineIoError::WriteParquet { source },
+        )
+    })?);
     Ok(report)
 }
 
@@ -371,8 +385,9 @@ fn consume_batches(
 /// channel of capacity `config.channel_capacity`: the reader blocks once
 /// that many batches are unconsumed, bounding memory independently of input
 /// size. Output is staged and renamed into place only on success — any
-/// error or cancellation leaves `output` untouched and removes the staged
-/// file.
+/// error before rename leaves `output` untouched and drops owned staging.
+/// A parent-directory sync failure after rename reports published output with
+/// uncertain durability. The destination directory must be on one filesystem.
 ///
 /// `thread::scope` only returns once the producer thread has observed
 /// `consume_batches`'s receiver drop (as a `SendError`, if it was blocked
@@ -382,7 +397,8 @@ fn consume_batches(
 /// # Errors
 ///
 /// Returns [`PipelineError::Io`] for the same conditions as
-/// [`crate::fixture_to_record_batch`], plus writer/staging I/O failures, or
+/// [`crate::fixture_to_record_batch`], [`PipelineError::LocalPublication`] for
+/// encoding/staging/publication failures, or
 /// [`PipelineError::Cancelled`] if `cancel` was set before output could be
 /// published.
 pub fn run_bounded_pipeline(
@@ -392,6 +408,12 @@ pub fn run_bounded_pipeline(
     transform: Option<&dyn Fn(RecordBatch) -> Result<RecordBatch, PipelineIoError>>,
     cancel: &CancellationToken,
 ) -> Result<PipelineReport, PipelineError> {
+    if cancel.is_cancelled() {
+        return Err(PipelineError::Cancelled);
+    }
+    let staging = LocalStagedOutput::new(output)?;
+    let writer = parquet_writer(staging.file()?, schema(), config.compression)
+        .map_err(|source| crate::staging::failure(output, LocalPublicationPhase::Write, source))?;
     let (sender, receiver, accounting) = match config.max_admitted_bytes {
         Some(limit) => {
             let (sender, receiver, control) =
@@ -411,18 +433,11 @@ pub fn run_bounded_pipeline(
             )
         }
     };
-    let staging_path = staging_path_for(output);
     let mut production = Ok(());
     let result = thread::scope(|scope| {
         scope
             .spawn(|| production = produce_batches(input, config.batch_size.get(), cancel, sender));
-        consume_batches(
-            receiver,
-            &staging_path,
-            config.compression,
-            transform,
-            cancel,
-        )
+        consume_batches(receiver, writer, output, transform, cancel)
     });
     // A producer admission error must not publish a successfully closed partial file.
     let result = result.and_then(|mut report| {
@@ -435,37 +450,12 @@ pub fn run_bounded_pipeline(
         Ok(report)
     });
 
-    match result {
-        Ok(report) => {
-            std::fs::rename(&staging_path, output).map_err(|source| {
-                PipelineIoError::OpenOutput {
-                    path: output.to_path_buf(),
-                    source,
-                }
-            })?;
-            // Durability: fsync the directory entry so the rename itself
-            // survives a crash, not just the file contents synced above.
-            if let Some(parent) = output
-                .parent()
-                .filter(|parent| !parent.as_os_str().is_empty())
-            {
-                let dir = File::open(parent).map_err(|source| PipelineIoError::OpenOutput {
-                    path: parent.to_path_buf(),
-                    source,
-                })?;
-                dir.sync_all()
-                    .map_err(|source| PipelineIoError::OpenOutput {
-                        path: parent.to_path_buf(),
-                        source,
-                    })?;
-            }
-            Ok(report)
-        }
-        Err(err) => {
-            let _ = std::fs::remove_file(&staging_path);
-            Err(err)
-        }
+    let report = result?;
+    if cancel.is_cancelled() {
+        return Err(PipelineError::Cancelled);
     }
+    staging.publish()?;
+    Ok(report)
 }
 
 /// Runs [`run_bounded_pipeline`] against objects in `store` instead of local
@@ -538,6 +528,19 @@ mod tests {
     use object_store::ObjectStoreExt;
     use std::io::Write;
 
+    fn assert_no_owned_staging(output: &Path) {
+        let parent = output.parent().expect("output directory");
+        for entry in std::fs::read_dir(parent).expect("directory") {
+            let entry = entry.expect("entry");
+            assert!(
+                !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".datacrate-")
+            );
+        }
+    }
+
     fn fixture_path(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../fixtures/m1")
@@ -591,7 +594,7 @@ mod tests {
 
         assert_eq!(report.rows_written, 3);
         assert!(output.exists());
-        assert!(!staging_path_for(&output).exists());
+        assert_no_owned_staging(&output);
     }
 
     #[test]
@@ -665,7 +668,7 @@ mod tests {
             PipelineError::Io(PipelineIoError::ReadRecord { .. })
         ));
         assert!(!output.exists());
-        assert!(!staging_path_for(&output).exists());
+        assert_no_owned_staging(&output);
     }
 
     #[test]
@@ -686,14 +689,13 @@ mod tests {
 
         assert!(matches!(err, PipelineError::Cancelled));
         assert!(!output.exists());
-        assert!(!staging_path_for(&output).exists());
+        assert_no_owned_staging(&output);
     }
 
     #[test]
     fn writer_open_failure_cleans_up_and_publishes_nothing() {
         let dir = tempfile::tempdir().expect("temp dir should be creatable");
-        // A path inside a directory that doesn't exist: `File::create` for
-        // the staging file must fail before any row is written.
+        // The output directory is required before owned staging can be created.
         let output = dir.path().join("missing-subdir").join("out.parquet");
 
         let err = run_bounded_pipeline(
@@ -707,9 +709,105 @@ mod tests {
 
         assert!(matches!(
             err,
-            PipelineError::Io(PipelineIoError::OpenOutput { .. })
+            PipelineError::LocalPublication {
+                phase: LocalPublicationPhase::Create,
+                outcome: LocalPublicationOutcome::NotPublished,
+                ..
+            }
         ));
         assert!(!output.exists());
+    }
+
+    struct FailingWriter {
+        file: File,
+        remaining: usize,
+    }
+
+    impl std::io::Write for FailingWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let length = bytes.len().min(self.remaining);
+            if length == 0 {
+                return Err(std::io::Error::other("injected writer failure"));
+            }
+            self.file.write_all(&bytes[..length])?;
+            self.remaining -= length;
+            Ok(length)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.file.flush()
+        }
+    }
+
+    #[test]
+    fn owned_staging_write_and_close_failures_keep_previous_output() {
+        use arrow::array::{Int64Array, StringArray};
+        use parquet::file::properties::WriterProperties;
+        for budgeted in [false, true] {
+            for (row_group, phase) in [
+                (1, LocalPublicationPhase::Write),
+                (1000, LocalPublicationPhase::Close),
+            ] {
+                let dir = tempfile::tempdir().expect("directory");
+                let output = dir.path().join("output");
+                std::fs::write(&output, b"old").expect("old output");
+                let staged = LocalStagedOutput::new(&output).expect("owner");
+                let file = FailingWriter {
+                    file: staged.file().expect("file"),
+                    remaining: 4,
+                };
+                let properties = WriterProperties::builder()
+                    .set_max_row_group_row_count(Some(row_group))
+                    .set_compression(Compression::UNCOMPRESSED)
+                    .build();
+                let writer = ArrowWriter::try_new(file, schema(), Some(properties))
+                    .expect("construct writer");
+                // TrackedWrite buffers small writes. A large uncompressed dictionary
+                // page forces actual I/O during write; the small fixture fails at close.
+                let batch = if phase == LocalPublicationPhase::Write {
+                    RecordBatch::try_new(
+                        schema(),
+                        vec![
+                            Arc::new(Int64Array::from(vec![1])),
+                            Arc::new(StringArray::from(vec!["x".repeat(20_000)])),
+                            Arc::new(StringArray::from(vec![None::<&str>])),
+                        ],
+                    )
+                    .expect("large batch")
+                } else {
+                    crate::fixture_to_record_batch(&fixture_path("headers.csv")).expect("fixture")
+                };
+                let (receiver, accounting) = if budgeted {
+                    let (sender, receiver, control) =
+                        transport::channel(1, 1_000_000, &CancellationToken::new());
+                    sender.send(Ok(batch)).expect("admit");
+                    drop(sender);
+                    (BatchReceiver::Budgeted(receiver), Some(control))
+                } else {
+                    let (sender, receiver) = sync_channel(1);
+                    sender.send(Ok(batch)).expect("send");
+                    drop(sender);
+                    (BatchReceiver::Count(receiver), None)
+                };
+                let error =
+                    consume_batches(receiver, writer, &output, None, &CancellationToken::new())
+                        .expect_err("writer error");
+                assert!(
+                    matches!(&error, PipelineError::LocalPublication { phase: actual, outcome: LocalPublicationOutcome::NotPublished, source, .. } if *actual == phase && matches!(source.as_ref(), PipelineIoError::WriteParquet { .. })),
+                    "expected {phase:?}, got {error:?}"
+                );
+                if let Some(control) = accounting {
+                    assert_eq!(
+                        control.metrics().0,
+                        0,
+                        "failed encoding releases reservations"
+                    );
+                    assert!(control.metrics().1 > 0);
+                }
+                drop(staged);
+                assert_eq!(std::fs::read(&output).expect("output"), b"old");
+                assert_no_owned_staging(&output);
+            }
+        }
     }
 
     #[test]
