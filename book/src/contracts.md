@@ -132,8 +132,8 @@ local type that happened to share a name with one of those stdlib containers
 - a domain type literally named `Vec`, say - hit an `.expect()` reaching for
 a generic argument that didn't exist, panicking the proc macro instead of
 producing an ordinary compile error at the field. A proc macro sees syntax,
-not resolved types, so it can never fully disambiguate a shadowed name from
-the real container - but it can refuse to panic: arity-checked detection now
+not resolved types, so token inspection alone cannot disambiguate a shadowed
+name from the real container. It can still refuse to panic: arity-checked detection now
 falls through to `<FieldType as Contract>::SHAPE` when the argument count
 does not match. An unsupported type therefore needs a `Contract` implementation
 rather than silently becoming an opaque primitive.
@@ -176,3 +176,34 @@ fails during `cargo build`; `cargo check` alone may pass, and unused generic
 code is not checked this way. Keep item-level `const _: () = ...::CHECK` for
 concrete checks that must be evaluated independently of a generic call. Neither
 form validates external files or actual Arrow batches.
+
+## Resolved types and Arrow schemas need separate decisions
+
+Earlier, arity checks removed proc-macro panics for shadowed names. They did not
+make syntax recognition equivalent to compiler type resolution: a custom generic
+`Option<T>` with matching arity can still be mistaken for the standard container.
+Aliases and qualified primitive paths also expose the spelling-based boundary.
+This remains a production limitation; use explicit supported declarations and
+check the resulting shape rather than assuming arbitrary aliases are resolved.
+
+A stable-Rust experiment made derive delegate each field to
+`<FieldType as Contract>::SHAPE`, with primitive and container implementations.
+Aliases, qualified paths, nesting, shadowed containers and aliased map keys then
+followed the actual types. A sealed supported-key boundary rejected non-atomic
+keys. However, blanket reference implementations conflicted with a legal downstream
+manual `Contract for &Local`. That is a public compatibility choice, not a harmless
+macro refactor, so the experiment has not replaced the production derive.
+
+A general Arrow adapter has another boundary. Rust `String` and `str` declarations
+can map to the same Arrow Utf8 field despite distinct declaration shapes. Nested
+`Option<Option<T>>` needs a chosen representation beyond a single nullable bit;
+map keys, nested validity, decimal precision and timestamp units require explicit
+rules. A bounded schema probe accepted selected scalar/list mappings and refused
+unsupported mappings. It did not certify arbitrary arrays or business rules.
+
+The production pipeline therefore retains its fixed-ingest validator and private
+checked-batch evidence. It checks actual callback output before writing and hashing.
+A future general adapter must have a real consumer, explicit unsupported cases and
+runtime validation; a schema conversion or `PhantomData<C>` tag alone supplies no
+such evidence. Declaration compatibility, physical representation and runtime values
+remain separate guarantees.
