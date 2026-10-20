@@ -3,9 +3,10 @@
 The previous chapter covered *how* Ballista and Comet push DataFusion past a
 single process. This chapter covers the part that matters more: does any of
 it hold up once the data stops being toy-sized, and does DataFusion actually
-agree with Spark on what a query means? Every number below is measured, not
-guessed - each one reproducible from the exact command shown, with the toolchain,
-hardware, seed, and raw output recorded alongside it at the time it was run.
+agree with Spark on what a query means? The historical tables retain previously
+recorded results; this audit has not rerun the 91GB workloads. Reproduction needs
+the original dataset, engine configuration and timing boundary. Projections and
+limits of the surviving captures are identified separately below.
 
 **The scale used throughout is 91GB / 6.6 billion rows, not 1TB.** An earlier
 plan called for a literal terabyte; a real run turned out to need roughly
@@ -34,9 +35,10 @@ line, but finding it *before* the ~100GB run started is what the small first
 pass is for.
 
 **Scala bridge**: this is the same discipline as running a Spark job against
-a 1% sample before submitting it against the full partition - except here
-the "sample" run also has to produce a byte-identical result to the full run
-before the full run is trusted at all, not just "didn't crash."
+a 1% sample before submitting it against the full partition. Here every
+engine must agree with the independent oracle at each scale before its timings
+are trusted. Different input sizes have different counts and sums; the sample
+and full run are not expected to return the same result.
 
 ## The plain aggregate at 91GB: DataFusion, Ballista, Polars, Spark, Spark+Comet
 
@@ -51,8 +53,15 @@ from any engine's output):
 | DataFusion (single-node) | 5.84s | ~7.75x |
 | Ballista (2-executor local cluster) | 4.30s | ~10.5x |
 | Comet-accelerated Spark | 13.94s | ~3.2x |
-| Polars (Rust, lazy/streaming) | 16.65s | ~2.7x |
+| Polars (Rust, lazy/streaming) | 16.65s | not compared |
 | Spark (vanilla) | 45.25s | 1x (baseline) |
+
+The original timing boundaries differ. DataFusion and Ballista start their
+reported query timers after context creation and table registration. Spark's
+`real` wraps the complete SQL process, including startup. The ratios above are
+arithmetic comparisons of those captured boundaries; they do not establish matched
+query throughput or a production migration speedup. Raw process and query timings
+must remain labeled separately.
 
 All five returned the exact same `order_count=3332996682,
 total_amount=249991416386.72` on every run.
@@ -66,27 +75,23 @@ just m36-vanilla          # inside docker-compose.spark-comet.yml
 just m36-accelerated      # Spark + the Comet plugin
 ```
 
-**What this confirms and what it doesn't.** The "roughly 10x" headline
-number holds at this real scale (Ballista's 4.30s vs. Spark-vanilla's
-45.25s), and single-node DataFusion alone already gets ~7.75x without
-distributing anything. The DataFusion-vs-Polars comparison (~2.85x) stays
-inside the Rust ecosystem, on purpose - see the note on scope below. What it
-does *not* show: this is one query shape (filter + count/sum), one dataset,
-2 runs per engine (enough to catch first-run warm-up noise, not enough to
-characterize p50/p99 variance), and Ballista's 2-executor cluster runs on
-the same laptop as everything else - not a real multi-node deployment.
+**What this confirms and what it doesn't.** The recorded means yield
+45.25 / 4.30 ≈ 10.5 and 45.25 / 5.84 ≈ 7.75, but the mixed timing boundaries
+prevent interpreting those ratios as query-only throughput improvements. Results
+matched the oracle at this scale. This is one filter/count/sum shape, one dataset,
+two runs per engine and one host. Those samples cannot characterize p99 or predict
+a multi-node deployment. The local two-executor Ballista topology also shares the
+laptop's CPU, storage and memory with its scheduler.
 
-### Why Polars only ever races DataFusion, never Spark
+### Keep engine comparisons separate from deployment claims
 
-Every Polars number in datacrate is compared against DataFusion, never
-against Spark. Polars and DataFusion are both single-machine, in-process
-Rust query engines - comparing them measures which one is the better engine
-for a workload that fits on one box. Spark is a distributed system whose
-entire value proposition is coordinating work *across* machines; putting a
-single-node Polars number next to a Spark cluster number would be comparing
-different things and calling it a ranking. The same rule that keeps
-Ballista, Comet, and DataFusion from being ranked against each other in the
-previous chapter applies here to Polars too.
+Polars and DataFusion run in-process on one machine here. Spark also runs locally
+with `local[*]`; its distributed capability was not exercised across hosts. Ballista
+uses two local executor processes. Listing captured times together does not make
+these equivalent production deployments. Compare Polars with DataFusion only within
+matched local query boundaries, and report Spark's process startup separately.
+Neither this topology nor these query shapes justify a general engine ranking or
+a prediction about a production multi-node platform.
 
 ### A sixth engine, a different scalability trade-off: DuckDB
 
@@ -114,12 +119,10 @@ let (order_count, total_amount): (i64, f64) = conn
     .map_err(CliError::Query)?;
 ```
 
-Note the explicit `CAST(... AS DECIMAL(38,2))` - the same precision
-widening the two-pass discipline earlier in this chapter had to add for
-Polars, for the same underlying reason: a `SUM` over this fixture's scale
-of `Decimal(10,2)` values needs more integer digits than the column's own
-declared precision provides, and DuckDB's default `SUM` behavior, like
-Polars', stays at the input's precision unless told otherwise.
+The explicit `CAST(... AS DECIMAL(38,2))` fixes the query's requested result
+type. Its presence is not evidence that DuckDB's default decimal SUM retains input
+precision or reproduces the separately observed Polars issue. This DuckDB leg still
+needs its own measured scale result before any engine comparison is claimed.
 
 ```sh
 cargo build -p pipeline --features duckdb
@@ -198,9 +201,9 @@ characterize variance).
 
 ## Group-by and filter shapes: where the "10x" story does and doesn't generalize
 
-The plain aggregate and the join both had Ballista beating single-node
-DataFusion. Two more query shapes were run at the same 91GB scale to check
-whether that holds generally - and it doesn't:
+The plain aggregate favored Ballista, while the full-scale join favored
+single-node DataFusion. Two additional query shapes were recorded at the same
+91GB scale; they also favored DataFusion:
 
 | Shape | DataFusion mean | Ballista mean | Ballista vs. Spark-vanilla |
 |---|---|---|---|
@@ -217,17 +220,12 @@ All four engines matched exactly on both shapes (group-by spot-checked at
 bucket 999: `order_count=6600000, total_amount=333299940.72`; filter:
 `order_count=2856854299, total_amount=214278356945.44`).
 
-**The genuine reversal worth sitting with**: on both of these shapes,
-Ballista is *slower* than single-node DataFusion, not faster - the opposite
-of the plain-aggregate and join results. The likely reason is that these
-shapes do less work per task, so Ballista's distributed
-scheduling/coordination overhead becomes a bigger fraction of the total time
-at a small 2-executor topology and never pays for itself. This wasn't
-investigated further (it would need per-task profiling), but it's the kind
-of result that has to be disclosed rather than quietly dropped if a "10x"
-headline number gets used anywhere - the true ratio is shape-dependent,
-ranging from ~3.4x to ~10.5x across the four shapes actually measured, not
-a single fixed multiplier.
+These results are shape-dependent: Ballista's recorded query elapsed time is
+lower on the plain aggregate and higher on the group-by, multi-predicate filter
+and full-scale join. Scheduling, serialization and parallelism are possible causes,
+but these captures do not isolate them. The ratios against Spark additionally
+retain the mixed process/query timing boundary described above. None is a fixed
+engine multiplier.
 
 ## Is DataFusion's speed actually predictable, or just fast on average?
 
@@ -250,7 +248,7 @@ consistency advantage on top of being faster. One contaminated data point
 (60.2s, caused by leftover contention from a just-killed prior command) was
 excluded and rerun cleanly rather than left in or silently dropped.
 
-## Checking the "30GB driver" line against an actual measurement
+## Checking the "30GB driver" line against the recorded container samples
 
 A pitch line worth being honest about: "your Spark job needs a 30GB driver
 and 15 minutes of GC tuning before it processes a single row." For the
@@ -260,11 +258,17 @@ default `spark.driver.memory=1g` and zero GC flags set anywhere in the
 project - the measured reality was:
 
 - Startup-only (`SELECT 1`, 3 runs): mean 4.36s.
-- Peak driver memory during the real 91GB aggregate query (sampled every 2s
-  via `docker stats`): 1.446 GiB.
+- Highest observed container memory during the real 91GB aggregate query
+  (sampled every 2s via `docker stats`): 1.446 GiB. This is a sampled container
+  metric, not an isolated JVM heap/RSS measurement or a guaranteed peak. The
+  Linux Docker CLI subtracts inactive file cache from reported usage; see the
+  [Docker stats definition](https://docs.docker.com/reference/cli/docker/container/stats/).
+  The local driver and executor shared one JVM inside a Docker Desktop VM capped
+  at 7.748 GiB, distinct from the host's 64 GiB.
 
-That's roughly 20x smaller than "30GB" and 200x smaller than "15 minutes,"
-for this specific workload. The honest scoping: this doesn't refute the
+These samples are far below the rhetorical "30GB" and "15 minutes" figures,
+but container memory and startup elapsed time do not measure driver heap need or
+time spent tuning GC. For this specific workload: this doesn't refute the
 30GB figure in general - no workload that plausibly needs that much driver
 memory (a broadcast join landing in the driver, `.collect()`-ing a large
 result set, a real multi-executor cluster's shuffle-metadata bookkeeping)
@@ -320,6 +324,18 @@ and join-result parity were separately confirmed by the aggregate and join
 comparisons earlier in this chapter - together, these are the semantics
 categories checked so far, not an exhaustive SQL-compatibility claim.
 
+## The earlier approximately 200x comparison used different clocks
+
+The dated small aggregate captures report DataFusion query elapsed times of
+27.17, 28.72 and 21.33 ms. Spark process elapsed times are 5.429, 5.512 and
+5.497 seconds. Both return the same 2,500,000 matching rows and 188,750,000.00
+sum, but the DataFusion timer starts after registration while Spark's shell timer
+includes JVM/session startup and the SQL script. Dividing those values yields a
+large ratio across different boundaries; it does not establish a roughly 200x
+query-throughput improvement. The recorded report already distinguishes those
+clocks. Keep the correctness result and the separate elapsed observations, without
+promoting the ratio into a migration, cost-saving or productivity claim.
+
 ## The one number in this chapter that was never actually run: a 1TB projection
 
 If a 1TB figure is ever quoted anywhere against this codebase, it should be
@@ -330,12 +346,10 @@ DataFusion ~65.7s, Ballista ~48.4s, Polars ~187.4s, Spark-vanilla ~509.2s,
 Spark+Comet ~156.9s. A linear projection can't produce a different *ratio*
 than the one already measured (the 10.5x and 2.85x figures fall out
 unchanged) - it adds no new information about how the gap moves with scale.
-If anything, it's more likely to *understate* the real gap: Spark's GC
-pauses are known to grow worse under memory pressure, so its true curve
-past 64GB is plausibly super-linear, which would make the real 1TB gap
-larger than 10.5x, not smaller. That reasoning is not itself a measurement,
-which is exactly why the number stays labeled a projection instead of a
-result.
+The projection does not establish how either engine scales past the measured
+point. Memory pressure, spill, parallelism, cache state and storage can change
+both curves in either direction. It supplies no evidence that the true 1TB ratio
+would be larger, smaller or unchanged.
 
 ## Proving Polars' lazy optimizer, not just citing it
 
