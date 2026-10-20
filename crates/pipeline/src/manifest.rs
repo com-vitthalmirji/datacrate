@@ -1,8 +1,8 @@
 //! The completion manifest [`run_bounded_pipeline_s3`](crate::bounded::run_bounded_pipeline_s3)
-//! publishes once its output object is fully written: proof of *what* was
-//! written (row count, a logical-content digest) and *from what* (a snapshot
-//! of the input object), without ever buffering more than one row's hash at
-//! a time.
+//! publishes after its output object: reported row count, a logical-content
+//! fingerprint and captured input metadata. Output and manifest are separate
+//! publications; a record's presence does not verify output bytes or establish
+//! an atomic dataset commit. Digest calculation retains one row's hash at a time.
 //!
 //! Order independence: `accumulate_batch_digest` combines each row's
 //! individual hash into a running total with wrapping (mod 2^64) addition,
@@ -29,7 +29,8 @@ use serde::{Deserialize, Serialize};
 /// seeds are randomised per process — meant to resist hash-flooding denial of
 /// service in hash maps — which would make the digest differ across runs of
 /// the *same* content. A content fingerprint needs the opposite: identical
-/// content must hash identically no matter which process computed it.
+/// content must hash identically across processes using the same pinned
+/// implementation and target/CPU-feature configuration.
 const DIGEST_SEED_1: u64 = 0x517c_c1b7_2722_0a95;
 const DIGEST_SEED_2: u64 = 0x2545_f491_4f6c_dd1d;
 const DIGEST_SEED_3: u64 = 0x9e37_79b9_7f4a_7c15;
@@ -90,9 +91,11 @@ pub(crate) fn accumulate_batch_digest(running: u64, batch: &RecordBatch) -> u64 
     })
 }
 
-/// Proof that an object-store output was fully and correctly written:
-/// row count, an order-independent content digest, and a snapshot of the
-/// input object it was built from.
+/// Reported row count, an order-independent fingerprint and input metadata.
+///
+/// The decoder checks version-specific fields at entry. This public record is
+/// mutable, so consuming boundaries must validate it again before relying on
+/// those fields. It is not a proof of output contents or atomic publication.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompletionManifest {
     /// Persisted protocol version, checked by the supported-version decoder.
@@ -210,6 +213,8 @@ impl From<CompletionManifestWire> for CompletionManifest {
 /// # Errors
 /// Returns [`PipelineIoError::ReadManifest`] for malformed input or
 /// [`PipelineIoError::UnsupportedManifestVersion`] for an unknown version.
+/// Missing version-specific fields return [`PipelineIoError::InvalidManifest`];
+/// unknown digest schemes return [`PipelineIoError::UnsupportedDigestScheme`].
 /// Raw Serde decoding does not perform this supported-version check.
 pub fn decode_completion_manifest(bytes: &[u8]) -> Result<CompletionManifest, PipelineIoError> {
     let wire: CompletionManifestWire =
@@ -284,8 +289,8 @@ impl CompletionManifest {
     }
 
     /// The manifest's own key for a given output key: a `.manifest.json`
-    /// sibling, published only after `output_key` itself is fully written —
-    /// its presence is the completion signal a reader should wait for.
+    /// sibling. Its presence alone does not establish that it describes the
+    /// current output; readers need the publication protocol and identity checks.
     pub fn key_for(output_key: &ObjectPath) -> ObjectPath {
         ObjectPath::from(format!("{output_key}.manifest.json"))
     }
