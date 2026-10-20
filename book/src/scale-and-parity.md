@@ -418,8 +418,11 @@ just m36-polars
 Confirm all engines agree on the small dataset before spending the disk and
 time budget on the full 91GB run.
 
-The orders and shipments generators require a nonzero batch size. Timestamp
-products use i128 before division and checked narrowing to i64. The orders
+The generators previously accepted zero batch sizes, which could leave the write
+loop unable to advance. Their batch sizes now use `NonZeroU64`, so argument parsing
+rejects zero before output creation. Timestamp multiplication previously happened
+in i64 before division: a supported row count could still overflow that
+intermediate product. It now happens in i128 before checked narrowing to i64. The orders
 generator retains its total-row divisor; shipments retain the billion-order
 divisor and delivery-day offsets. Shipments reject a requested range before
 creating output if any emitted timestamp would exceed i64 microseconds. These

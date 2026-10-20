@@ -24,11 +24,10 @@ use object_store::{ObjectMeta, ObjectStore, ObjectStoreExt, WriteMultipart};
 use crate::PipelineIoError;
 use crate::manifest::CompletionManifest;
 
-/// Chunk size for both directions: how much of the object/file is held in
-/// memory at once. Comfortably above `object_store`'s 5 MiB multipart-part
-/// minimum so `upload_from_temp` doesn't pay a part-per-tiny-chunk penalty,
-/// small enough that peak RSS tracks this constant, not the file size.
+/// File read size and multipart part size. Above the 5 MiB S3 part minimum.
 const CHUNK_BYTES: usize = 8 * 1024 * 1024;
+/// Limits scheduled upload parts independently of the pipeline batch channel.
+const MAX_UPLOAD_PARTS: usize = 2;
 
 fn block_on<F: std::future::Future>(future: F) -> F::Output {
     assert!(
@@ -136,31 +135,50 @@ pub fn upload_from_temp(
                     key: key.clone(),
                     source,
                 })?;
-        let mut writer = WriteMultipart::new(upload);
+        write_multipart(&mut file, src, key, upload).await
+    })
+}
 
-        let mut buf = vec![0u8; CHUNK_BYTES];
-        loop {
-            let read = file
-                .read(&mut buf)
-                .map_err(|source| PipelineIoError::OpenInput {
-                    path: src.to_path_buf(),
-                    source,
-                })?;
-            if read == 0 {
-                break;
-            }
-            writer.write(&buf[..read]);
-        }
+/// Streams a reader through the owned upload with bounded outstanding parts.
+async fn write_multipart(
+    reader: &mut impl Read,
+    src: &Path,
+    key: &ObjectPath,
+    upload: Box<dyn object_store::MultipartUpload>,
+) -> Result<(), PipelineIoError> {
+    let mut writer = WriteMultipart::new_with_chunk_size(upload, CHUNK_BYTES);
 
+    let mut buf = vec![0u8; CHUNK_BYTES];
+    loop {
+        // One aligned write can schedule at most one part. Waiting here also
+        // leaves capacity for a final partial part scheduled by finish().
         writer
-            .finish()
+            .wait_for_capacity(MAX_UPLOAD_PARTS)
             .await
             .map_err(|source| PipelineIoError::UploadObject {
                 key: key.clone(),
                 source,
-            })
-            .map(|_| ())
-    })
+            })?;
+        let read = reader
+            .read(&mut buf)
+            .map_err(|source| PipelineIoError::OpenInput {
+                path: src.to_path_buf(),
+                source,
+            })?;
+        if read == 0 {
+            break;
+        }
+        writer.write(&buf[..read]);
+    }
+
+    writer
+        .finish()
+        .await
+        .map_err(|source| PipelineIoError::UploadObject {
+            key: key.clone(),
+            source,
+        })
+        .map(|_| ())
 }
 
 /// Reads `key`'s metadata from `store`, without downloading its contents —
@@ -383,5 +401,159 @@ mod tests {
         let err = crate::read_parquet(&downloaded)
             .expect_err("a schema-drifted object must be rejected, not silently coerced");
         assert!(matches!(err, PipelineIoError::BuildBatch { .. }));
+    }
+}
+
+#[cfg(test)]
+mod multipart_regressions {
+    use super::*;
+    use object_store::{MultipartUpload, PutPayload, PutResult, UploadPart};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
+
+    #[derive(Debug, Default)]
+    struct State {
+        active: AtomicUsize,
+        peak: AtomicUsize,
+        bytes: AtomicUsize,
+        valid_bytes: AtomicBool,
+        complete_called: AtomicBool,
+        aborted: AtomicBool,
+        fail_part: bool,
+        fail_complete: bool,
+    }
+    #[derive(Debug)]
+    struct Upload(Arc<State>);
+    fn injected() -> object_store::Error {
+        object_store::Error::Generic {
+            store: "regression",
+            source: std::io::Error::other("injected failure").into(),
+        }
+    }
+    #[async_trait::async_trait]
+    impl MultipartUpload for Upload {
+        fn put_part(&mut self, data: PutPayload) -> UploadPart {
+            let state = Arc::clone(&self.0);
+            let active = state.active.fetch_add(1, Ordering::SeqCst) + 1;
+            state.peak.fetch_max(active, Ordering::SeqCst);
+            state.bytes.fetch_add(
+                data.iter().map(|bytes| bytes.len()).sum::<usize>(),
+                Ordering::SeqCst,
+            );
+            if !data.iter().all(|chunk| chunk.iter().all(|byte| *byte == 7)) {
+                state.valid_bytes.store(false, Ordering::SeqCst);
+            }
+            Box::pin(async move {
+                // Keep scheduled parts pending until the production loop yields.
+                tokio::task::yield_now().await;
+                drop(data);
+                state.active.fetch_sub(1, Ordering::SeqCst);
+                if state.fail_part {
+                    Err(injected())
+                } else {
+                    Ok(())
+                }
+            })
+        }
+        async fn complete(&mut self) -> object_store::Result<PutResult> {
+            self.0.complete_called.store(true, Ordering::SeqCst);
+            if self.0.fail_complete {
+                return Err(injected());
+            }
+            assert_eq!(self.0.active.load(Ordering::SeqCst), 0);
+            Ok(PutResult {
+                e_tag: None,
+                version: None,
+            })
+        }
+        async fn abort(&mut self) -> object_store::Result<()> {
+            self.0.aborted.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+    #[test]
+    fn outstanding_parts_and_final_partial_part_stay_bounded() {
+        for size in [0, CHUNK_BYTES / 2, CHUNK_BYTES * 3, CHUNK_BYTES * 3 + 17] {
+            let state = Arc::new(State {
+                valid_bytes: AtomicBool::new(true),
+                ..State::default()
+            });
+            let mut reader = std::io::repeat(7).take(size as u64);
+            block_on(write_multipart(
+                &mut reader,
+                Path::new("input"),
+                &ObjectPath::from("output"),
+                Box::new(Upload(Arc::clone(&state))),
+            ))
+            .expect("bounded upload");
+            assert_eq!(state.bytes.load(Ordering::SeqCst), size);
+            assert!(state.valid_bytes.load(Ordering::SeqCst));
+            assert!(state.peak.load(Ordering::SeqCst) <= 2);
+            if size > CHUNK_BYTES * 2 {
+                assert_eq!(state.peak.load(Ordering::SeqCst), 2);
+            }
+            assert!(state.complete_called.load(Ordering::SeqCst));
+            assert!(!state.aborted.load(Ordering::SeqCst));
+        }
+    }
+    #[test]
+    fn part_failures_preserve_upload_error_context() {
+        let state = Arc::new(State {
+            fail_part: true,
+            ..State::default()
+        });
+        let mut reader = std::io::repeat(7).take((CHUNK_BYTES * 3) as u64);
+        let key = ObjectPath::from("failed-part");
+        let result = block_on(write_multipart(
+            &mut reader,
+            Path::new("input"),
+            &key,
+            Box::new(Upload(Arc::clone(&state))),
+        ));
+        assert!(
+            matches!(result, Err(PipelineIoError::UploadObject { key: actual, .. }) if actual == key)
+        );
+        assert!(!state.complete_called.load(Ordering::SeqCst));
+    }
+    #[test]
+    fn completion_failure_is_reported_and_abort_is_attempted() {
+        let state = Arc::new(State {
+            fail_complete: true,
+            ..State::default()
+        });
+        let key = ObjectPath::from("failed-completion");
+        let result = block_on(write_multipart(
+            &mut std::io::empty(),
+            Path::new("input"),
+            &key,
+            Box::new(Upload(Arc::clone(&state))),
+        ));
+        assert!(
+            matches!(result, Err(PipelineIoError::UploadObject { key: actual, .. }) if actual == key)
+        );
+        assert!(state.complete_called.load(Ordering::SeqCst));
+        assert!(state.aborted.load(Ordering::SeqCst));
+    }
+    #[test]
+    fn local_read_failure_preserves_input_error_context() {
+        struct Broken;
+        impl Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("read failed"))
+            }
+        }
+        let state = Arc::new(State::default());
+        let result = block_on(write_multipart(
+            &mut Broken,
+            Path::new("broken-input"),
+            &ObjectPath::from("output"),
+            Box::new(Upload(Arc::clone(&state))),
+        ));
+        assert!(
+            matches!(result, Err(PipelineIoError::OpenInput { path, .. }) if path == Path::new("broken-input"))
+        );
+        assert!(!state.complete_called.load(Ordering::SeqCst));
     }
 }

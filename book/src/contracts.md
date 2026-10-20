@@ -41,14 +41,14 @@ struct Producer {
 }
 
 #[derive(Contract)]
-struct Contract {
+struct Target {
     id: i64,
     name: String,
     note: Option<String>, // missing from Producer, but Optional - allowed under Backward
 }
 
-// Fails to compile if Producer no longer conforms to Contract under Backward:
-const _: () = SchemaConforms::<Producer, Contract, Backward>::CHECK;
+// Fails to compile if Producer no longer conforms to Target under Backward:
+const _: () = SchemaConforms::<Producer, Target, Backward>::CHECK;
 ```
 
 ```mermaid
@@ -108,9 +108,9 @@ without weakening every other policy's guarantees.
 
 ## No engine dependency
 
-`contracts` depends only on `contracts-derive`, which depends only on
-`syn`/`quote`/`proc-macro2` - no Arrow, no DataFusion, no execution engine
-anywhere in either crate. `TypeShape` comes straight from a struct's own
+`contracts` uses `contracts-derive` and const diagnostic helpers; the derive
+uses `syn`/`quote`/`proc-macro2`. Neither crate depends on Arrow, DataFusion
+or another execution engine. `TypeShape` comes straight from a struct's own
 field types, so the same contract check works regardless of what (if
 anything) later reads that struct's data.
 
@@ -134,8 +134,9 @@ a generic argument that didn't exist, panicking the proc macro instead of
 producing an ordinary compile error at the field. A proc macro sees syntax,
 not resolved types, so it can never fully disambiguate a shadowed name from
 the real container - but it can refuse to panic: arity-checked detection now
-falls through to the same opaque-primitive path already used for every other
-unrecognized type whenever the argument count doesn't match.
+falls through to `<FieldType as Contract>::SHAPE` when the argument count
+does not match. An unsupported type therefore needs a `Contract` implementation
+rather than silently becoming an opaque primitive.
 
 ## Try it
 
@@ -147,6 +148,11 @@ Includes `trybuild` cases proving an `Exact`-policy mismatch is a genuine
 compile error, and a case proving `#[derive(Contract)]` itself is rejected
 on generic structs (a bare type parameter has no shape the macro can see).
 
+## Verdicts, metadata and enforcement
+
+A review found that eight tolerated differences could fill the display buffer
+before policy filtering and hide a later type mismatch. Filtering now happens
+before storage, and rejection is tracked separately from the rendered list.
 Compatibility verdicts visit the relevant shape tree independently of the display
 limits. Policies filter tolerated differences before they consume diagnostic
 slots. At most eight rejecting differences and six path segments are rendered;
@@ -162,8 +168,10 @@ comma. Values, arguments, unknown keys, duplicates and empty attributes are
 rejected at the derive site. This attribute records compatibility metadata; it
 does not construct a default value or make a reader supply one at runtime.
 
-Generic APIs can call `contracts::enforce::<Producer, Target, Policy>()` to
-evaluate the declaration check for an instantiated use. An incompatible call
+Earlier, generic APIs had to reference `SchemaConforms::CHECK` directly to force
+an evaluation point. They can now call
+`contracts::enforce::<Producer, Target, Policy>()`, which contains that const
+expression and keeps the enforcement step explicit at the API boundary. An incompatible call
 fails during `cargo build`; `cargo check` alone may pass, and unused generic
 code is not checked this way. Keep item-level `const _: () = ...::CHECK` for
 concrete checks that must be evaluated independently of a generic call. Neither

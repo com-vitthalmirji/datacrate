@@ -313,24 +313,29 @@ A closure is an anonymous function that can capture variables from its
 surrounding scope - `|args| { ... }`, same shape as Scala's
 `(args) => { ... }` or Python's `lambda args: ...`. [The typestate pipeline
 builder](typestate.md) stores closures behind
-`Box<dyn Fn(RecordBatch) -> RecordBatch>`: `Box` puts the closure on the heap
-(closures can have different sizes depending on what they capture, so they
-can't live directly in a struct field without one), and `dyn Fn` means "any
-type implementing the `Fn` trait, decided at runtime" rather than "one
-specific closure type fixed at compile time."
+`Box<dyn FnOnce(RecordBatch) -> RecordBatch>`: `Box` puts the closure on the heap,
+and `dyn FnOnce` erases its concrete type. The builder can store
+caller-supplied closures of different sizes behind one pointer type without
+adding the closure's concrete type to its generic parameters. Generic structs
+can store closures directly; boxing is the choice this builder makes.
 
-**JVM bridge**: `Box<dyn Fn(RecordBatch) -> RecordBatch>` is doing the job
-of `RecordBatch => RecordBatch` (a `Function1` value) - Scala's function
+The local builder previously used `Fn`, which allowed capturing state but required
+a repeatable call. It now uses `FnOnce` because consuming `build` invokes each
+callback only once; a callback may therefore move out a captured resource.
+The remote builder keeps `Fn` because it invokes the transform for every batch.
+
+**JVM bridge**: `Box<dyn FnOnce(RecordBatch) -> RecordBatch>` is doing the job
+of `RecordBatch => RecordBatch` (a `Function1` value), with Rust additionally
+allowing this owned callback to be consumed when called. Scala's function
 types are reference types by default, so you get the heap allocation and
 dynamic dispatch for free; Rust makes both explicit in the type because it
 otherwise defaults to zero-cost, statically-dispatched closures.
 
-**Python bridge**: every Python function is already this - a first-class
-object living on the heap, dispatched dynamically, no annotation needed.
-`Box<dyn Fn(...)>` is Rust spelling out, in the type signature, the exact
-runtime shape Python gives you for free by default. A PySpark `udf` passed a
-`lambda` is doing the same job as a closure stored in `typestate`'s
-transform step - a function value handed to something else to call later.
+**Python bridge**: Python functions are first-class objects living on the heap
+and dispatched dynamically. A boxed Rust call trait makes those allocation and
+dispatch choices explicit. `FnOnce` additionally allows ownership of captures to
+be consumed by the call. A PySpark `udf` passed a `lambda` supplies the familiar
+part of the comparison: a function value handed to another component to call.
 
 ## Two smart pointers worth knowing: `Box` and `Arc`
 
