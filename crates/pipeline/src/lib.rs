@@ -609,3 +609,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod query_io_tests;
