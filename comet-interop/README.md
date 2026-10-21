@@ -1,9 +1,10 @@
 # comet-interop
 
 A scaffold for generating Spark Comet operator-replacement rules from
-`derives CometOperator` declarations, the same mechanism eezo uses for
-`derives Resource`: a build-time text scan finds candidates, and the
-compiler is the actual judge of whether each one resolves.
+`derives CometOperator` declarations, the same build-time-scan-plus-compiler-
+checked-typeclass mechanism a `derives Resource` macro would use: a
+build-time text scan finds candidates, and the compiler is the actual judge
+of whether each one resolves.
 
 ## Toolchain
 
@@ -48,12 +49,38 @@ built here.
   wrong operator swap - the compiler still has to resolve `CometOperator`
   for whatever it names.
 
+## Operator coverage
+
+Each operator below is a one-field-set `CometOperatorSpec` instance, proving
+the same derive/scanner mechanism across the scan, transform, and join
+categories - no new Scala mechanism is introduced per operator.
+
+| Operator | Category | Spark node | Comet replacement |
+|---|---|---|---|
+| `RowCountFilterOp` | filter | `FilterExec` | `CometFilterExec` |
+| `ParquetScanOp` | scan/ingestion | `FileSourceScanExec` | `CometScanExec` |
+| `ProjectOp` | project | `ProjectExec` | `CometProjectExec` |
+| `HashAggregateOp` | aggregate | `HashAggregateExec` | `CometHashAggregateExec` |
+| `BroadcastHashJoinOp` | join/shuffle | `BroadcastHashJoinExec` | `CometBroadcastHashJoinExec` |
+
+There is no sink-category operator: Comet accelerates Spark's read and
+compute path, not the write side, so there is nothing for a "sink operator"
+to replace.
+
 ## Testing
 
 `core/src/test/scala/cometinterop/CometOperatorSuite.scala` covers the
-derive/typeclass logic directly: a matching node gets replaced, a
-non-matching node name or a missing required field falls back to the
-original node unchanged.
+derive/typeclass logic directly, using a local `FilterSpec`: a matching node
+gets replaced, a non-matching node name or a missing required field falls
+back to the original node unchanged.
+
+`comet-ops/src/test/scala/comet_ops/CometOperatorBreadthSuite.scala` runs the
+same match/fallback shape against the four real operators above
+(`ParquetScanOp`, `ProjectOp`, `HashAggregateOp`, `BroadcastHashJoinOp`),
+proving the mechanism holds across the scan/transform/join categories, not
+just for one hand-written spec. It lives in `comet-ops`, not `core`, because
+`core` cannot see `comet_ops`'s types - `comet-ops` depends on `core`, not
+the reverse.
 
 The scanner itself (`OperatorScanner.scan`) is meta-build code under
 `project/`, outside the test framework reachable by `sbt test`. It is

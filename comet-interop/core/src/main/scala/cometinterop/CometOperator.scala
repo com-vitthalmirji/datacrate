@@ -12,8 +12,8 @@ trait CometOperatorSpec:
 /** Turns a `CometOperatorSpec` into a runnable `ColumnarRule`. The `derived`
   * given below resolves for any `T <: CometOperatorSpec`, so writing
   * `derives CometOperator` on a spec is really just asking the compiler to
-  * confirm that bound holds - the same role `derives Resource` plays for an
-  * eezo case class.
+  * confirm that bound holds - the same role a `derives Resource` macro would
+  * play for a resource-managed case class.
   */
 trait CometOperator[T <: CometOperatorSpec]:
   def toColumnarRule(spec: T): ColumnarRule

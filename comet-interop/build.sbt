@@ -15,6 +15,8 @@ lazy val cometOps = project
   .dependsOn(core)
   .settings(
     name := "comet-ops",
+    libraryDependencies += "org.scalameta" %% "munit" % "1.0.0" % Test,
+    testFrameworks += new TestFramework("munit.Framework"),
     Compile / sourceGenerators += cometOpsScannerTask.taskValue
   )
   .enablePlugins(CometOpsScannerPlugin)
