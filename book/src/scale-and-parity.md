@@ -463,12 +463,12 @@ and short/long/null inputs with full-scan and write controls. Five samples do no
 characterize tail latency. Small long-note fixtures that fit one row group are a
 negative control for row-group splitting. These controls support a workload-specific
 decision; they do not earn a production policy type, automatic tuner or default
-migration on their own. In the local repeated comparison, smaller groups reduced
-requested scan bytes for sorted IDs but increased them for shuffled IDs. Zstd
-reduced file size while commonly exceeding the declared write or full-scan
-regression guard. Long fixtures remained one row group under both Snappy settings.
-Those trade-offs support retaining the production default; they establish no
-cloud-traffic or application-throughput improvement. Snappy remains the production default.
+migration on their own. The initial local timings were collected while other
+applications were running. CPU contention, memory pressure, caches and thermal
+state were not controlled, so those timings cannot establish regression guards,
+speedups or a production retention decision. File sizes, physical boundaries and
+correctness checks retain their stated meanings. Performance acceptance awaits a
+quiet or isolated rerun. Snappy remains the existing production default.
 
 ## Try it yourself
 

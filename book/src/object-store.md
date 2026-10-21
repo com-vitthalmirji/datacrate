@@ -507,3 +507,19 @@ is already visible. Relative filenames synchronize `.`. This fixes local ownersh
 and error classification. Remote completion uses the separate identity-bound
 protocol described above. See [failure paths and resource control](datafusion.md) for
 runnable local failure and ownership tests.
+
+## Regression evidence observes the boundary
+
+Earlier callback-error tests checked returned errors and preserved output, with a
+watchdog for hangs. A controlled count-channel regression now waits for the callback,
+proves `try_send` reports a full channel, and exposes a pending send before allowing
+the callback to fail. Capacities zero and one both release that send when the consumer
+receiver is destroyed. Retaining the receiver deliberately makes the regression fail.
+This observes saturation and ownership; it does not inspect a standard-library thread's
+internal blocked instruction.
+
+A separate observed writer receives a large, physically valid Arrow batch with a renamed
+contract field. Validation rejects it before any bytes beyond initial Parquet magic reach
+the output. Moving the check after encoding makes that test fail. The digest accepts only
+the private checked batch, so callers cannot independently attach a stale validation tag.
+These checks establish execution boundaries more directly than output preservation alone.
