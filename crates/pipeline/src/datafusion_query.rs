@@ -790,9 +790,9 @@ pub async fn multi_predicate_query_dataframe(
 ///
 /// Trade-off named explicitly (DDIA ch04/ch07 lens): this provider
 /// materializes every batch up front and keeps them all resident for the
-/// table's lifetime - the same choice `register_orders` makes for Parquet
-/// via `fixture_to_orders_batch`. That's the right trade for this crate's
-/// fixture-sized data; a provider over a table larger than memory would need
+/// table's lifetime. `fixture_to_orders_batch` materializes the fixture, but
+/// `register_orders` itself registers a lazy Parquet source rather than
+/// collecting its rows. A memory provider over a table larger than memory would need
 /// to replace the `Vec<RecordBatch>` field with a chunked/streaming scan
 /// instead, at the cost of a more complex `scan()`.
 #[cfg(test)]
@@ -1287,28 +1287,10 @@ impl datafusion::logical_expr::async_udf::AsyncScalarUDFImpl for RegionMultiplie
     }
 }
 
-/// A custom [`OptimizerRule`], the sixth extension point this file proves
-/// end-to-end: a logical-plan rewrite that caps every top-level result set
-/// at `max_rows`, the way a platform team would guard a shared SQL endpoint
-/// against an accidental unbounded scan. Unlike the generic simplifications
-/// already built into `datafusion-optimizer` (e.g. duplicate-predicate or
-/// dead-filter elimination), this rule encodes a decision no generic rule
-/// could know - the right cap for *this* deployment - so it genuinely needs
-/// to be a custom rule rather than a request to change upstream.
-///
-/// DDIA lens: this is a deliberate reliability/correctness trade-off, not a
-/// free win. It buys protection against unbounded-scan resource exhaustion
-/// at the cost of silently truncating a legitimate large result instead of
-/// erroring. A production version of this guardrail would surface the cap
-/// back to the caller (a warning, a response header); this demo proves only
-/// the rewrite itself, not that follow-up.
-///
-/// Software Design Depth Doctrine lens ("define errors out of existence"):
-/// without this rule, "forgetting a LIMIT" is a runtime risk every query
-/// author must remember to avoid. With it registered, that risk is removed
-/// from the plan shape itself - every top-level plan that reaches execution
-/// already has an acceptable `fetch`, so there is no separate missing-limit
-/// error path to write or forget.
+/// A test-only output policy that caps a top-level result at `max_rows`.
+/// It may silently truncate a legitimate result. A scan, global sort or
+/// aggregate can still do substantial upstream work before yielding those
+/// rows; a result cap is not a resource-exhaustion boundary.
 ///
 /// Grokking Simplicity lens: [`OptimizerRule::rewrite`] is a Calculation -
 /// same [`LogicalPlan`] in, same [`Transformed<LogicalPlan>`] out, no I/O,
@@ -1324,8 +1306,13 @@ struct MaxRowsGuardrail {
 
 #[cfg(test)]
 impl MaxRowsGuardrail {
-    fn new(max_rows: i64) -> Self {
-        Self { max_rows }
+    fn new(max_rows: i64) -> Result<Self, DataFusionError> {
+        if max_rows < 0 {
+            return Err(DataFusionError::Configuration(
+                "result cap must be nonnegative".to_owned(),
+            ));
+        }
+        Ok(Self { max_rows })
     }
 }
 
@@ -2281,10 +2268,132 @@ mod tests {
         }
     }
 
+    #[test]
+    fn result_cap_rejects_negative_configuration() {
+        assert!(MaxRowsGuardrail::new(-1).is_err());
+    }
+
+    #[tokio::test]
+    async fn result_cap_rewrite_is_stable_on_repeated_application() {
+        use datafusion::optimizer::optimizer::OptimizerContext;
+        let (ctx, _parquet) = context_over_fixture().await;
+        let rule = MaxRowsGuardrail::new(5).expect("cap");
+        let config = OptimizerContext::new();
+        for sql in [
+            "SELECT id FROM orders ORDER BY id",
+            "SELECT id FROM orders ORDER BY id LIMIT 2 OFFSET 1",
+            "SELECT id FROM orders ORDER BY id LIMIT 99 OFFSET 2",
+        ] {
+            let plan = ctx.sql(sql).await.expect("query").into_unoptimized_plan();
+            let first = rule.rewrite(plan, &config).expect("first rewrite").data;
+            let second = rule
+                .rewrite(first.clone(), &config)
+                .expect("second rewrite");
+            assert!(!second.transformed);
+            assert_eq!(second.data, first);
+        }
+    }
+
+    #[tokio::test]
+    async fn result_cap_preserves_offsets_lower_limits_and_zero() {
+        for (cap, sql, expected) in [
+            (
+                5,
+                "SELECT id FROM orders ORDER BY id LIMIT 2 OFFSET 2",
+                vec![3, 4],
+            ),
+            (
+                5,
+                "SELECT id FROM orders ORDER BY id LIMIT 99 OFFSET 2",
+                vec![3, 4, 5, 6, 7],
+            ),
+            (
+                5,
+                "SELECT id FROM orders ORDER BY id OFFSET 2",
+                vec![3, 4, 5, 6, 7],
+            ),
+            (0, "SELECT id FROM orders ORDER BY id", vec![]),
+            (
+                i64::MAX,
+                "SELECT id FROM orders ORDER BY id LIMIT 2",
+                vec![1, 2],
+            ),
+        ] {
+            let (ctx, _parquet) = context_over_fixture().await;
+            ctx.add_optimizer_rule(Arc::new(MaxRowsGuardrail::new(cap).expect("valid cap")));
+            let batches = ctx
+                .sql(sql)
+                .await
+                .expect("plan")
+                .collect()
+                .await
+                .expect("query");
+            let ids: Vec<i64> = batches
+                .iter()
+                .flat_map(|batch| {
+                    batch
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<Int64Array>()
+                        .expect("ids")
+                        .values()
+                        .to_vec()
+                })
+                .collect();
+            assert_eq!(ids, expected, "{sql} with cap {cap}");
+        }
+    }
+
+    #[tokio::test]
+    async fn volatile_lookup_preserves_repeated_keys_and_changing_responses() {
+        use std::sync::atomic::{AtomicI64, Ordering};
+        let ctx = SessionContext::new();
+        let calls = Arc::new(AtomicI64::new(0));
+        let observed = Arc::clone(&calls);
+        let lookup = create_udf(
+            "changing_lookup",
+            vec![DataType::Int64],
+            DataType::Int64,
+            Volatility::Volatile,
+            Arc::new(move |args| {
+                let arrays = ColumnarValue::values_to_arrays(args)?;
+                let ids = arrays[0]
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .expect("test signature");
+                let responses: Int64Array = ids
+                    .iter()
+                    .map(|id| id.map(|_| observed.fetch_add(1, Ordering::SeqCst) + 1))
+                    .collect();
+                Ok(ColumnarValue::Array(Arc::new(responses)))
+            }),
+        );
+        ctx.register_udf(lookup);
+        for expected in [vec![1, 2, 3], vec![4, 5, 6]] {
+            let batches = ctx.sql("SELECT changing_lookup(id) AS response FROM (VALUES (7), (7), (7)) AS repeated(id)")
+                .await.expect("plan").collect().await.expect("volatile lookup");
+            let mut actual: Vec<i64> = batches
+                .iter()
+                .flat_map(|batch| {
+                    batch
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<Int64Array>()
+                        .expect("responses")
+                        .values()
+                        .to_vec()
+                })
+                .collect();
+            actual.sort_unstable();
+            assert_eq!(actual, expected);
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 6);
+    }
+
     #[tokio::test]
     async fn optimizer_rule_max_rows_guardrail_caps_but_does_not_override_smaller_limit() {
         let (ctx, _parquet) = context_over_fixture().await;
-        ctx.add_optimizer_rule(Arc::new(MaxRowsGuardrail::new(5)));
+        ctx.add_optimizer_rule(Arc::new(MaxRowsGuardrail::new(5).expect("valid cap")));
 
         let uncapped = ctx
             .sql("SELECT id FROM orders ORDER BY id")
