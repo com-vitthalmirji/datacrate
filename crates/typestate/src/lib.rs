@@ -8,6 +8,9 @@
 
 #![warn(missing_docs)]
 
+/// Automatic declared-contract checks and streaming runtime validation.
+pub mod contract_pipeline;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 

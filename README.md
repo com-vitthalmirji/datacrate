@@ -26,11 +26,13 @@ core pipeline runs natively in Rust; Comet operates within Spark's JVM runtime.
 
 ### Where the guarantees apply
 
-- **Contracts** compare Rust declarations when an explicit `SchemaConforms::CHECK`
-  or `contracts::enforce` check is evaluated during a build. The optional Arrow
-  adapter maps supported declarations to physical schemas.
-- **Typestate** makes source, transform and sink configuration a compile-time
-  requirement. Callback errors remain explicit runtime results.
+- **Contracts** compare Rust declarations when an explicit check or typed
+  stage connection is instantiated by `cargo build`. The opt-in Arrow validator
+  checks actual batches against supported physical schemas.
+- **Typed pipeline** automatically checks every declared source, transform and
+  sink connection during a build, then validates source and transform batches
+  before downstream callbacks. The existing builders still enforce their own
+  stage-presence rules; callback failures remain runtime results.
 - **Ingest validation** checks actual callback output against the current fixed
   `id`, `name`, nullable `note` schema before accepting it at the pipeline boundary.
 
@@ -113,7 +115,7 @@ branching, and the pull request process.
 For the precise boundaries and migration steps, see:
 
 - [Contract checks, Arrow mapping and the 0.2 reference migration](book/src/contracts.md)
-- [Callback errors and fixed-ingest validation](book/src/typestate.md)
+- [Typed stage contracts, callback errors and fixed-ingest validation](book/src/typestate.md)
 - [Memory, cancellation and local publication](book/src/datafusion.md)
 - [Captured object reads and remote publication](book/src/object-store.md)
 - [Dependency audit policy and recorded exceptions](docs/adr/0009-supply-chain-policy-gate.md)

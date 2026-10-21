@@ -1,0 +1,5 @@
+error[E0599]: no method named `build` found for struct `ContractPipeline<'a, C>` in the current scope
+ --> tests/contract_compile_fail/missing_sink.rs:8:56
+  |
+8 | fn main(){let _=ContractPipeline::source::<A,_>(input).build();}
+  |                                                        ^^^^^ method not found in `ContractPipeline<'_, A>`

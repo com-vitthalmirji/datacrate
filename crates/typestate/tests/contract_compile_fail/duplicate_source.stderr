@@ -1,0 +1,13 @@
+error[E0599]: no method named `source` found for struct `ContractPipeline<'_, A>` in the current scope
+ --> tests/contract_compile_fail/duplicate_source.rs:8:56
+  |
+8 | fn main(){let _=ContractPipeline::source::<A,_>(input).source::<A,_>(input);}
+  |                                                        ^^^^^^ this is an associated function, not a method
+  |
+  = note: found the following associated functions; to be used as methods, functions must have a `self` parameter
+  = note: the candidate is defined in an impl for the type `ContractPipeline<'static, ()>`
+help: use associated function syntax instead
+  |
+8 - fn main(){let _=ContractPipeline::source::<A,_>(input).source::<A,_>(input);}
+8 + fn main(){let _=ContractPipeline::<'static, ()>::source(input);}
+  |

@@ -1,0 +1,15 @@
+error[E0599]: no associated function or constant named `new` found for struct `ContractPipeline<'a, C>` in the current scope
+ --> tests/contract_compile_fail/missing_source.rs:8:35
+  |
+8 | fn main(){let _=ContractPipeline::new().sink::<A>(|_|Ok(())).build();}
+  |                                   ^^^ associated function or constant not found in `ContractPipeline<'_, _>`
+  |
+note: if you're trying to build a new `ContractPipeline<'_, _>`, consider using `ContractPipeline::<'static, ()>::source` which returns `ContractPipeline<'_, _>`
+ --> src/contract_pipeline.rs
+  |
+  | /     pub fn source<'a, C: Contract, I>(
+  | |         factory: impl FnOnce() -> Result<I, CallbackError> + 'a,
+  | |     ) -> ContractPipeline<'a, C>
+  | |     where
+  | |         I: Iterator<Item = Result<RecordBatch, CallbackError>> + 'a,
+  | |____________________________________________________________________^

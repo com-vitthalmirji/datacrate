@@ -1,5 +1,48 @@
 # Typestate pipeline builder
 
+## Automatic contracts between typed stages
+
+The new `typestate::contract_pipeline::ContractPipeline` carries the declared
+output of a fallible Arrow source through any number of transforms to a sink.
+Each transform declares the input it expects and the output it promises.
+Attaching a transform or sink automatically enforces `ExactOrdered` against the
+preceding output. A mismatch fails `cargo build` when the call is instantiated;
+the caller writes no separate `CHECK`. Distinct Rust structs with the same
+ordered shape are compatible. Renaming, reordering, casts and defaults are not
+performed.
+
+```rust,ignore
+let pipeline = ContractPipeline::source::<Raw, _>(read_batches)
+    .transform::<Raw, Clean>(clean_batch)
+    .sink::<Clean>(write_batch)
+    .build()?;
+let report = pipeline.run()?;
+```
+
+`read_batches` is a factory returning a fallible iterator of `RecordBatch` values.
+It opens once in `run`, after `build` has checked every declared Arrow mapping.
+Each source batch and transform output is checked against its physical schema and
+active required values before the next callback. An opaque callback may still
+return an invalid batch or fail during execution. Errors carry the stage, input
+batch index and original source. A later failure leaves earlier sink effects in
+place; callers needing atomic publication must provide it at the sink boundary.
+The builder reads one input batch at a time and does not collect the iterator.
+Callback owned buffers and downstream engines have their own memory behavior.
+
+The source is mandatory, a sink is terminal, and `build` is available only after
+the sink. Zero or more transforms are allowed. `ExactOrdered` is the executor's
+current policy; other declaration policies remain available through standalone
+`contracts` checks. This API does not infer SQL or callback semantics, and it
+does not change the legacy local and remote builders described below.
+
+Run the [complete example](../../crates/typestate/examples/contract_pipeline.rs)
+with `cargo run -p typestate --example contract_pipeline`. The
+`contract_compilation` fixtures build compatible chains and require incompatible
+connections to fail; `contract_pipeline` tests cover runtime validation and
+failure behavior.
+
+## Existing local and remote builders
+
 `crates/typestate` builds a pipeline (source → transform → sink) where an
 incomplete pipeline fails to *compile*, not to *run*. There's no `unwrap()`
 or `Result` check guarding against a missing stage - if you forget one,
@@ -170,9 +213,9 @@ its transformed output before writing and digesting it. Both use the fixed inges
 Earlier, the local builder could return an arbitrary schema from a callback. It now
 requires the fixed ingest schema after both callbacks. Schema-changing projections,
 renames and aggregations that previously worked locally are therefore rejected.
-This is an intentional restriction of this builder; the general Contract-to-Arrow
-schema adapter does not broaden its accepted output. Use the query APIs for results
-with a different schema, or define a separate validated pipeline boundary.
+This is an intentional restriction of this builder; the new typed pipeline above
+supports declared schema-changing stages. The query APIs also support results
+with different schemas.
 
 A callback can still perform external actions or panic. A later error cannot undo those
 actions, and the local final callback is not a transactional storage sink.

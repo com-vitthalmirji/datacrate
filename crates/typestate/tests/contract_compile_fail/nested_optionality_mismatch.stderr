@@ -1,0 +1,36 @@
+error[E0080]: evaluation panicked: producer schema does not conform to the contract: mismatch `items.[]` (expected `i64`, found `Optional`)
+ --> $CARGO/const_panic-$VERSION/src/macros.rs
+  |
+  |               (|args| $crate::concat_panic(args))
+  |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `contracts::SchemaConforms::<main::P, main::C, contracts::ExactOrdered>::CHECK` failed here
+  |
+ ::: $WORKSPACE/crates/contracts/src/lib.rs
+  |
+  | /             const_panic::concat_panic!(
+  | |                 const_panic::FmtArg::DISPLAY;
+  | |                 "producer schema does not conform to the contract: ",
+  | |                 diff_lead_sep(&diffs, 0),
+... |
+  | |                 expected_close(&diffs, 7)
+  | |             );
+  | |_____________- in this macro invocation
+  |
+  = note: this error originates in the macro `const_panic::concat_panic` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+note: erroneous constant encountered
+ --> $WORKSPACE/crates/contracts/src/lib.rs
+  |
+  |     const { SchemaConforms::<P, C, M>::CHECK };
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+ --> $WORKSPACE/crates/contracts/src/lib.rs
+  |
+  |     const { SchemaConforms::<P, C, M>::CHECK };
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+note: the above error was encountered while instantiating `fn enforce::<P, C, contracts::ExactOrdered>`
+ --> src/contract_pipeline.rs
+  |
+  |         contracts::enforce::<C, I, ExactOrdered>();
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
