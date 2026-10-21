@@ -1267,9 +1267,12 @@ version = "0.1.0"
 dependencies = [
  "contracts",
  "datafusion",
+ "parquet",
+ "pipeline",
  "proc-macro2",
  "quote",
  "syn 3.0.6",
+ "tempfile",
  "tokio",
  "trybuild",
 ]
@@ -6325,6 +6328,7 @@ version = "0.1.0"
 dependencies = [
  "arrow 59.3.0",
  "contracts",
+ "datafusion",
  "object_store",
  "pipeline",
  "tokio",

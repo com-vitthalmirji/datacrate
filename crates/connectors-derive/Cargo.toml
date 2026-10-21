@@ -19,5 +19,8 @@ syn = { version = "3", features = ["full"] }
 [dev-dependencies]
 contracts = { version = "0.2.0", path = "../contracts", features = ["arrow"] }
 datafusion = "55.1.0"
+parquet = { version = "59.3.0", default-features = false, features = ["snap"] }
+pipeline = { version = "0.1.0", path = "../pipeline" }
+tempfile = "3.27.0"
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros"] }
 trybuild = "1"
