@@ -2,7 +2,8 @@
 
 ## Status
 
-Proposed - 21 October 2026. Design for review; not implemented.
+Accepted - 21 October 2026. Implemented in the additive typed pipeline; CI
+verification remains a merge gate.
 
 ## Context
 
@@ -46,12 +47,12 @@ opaque batches with phantom tags alone would not validate returned data.
 Recommend option 2. It adds a separate API surface in exchange for preserving the
 existing APIs and making Arrow-stage declarations explicit.
 
-## Proposed API and execution
+## API and execution
 
-The API sketch names the intended operations; final generic spelling is implementation detail:
+The implemented builder uses these operations:
 
 ```rust,ignore
-let pipeline = ContractPipeline::source::<Bronze>(read_batches)
+let pipeline = ContractPipeline::source::<Bronze, _>(read_batches)
     .transform::<BronzeInput, Silver>(clean)
     .transform::<SilverInput, Gold>(aggregate)
     .sink::<GoldInput>(write_batch)

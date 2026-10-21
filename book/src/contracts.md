@@ -110,9 +110,10 @@ without weakening every other policy's guarantees.
 
 `contracts` uses `contracts-derive` and const diagnostic helpers; the derive
 uses `syn`/`quote`/`proc-macro2`. The default build has no Arrow or execution
-engine dependency. The optional `arrow` feature adds only `arrow-schema`. `TypeShape` comes straight from a struct's own
-field types, so the same contract check works regardless of what (if
-anything) later reads that struct's data.
+engine dependency. The optional `arrow` feature adds only `arrow-schema`;
+`arrow-validation` also adds `arrow-array` to validate batches. `TypeShape`
+comes straight from a struct's own field types, so the same contract check
+works regardless of what later reads that struct's data.
 
 ## Two real bugs a review pass found
 
@@ -248,3 +249,26 @@ map-key uniqueness, offset capacity, external data or business rules. The produc
 pipeline retains its fixed-ingest validator and private checked-batch evidence,
 which check actual callback output before writing and hashing. The adapter supplies
 physical schemas; it does not replace those runtime checks.
+
+## Validating actual Arrow batches
+
+Earlier, the optional `arrow` feature stopped after constructing a schema. Enable
+`arrow-validation` when a stage must check real batches against a supported
+contract:
+
+```rust,ignore
+let validator = contracts::arrow::BatchValidator::new::<MyContract>()?;
+validator.validate(&batch)?;
+```
+
+Preparation returns a typed `MappingError` for unsupported declarations. Validation
+compares physical field names, order, types and nullability, ignoring metadata. It
+then checks active required values in root columns, structs, lists and maps. A null
+nullable parent masks its children, and sliced collections use their visible
+offsets. A failure returns `BatchValidationError`; the validator neither retains
+nor copies the input batch. Safe Arrow constructors already reject many malformed
+required-null arrays before validation can inspect them.
+
+`BatchValidator` does not check domain rules, uniqueness of map keys or
+transactional behavior. The typed pipeline uses this same validator at every
+source and transform output boundary; legacy fixed-ingest checks remain separate.

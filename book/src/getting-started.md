@@ -17,11 +17,13 @@ core pipeline runs natively in Rust; Comet operates within Spark's JVM runtime.
 
 ### Where the guarantees apply
 
-- **Contracts** compare Rust declarations when an explicit `SchemaConforms::CHECK`
-  or `contracts::enforce` check is evaluated during a build. The optional Arrow
-  adapter maps supported declarations to physical schemas.
-- **Typestate** makes source, transform and sink configuration a compile-time
-  requirement. Callback errors remain explicit runtime results.
+- **Contracts** compare Rust declarations when an explicit check or typed
+  stage connection is instantiated by `cargo build`. The opt-in Arrow validator
+  checks actual batches against supported physical schemas.
+- **Typed pipeline** automatically checks every declared source, transform and
+  sink connection during a build, then validates source and transform batches
+  before downstream callbacks. The existing builders still enforce their own
+  stage-presence rules; callback failures remain runtime results.
 - **Ingest validation** checks actual callback output against the current fixed
   `id`, `name`, nullable `note` schema before accepting it at the pipeline boundary.
 
@@ -54,9 +56,8 @@ fixtures/         deterministic test data, committed
 ```
 
 The directory tree above shows where the code lives, not which crates
-actually depend on which. The real dependency graph is much sparser - only
-two workspace crates have a path dependency on another workspace crate at
-all:
+actually depend on which. Two workspace crates have path dependencies on
+other workspace crates, across three edges:
 
 ```mermaid
 flowchart LR
@@ -65,6 +66,7 @@ flowchart LR
     pipeline
     rusty-ready
     typestate -->|path dependency| pipeline
+    typestate -->|path dependency| contracts
     contracts -->|path dependency| contracts-derive
 ```
 
