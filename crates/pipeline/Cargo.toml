@@ -112,3 +112,9 @@ required-features = ["duckdb"]
 # crate's synchronous test code; no new transitive dependency beyond
 # testcontainers's own core (Docker CLI/API, not aws-sdk-s3).
 testcontainers = { version = "0.28", features = ["blocking"] }
+# For tests/ballista_distributed_query.rs: registers a derived connector's
+# batches on a real distributed SessionContext. connectors-derive's own
+# dev-dependencies already depend on pipeline, so this is a dev-dependency
+# cycle; Cargo supports that for test builds.
+connectors-derive = { path = "../connectors-derive" }
+contracts = { path = "../contracts", features = ["arrow"] }

@@ -13,6 +13,8 @@ mod publication;
 mod staging;
 pub use batch_contract::{BatchViolation, validate_ingest_batch};
 
+#[cfg(feature = "ballista")]
+pub mod ballista_app;
 pub mod bounded;
 pub mod datafusion_query;
 pub mod manifest;
