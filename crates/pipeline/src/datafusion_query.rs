@@ -849,7 +849,11 @@ pub struct OrdersMemoryExec {
 }
 
 impl OrdersMemoryExec {
-    pub fn new(batches: Vec<RecordBatch>, schema: SchemaRef, projection: Option<Vec<usize>>) -> Self {
+    pub fn new(
+        batches: Vec<RecordBatch>,
+        schema: SchemaRef,
+        projection: Option<Vec<usize>>,
+    ) -> Self {
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(Arc::clone(&schema)),
             Partitioning::UnknownPartitioning(1),
@@ -923,13 +927,13 @@ impl ExecutionPlan for OrdersMemoryExec {
     }
 }
 
-/// A hand-rolled [`AggregateUDF`] - `amount_range(amount)` returns
+/// A hand-rolled `AggregateUDF` - `amount_range(amount)` returns
 /// `MAX(amount) - MIN(amount)` over `orders.amount` - proving the
 /// multi-phase accumulator mechanism (`update_batch`/`state`/`merge_batch`)
 /// rather than asserting it from the docs. Deliberately tracks two running
-/// values (min and max), not one, so [`AmountRangeUdf::state_fields`] has to
-/// override the trait's one-field default and [`AmountRangeAccumulator::state`]/
-/// [`AmountRangeAccumulator::merge_batch`] exercise the actual partial-state
+/// values (min and max), not one, so `AmountRangeUdf::state_fields` has to
+/// override the trait's one-field default and `AmountRangeAccumulator::state`/
+/// `AmountRangeAccumulator::merge_batch` exercise the actual partial-state
 /// combine DataFusion uses for parallel partitions - a single-value
 /// accumulator (e.g. a custom SUM) would never need to.
 ///
@@ -997,7 +1001,7 @@ impl datafusion::logical_expr::AggregateUDFImpl for AmountRangeUdf {
     }
 }
 
-/// [`AmountRangeUdf::accumulator`]'s per-group running state: the smallest
+/// `AmountRangeUdf::accumulator`'s per-group running state: the smallest
 /// and largest unscaled `i128` seen so far (matching `Decimal128(10, 2)`'s
 /// representation), `None` until the first non-null value arrives.
 #[derive(Debug, Default)]
@@ -1067,7 +1071,7 @@ impl datafusion::logical_expr::Accumulator for AmountRangeAccumulator {
 /// Software Design Depth Doctrine lens: a window function's one piece of
 /// hidden complexity that a `ScalarUDF` cannot hide is that its result for
 /// one row depends on every other row in the same partition.
-/// [`PercentOfTotalEvaluator::evaluate_all`] is where that dependency is
+/// `PercentOfTotalEvaluator::evaluate_all` is where that dependency is
 /// absorbed - it reads the whole `values` array once, sums it, then maps
 /// every row against that single sum. The caller never sees this; the SQL
 /// reads like calling any built-in window function.
@@ -1124,7 +1128,7 @@ impl datafusion::logical_expr::WindowUDFImpl for PercentOfTotalUdf {
     }
 }
 
-/// [`PercentOfTotalUdf::partition_evaluator`]'s implementation.
+/// `PercentOfTotalUdf::partition_evaluator`'s implementation.
 ///
 /// Grokking Simplicity lens: `evaluate_all` is a Calculation - same
 /// `values`/`num_rows` in, same `ArrayRef` out, no state carried between
@@ -1163,7 +1167,7 @@ impl datafusion::logical_expr::PartitionEvaluator for PercentOfTotalEvaluator {
 /// the case where producing a result genuinely requires awaiting something
 /// (a remote lookup, a cache, another service) rather than pure CPU work.
 ///
-/// Software Design Depth Doctrine lens: [`ScalarUDFImpl::invoke_with_args`]
+/// Software Design Depth Doctrine lens: `ScalarUDFImpl::invoke_with_args`
 /// (the sync path, used by `days_since_epoch_udf`) and
 /// `AsyncScalarUDFImpl::invoke_async_with_args` have the same shape - same
 /// `ScalarFunctionArgs` in, same `ColumnarValue` out. The interface hides
@@ -1175,7 +1179,7 @@ impl datafusion::logical_expr::PartitionEvaluator for PercentOfTotalEvaluator {
 /// know which path it took.
 ///
 /// DDIA lens: this models an external dependency the way a remote
-/// pricing-tier lookup would work - [`RegionMultiplierUdf::lookup`] is a
+/// pricing-tier lookup would work - `RegionMultiplierUdf::lookup` is a
 /// fixed, in-memory stand-in, not a real network call. What *is* proven
 /// here is the shape (await a lookup keyed by row, return the same
 /// `ColumnarValue` contract as a sync UDF); real network latency,
