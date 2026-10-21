@@ -18,32 +18,22 @@ use std::sync::Arc;
 use arrow::array::{
     Array, Decimal128Array, Int64Array, RecordBatch, StringArray, TimestampMicrosecondArray,
 };
-#[cfg(test)]
 use arrow::array::{ArrayRef, Float64Array};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use chrono::NaiveDateTime;
-#[cfg(test)]
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::common::ScalarValue;
-#[cfg(test)]
 use datafusion::common::tree_node::{Transformed, TreeNodeRecursion};
 use datafusion::error::DataFusionError;
-#[cfg(test)]
 use datafusion::execution::TaskContext;
 use datafusion::execution::memory_pool::{FairSpillPool, TrackConsumersPool};
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::logical_expr::{ColumnarValue, JoinType, Volatility, col, create_udf};
-#[cfg(test)]
 use datafusion::logical_expr::{Expr, Limit, LogicalPlan, TableType};
-#[cfg(test)]
 use datafusion::optimizer::{OptimizerConfig, OptimizerRule};
-#[cfg(test)]
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
-#[cfg(test)]
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-#[cfg(test)]
 use datafusion::physical_plan::memory::MemoryStream;
-#[cfg(test)]
 use datafusion::physical_plan::{
     ChildrenPropertiesMode, DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning,
     PlanProperties, ReplaceChildrenOptions, SendableRecordBatchStream,
@@ -795,16 +785,14 @@ pub async fn multi_predicate_query_dataframe(
 /// collecting its rows. A memory provider over a table larger than memory would need
 /// to replace the `Vec<RecordBatch>` field with a chunked/streaming scan
 /// instead, at the cost of a more complex `scan()`.
-#[cfg(test)]
 #[derive(Debug)]
-struct OrdersMemoryTableProvider {
+pub struct OrdersMemoryTableProvider {
     schema: SchemaRef,
     batches: Vec<RecordBatch>,
 }
 
-#[cfg(test)]
 impl OrdersMemoryTableProvider {
-    fn new(batches: Vec<RecordBatch>) -> Self {
+    pub fn new(batches: Vec<RecordBatch>) -> Self {
         Self {
             schema: orders_schema(),
             batches,
@@ -812,7 +800,6 @@ impl OrdersMemoryTableProvider {
     }
 }
 
-#[cfg(test)]
 #[async_trait::async_trait]
 impl TableProvider for OrdersMemoryTableProvider {
     fn schema(&self) -> SchemaRef {
@@ -853,18 +840,16 @@ impl TableProvider for OrdersMemoryTableProvider {
 /// own `MemTable` uses, reused here rather than hand-rolled (Ousterhout:
 /// define errors/special cases out of existence by reusing a mechanism
 /// DataFusion already validated).
-#[cfg(test)]
 #[derive(Debug)]
-struct OrdersMemoryExec {
+pub struct OrdersMemoryExec {
     batches: Vec<RecordBatch>,
     schema: SchemaRef,
     projection: Option<Vec<usize>>,
     properties: Arc<PlanProperties>,
 }
 
-#[cfg(test)]
 impl OrdersMemoryExec {
-    fn new(batches: Vec<RecordBatch>, schema: SchemaRef, projection: Option<Vec<usize>>) -> Self {
+    pub fn new(batches: Vec<RecordBatch>, schema: SchemaRef, projection: Option<Vec<usize>>) -> Self {
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(Arc::clone(&schema)),
             Partitioning::UnknownPartitioning(1),
@@ -880,14 +865,12 @@ impl OrdersMemoryExec {
     }
 }
 
-#[cfg(test)]
 impl DisplayAs for OrdersMemoryExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "OrdersMemoryExec: partitions=1")
     }
 }
 
-#[cfg(test)]
 impl ExecutionPlan for OrdersMemoryExec {
     fn name(&self) -> &'static str {
         "OrdersMemoryExec"
@@ -958,15 +941,13 @@ impl ExecutionPlan for OrdersMemoryExec {
 /// reads the data back out without consuming it, closer to a Calculation
 /// despite the `&mut self` the trait signature requires for internal
 /// buffer reuse.
-#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct AmountRangeUdf {
+pub struct AmountRangeUdf {
     signature: datafusion::logical_expr::Signature,
 }
 
-#[cfg(test)]
 impl AmountRangeUdf {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             signature: datafusion::logical_expr::Signature::exact(
                 vec![DataType::Decimal128(10, 2)],
@@ -976,7 +957,6 @@ impl AmountRangeUdf {
     }
 }
 
-#[cfg(test)]
 impl datafusion::logical_expr::AggregateUDFImpl for AmountRangeUdf {
     fn name(&self) -> &str {
         "amount_range"
@@ -1020,14 +1000,12 @@ impl datafusion::logical_expr::AggregateUDFImpl for AmountRangeUdf {
 /// [`AmountRangeUdf::accumulator`]'s per-group running state: the smallest
 /// and largest unscaled `i128` seen so far (matching `Decimal128(10, 2)`'s
 /// representation), `None` until the first non-null value arrives.
-#[cfg(test)]
 #[derive(Debug, Default)]
-struct AmountRangeAccumulator {
+pub struct AmountRangeAccumulator {
     min: Option<i128>,
     max: Option<i128>,
 }
 
-#[cfg(test)]
 impl datafusion::logical_expr::Accumulator for AmountRangeAccumulator {
     fn update_batch(&mut self, values: &[ArrayRef]) -> Result<(), DataFusionError> {
         let amounts = values[0]
@@ -1102,15 +1080,13 @@ impl datafusion::logical_expr::Accumulator for AmountRangeAccumulator {
 /// for this file's 8-row fixture; a partition too large to fit in memory
 /// would need the row-at-a-time `evaluate` + window-frame path instead -
 /// not proven here, since nothing in this fixture forces that choice.
-#[cfg(test)]
 #[derive(Debug, PartialEq, Eq, Hash)]
-struct PercentOfTotalUdf {
+pub struct PercentOfTotalUdf {
     signature: datafusion::logical_expr::Signature,
 }
 
-#[cfg(test)]
 impl PercentOfTotalUdf {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             signature: datafusion::logical_expr::Signature::exact(
                 vec![DataType::Decimal128(10, 2)],
@@ -1120,7 +1096,6 @@ impl PercentOfTotalUdf {
     }
 }
 
-#[cfg(test)]
 impl datafusion::logical_expr::WindowUDFImpl for PercentOfTotalUdf {
     fn name(&self) -> &str {
         "percent_of_total"
@@ -1155,11 +1130,9 @@ impl datafusion::logical_expr::WindowUDFImpl for PercentOfTotalUdf {
 /// `values`/`num_rows` in, same `ArrayRef` out, no state carried between
 /// calls - unlike [`AmountRangeAccumulator`]'s `update_batch`/`merge_batch`,
 /// which are Actions precisely because they accumulate across calls.
-#[cfg(test)]
 #[derive(Debug)]
-struct PercentOfTotalEvaluator;
+pub struct PercentOfTotalEvaluator;
 
-#[cfg(test)]
 impl datafusion::logical_expr::PartitionEvaluator for PercentOfTotalEvaluator {
     fn evaluate_all(
         &mut self,
@@ -1208,15 +1181,13 @@ impl datafusion::logical_expr::PartitionEvaluator for PercentOfTotalEvaluator {
 /// `ColumnarValue` contract as a sync UDF); real network latency,
 /// timeouts, or partial failure are not exercised by this fixture and are
 /// not claimed as demonstrated.
-#[cfg(test)]
 #[derive(Debug, PartialEq, Eq, Hash)]
-struct RegionMultiplierUdf {
+pub struct RegionMultiplierUdf {
     signature: datafusion::logical_expr::Signature,
 }
 
-#[cfg(test)]
 impl RegionMultiplierUdf {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             signature: datafusion::logical_expr::Signature::exact(
                 vec![DataType::Int64],
@@ -1237,7 +1208,6 @@ impl RegionMultiplierUdf {
     }
 }
 
-#[cfg(test)]
 impl datafusion::logical_expr::ScalarUDFImpl for RegionMultiplierUdf {
     fn name(&self) -> &str {
         "region_multiplier"
@@ -1263,7 +1233,6 @@ impl datafusion::logical_expr::ScalarUDFImpl for RegionMultiplierUdf {
     }
 }
 
-#[cfg(test)]
 #[async_trait::async_trait]
 impl datafusion::logical_expr::async_udf::AsyncScalarUDFImpl for RegionMultiplierUdf {
     async fn invoke_async_with_args(
@@ -1298,15 +1267,13 @@ impl datafusion::logical_expr::async_udf::AsyncScalarUDFImpl for RegionMultiplie
 /// `SessionContext::add_optimizer_rule` (an Action, called once at setup) is
 /// what wires this pure rewrite into the optimizer's call sequence; the SQL
 /// call site that triggers it never has to know the rule exists.
-#[cfg(test)]
 #[derive(Debug)]
-struct MaxRowsGuardrail {
+pub struct MaxRowsGuardrail {
     max_rows: i64,
 }
 
-#[cfg(test)]
 impl MaxRowsGuardrail {
-    fn new(max_rows: i64) -> Result<Self, DataFusionError> {
+    pub fn new(max_rows: i64) -> Result<Self, DataFusionError> {
         if max_rows < 0 {
             return Err(DataFusionError::Configuration(
                 "result cap must be nonnegative".to_owned(),
@@ -1316,7 +1283,6 @@ impl MaxRowsGuardrail {
     }
 }
 
-#[cfg(test)]
 impl OptimizerRule for MaxRowsGuardrail {
     fn name(&self) -> &str {
         "max_rows_guardrail"
