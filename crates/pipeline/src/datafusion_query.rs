@@ -965,6 +965,12 @@ impl AmountRangeUdf {
     }
 }
 
+impl Default for AmountRangeUdf {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl datafusion::logical_expr::AggregateUDFImpl for AmountRangeUdf {
     fn name(&self) -> &str {
         "amount_range"
@@ -1105,6 +1111,12 @@ impl PercentOfTotalUdf {
     }
 }
 
+impl Default for PercentOfTotalUdf {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl datafusion::logical_expr::WindowUDFImpl for PercentOfTotalUdf {
     fn name(&self) -> &str {
         "percent_of_total"
@@ -1218,6 +1230,12 @@ impl RegionMultiplierUdf {
     }
 }
 
+impl Default for RegionMultiplierUdf {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl datafusion::logical_expr::ScalarUDFImpl for RegionMultiplierUdf {
     fn name(&self) -> &str {
         "region_multiplier"
@@ -1284,6 +1302,10 @@ pub struct MaxRowsGuardrail {
 
 impl MaxRowsGuardrail {
     /// Builds the rule, rejecting a negative `max_rows` cap.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`DataFusionError::Configuration`] if `max_rows` is negative.
     pub fn new(max_rows: i64) -> Result<Self, DataFusionError> {
         if max_rows < 0 {
             return Err(DataFusionError::Configuration(

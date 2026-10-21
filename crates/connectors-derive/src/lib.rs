@@ -34,6 +34,11 @@ use syn::{Data, DataStruct, DeriveInput, Fields, parse_macro_input};
 /// returns `datafusion::logical_expr::col("<field>")`, so a renamed Rust
 /// field renames the generated accessor and any stale call site fails to
 /// compile instead of referencing a dropped column name.
+///
+/// # Panics
+///
+/// Never panics in practice: `syn::Fields::Named` guarantees every field it
+/// yields carries an identifier.
 #[proc_macro_derive(Connector)]
 pub fn derive_connector(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
