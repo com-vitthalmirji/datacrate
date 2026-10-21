@@ -209,6 +209,13 @@ pub fn put_manifest(
     manifest: &CompletionManifest,
     key: &ObjectPath,
 ) -> Result<(), PipelineIoError> {
+    manifest.validate()?;
+    // Enable version-2 publication only with the identity-aware reader protocol.
+    if manifest.schema_version != 1 {
+        return Err(PipelineIoError::UnsupportedManifestWriteVersion {
+            version: manifest.schema_version,
+        });
+    }
     let body =
         serde_json::to_vec(manifest).map_err(|source| PipelineIoError::WriteManifest { source })?;
     block_on(store.put(key, body.into())).map_err(|source| PipelineIoError::UploadObject {

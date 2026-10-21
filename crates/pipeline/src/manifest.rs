@@ -1,8 +1,8 @@
 //! The completion manifest [`run_bounded_pipeline_s3`](crate::bounded::run_bounded_pipeline_s3)
-//! publishes once its output object is fully written: proof of *what* was
-//! written (row count, a logical-content digest) and *from what* (a snapshot
-//! of the input object), without ever buffering more than one row's hash at
-//! a time.
+//! publishes after its output object: reported row count, a logical-content
+//! fingerprint and captured input metadata. Output and manifest are separate
+//! publications; a record's presence does not verify output bytes or establish
+//! an atomic dataset commit. Digest calculation retains one row's hash at a time.
 //!
 //! Order independence: `accumulate_batch_digest` combines each row's
 //! individual hash into a running total with wrapping (mod 2^64) addition,
@@ -18,6 +18,7 @@
 
 use std::hash::{BuildHasher, Hasher};
 
+use crate::PipelineIoError;
 use ahash::RandomState;
 use arrow::array::{Array, Int64Array, RecordBatch, StringArray};
 use object_store::ObjectMeta;
@@ -28,7 +29,8 @@ use serde::{Deserialize, Serialize};
 /// seeds are randomised per process — meant to resist hash-flooding denial of
 /// service in hash maps — which would make the digest differ across runs of
 /// the *same* content. A content fingerprint needs the opposite: identical
-/// content must hash identically no matter which process computed it.
+/// content must hash identically across processes using the same pinned
+/// implementation and target/CPU-feature configuration.
 const DIGEST_SEED_1: u64 = 0x517c_c1b7_2722_0a95;
 const DIGEST_SEED_2: u64 = 0x2545_f491_4f6c_dd1d;
 const DIGEST_SEED_3: u64 = 0x9e37_79b9_7f4a_7c15;
@@ -89,12 +91,14 @@ pub(crate) fn accumulate_batch_digest(running: u64, batch: &RecordBatch) -> u64 
     })
 }
 
-/// Proof that an object-store output was fully and correctly written:
-/// row count, an order-independent content digest, and a snapshot of the
-/// input object it was built from.
+/// Reported row count, an order-independent fingerprint and input metadata.
+///
+/// The decoder checks version-specific fields at entry. This public record is
+/// mutable, so consuming boundaries must validate it again before relying on
+/// those fields. It is not a proof of output contents or atomic publication.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompletionManifest {
-    /// Bumped whenever this struct's field set changes shape.
+    /// Persisted protocol version, checked by the supported-version decoder.
     pub schema_version: u32,
     /// The input object's key, as given to `run_bounded_pipeline_s3`.
     pub input_key: String,
@@ -110,9 +114,157 @@ pub struct CompletionManifest {
     /// `accumulate_batch_digest`'s final value, as lowercase hex —
     /// identical for the same row multiset regardless of batch or row order.
     pub content_digest: String,
+    /// The unique publishing run, required in version 2.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+
+    /// The captured input version, when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_version: Option<String>,
+
+    /// The output key bound to this completion record.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_key: Option<String>,
+
+    /// The completed output ETag, when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_e_tag: Option<String>,
+
+    /// The completed output version, when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_version: Option<String>,
+
+    /// The named interpretation of the persisted digest.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub digest_scheme: Option<String>,
+}
+
+/// Existing digest interpretation; not a portable or cryptographic hash format.
+pub const LEGACY_DIGEST_SCHEME: &str = "legacy-ahash-wrapping-sum-v1";
+
+/// A missing required version-2 completion field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManifestViolation {
+    /// Version 2 requires a nonempty run ID.
+    MissingRunId,
+    /// Version 2 requires a nonempty output key.
+    MissingOutputKey,
+    /// Version 2 requires a nonempty output version or ETag.
+    MissingOutputIdentity,
+    /// A supplied output identity must not be empty.
+    EmptyOutputIdentity,
+    /// Version 2 requires a digest scheme.
+    MissingDigestScheme,
+}
+
+impl std::fmt::Display for ManifestViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::MissingRunId => "version 2 requires a run ID",
+            Self::MissingOutputKey => "version 2 requires an output key",
+            Self::MissingOutputIdentity => "version 2 requires an output version or ETag",
+            Self::EmptyOutputIdentity => "output identity must not be empty",
+            Self::MissingDigestScheme => "version 2 requires a digest scheme",
+        })
+    }
+}
+impl std::error::Error for ManifestViolation {}
+
+// Decode into wire data before returning a supported, validated record.
+#[derive(Deserialize)]
+struct CompletionManifestWire {
+    schema_version: u32,
+    input_key: String,
+    input_size: u64,
+    input_e_tag: Option<String>,
+    input_last_modified: String,
+    row_count: usize,
+    content_digest: String,
+    run_id: Option<String>,
+    input_version: Option<String>,
+    output_key: Option<String>,
+    output_e_tag: Option<String>,
+    output_version: Option<String>,
+    digest_scheme: Option<String>,
+}
+
+impl From<CompletionManifestWire> for CompletionManifest {
+    fn from(wire: CompletionManifestWire) -> Self {
+        Self {
+            schema_version: wire.schema_version,
+            input_key: wire.input_key,
+            input_size: wire.input_size,
+            input_e_tag: wire.input_e_tag,
+            input_last_modified: wire.input_last_modified,
+            row_count: wire.row_count,
+            content_digest: wire.content_digest,
+            run_id: wire.run_id,
+            input_version: wire.input_version,
+            output_key: wire.output_key,
+            output_e_tag: wire.output_e_tag,
+            output_version: wire.output_version,
+            digest_scheme: wire.digest_scheme,
+        }
+    }
+}
+
+/// Decodes a persisted completion manifest.
+///
+/// # Errors
+/// Returns [`PipelineIoError::ReadManifest`] for malformed input or
+/// [`PipelineIoError::UnsupportedManifestVersion`] for an unknown version.
+/// Missing version-specific fields return [`PipelineIoError::InvalidManifest`];
+/// unknown digest schemes return [`PipelineIoError::UnsupportedDigestScheme`].
+/// Raw Serde decoding does not perform this supported-version check.
+pub fn decode_completion_manifest(bytes: &[u8]) -> Result<CompletionManifest, PipelineIoError> {
+    let wire: CompletionManifestWire =
+        serde_json::from_slice(bytes).map_err(|source| PipelineIoError::ReadManifest { source })?;
+    let manifest = CompletionManifest::from(wire);
+    manifest.validate()?;
+    Ok(manifest)
 }
 
 impl CompletionManifest {
+    pub(crate) fn validate(&self) -> Result<(), PipelineIoError> {
+        match self.schema_version {
+            1 => Ok(()),
+            2 => {
+                let required = |value: &Option<String>, violation| {
+                    value
+                        .as_deref()
+                        .filter(|value| !value.trim().is_empty())
+                        .map(|_| ())
+                        .ok_or(PipelineIoError::InvalidManifest { violation })
+                };
+                required(&self.run_id, ManifestViolation::MissingRunId)?;
+                required(&self.output_key, ManifestViolation::MissingOutputKey)?;
+                if self.output_e_tag.is_none() && self.output_version.is_none() {
+                    return Err(PipelineIoError::InvalidManifest {
+                        violation: ManifestViolation::MissingOutputIdentity,
+                    });
+                }
+                for identity in [&self.output_e_tag, &self.output_version]
+                    .into_iter()
+                    .flatten()
+                {
+                    if identity.trim().is_empty() {
+                        return Err(PipelineIoError::InvalidManifest {
+                            violation: ManifestViolation::EmptyOutputIdentity,
+                        });
+                    }
+                }
+                required(&self.digest_scheme, ManifestViolation::MissingDigestScheme)?;
+                if self.digest_scheme.as_deref() != Some(LEGACY_DIGEST_SCHEME) {
+                    return Err(PipelineIoError::UnsupportedDigestScheme {
+                        scheme: self.digest_scheme.clone().unwrap_or_default(),
+                    });
+                }
+                Ok(())
+            }
+            version => Err(PipelineIoError::UnsupportedManifestVersion { version }),
+        }
+    }
+
     pub(crate) fn new(
         input_key: &ObjectPath,
         input_meta: &ObjectMeta,
@@ -127,12 +279,18 @@ impl CompletionManifest {
             input_last_modified: input_meta.last_modified.to_rfc3339(),
             row_count,
             content_digest: format!("{content_digest:016x}"),
+            run_id: None,
+            input_version: None,
+            output_key: None,
+            output_e_tag: None,
+            output_version: None,
+            digest_scheme: None,
         }
     }
 
     /// The manifest's own key for a given output key: a `.manifest.json`
-    /// sibling, published only after `output_key` itself is fully written —
-    /// its presence is the completion signal a reader should wait for.
+    /// sibling. Its presence alone does not establish that it describes the
+    /// current output; readers need the publication protocol and identity checks.
     pub fn key_for(output_key: &ObjectPath) -> ObjectPath {
         ObjectPath::from(format!("{output_key}.manifest.json"))
     }
@@ -156,6 +314,56 @@ mod tests {
             rows.iter().map(|r| r.2).collect::<Vec<_>>(),
         ));
         RecordBatch::try_new(schema(), vec![ids, names, notes]).expect("test batch should build")
+    }
+
+    // These values were generated by the baseline executable, not by the
+    // candidate constructor. The legacy algorithm is target-dependent.
+    #[cfg(all(target_arch = "aarch64", target_os = "macos", target_feature = "aes"))]
+    #[test]
+    fn digest_matches_independent_pinned_target_baseline() {
+        #[derive(Deserialize)]
+        struct Observation {
+            csv: String,
+            batch_size: usize,
+            empty_note: bool,
+            rows: usize,
+            digest: String,
+        }
+        #[derive(Deserialize)]
+        struct Fixture {
+            observations: Vec<Observation>,
+        }
+        let fixture: Fixture = serde_json::from_str(include_str!(
+            "../tests/fixtures/manifests/legacy-digest-aarch64-apple-darwin.json"
+        ))
+        .expect("baseline fixture");
+        assert_eq!(fixture.observations.len(), 36);
+        let dir = tempfile::tempdir().expect("fixture directory");
+        let input = dir.path().join("input.csv");
+        for observation in fixture.observations {
+            std::fs::write(&input, &observation.csv).expect("input fixture");
+            let batches = crate::fixture_to_record_batches(&input, observation.batch_size)
+                .expect("baseline CSV");
+            let mut digest = 0;
+            let mut rows = 0;
+            for mut value in batches {
+                rows += value.num_rows();
+                if observation.empty_note {
+                    value = RecordBatch::try_new(
+                        value.schema(),
+                        vec![
+                            Arc::clone(value.column(0)),
+                            Arc::clone(value.column(1)),
+                            Arc::new(StringArray::from(vec![Some(""); value.num_rows()])),
+                        ],
+                    )
+                    .expect("empty non-null notes");
+                }
+                digest = accumulate_batch_digest(digest, &value);
+            }
+            assert_eq!(rows, observation.rows);
+            assert_eq!(format!("{digest:016x}"), observation.digest);
+        }
     }
 
     #[test]
@@ -206,11 +414,214 @@ mod tests {
     }
 
     #[test]
+    fn digest_distinguishes_null_empty_and_field_boundaries_in_legacy_examples() {
+        let null = accumulate_batch_digest(0, &batch(&[(1, "Ada", None)]));
+        let empty = accumulate_batch_digest(0, &batch(&[(1, "Ada", Some(""))]));
+        assert_ne!(null, empty);
+        assert_ne!(
+            accumulate_batch_digest(0, &batch(&[(1, "a", Some("bc"))])),
+            accumulate_batch_digest(0, &batch(&[(1, "ab", Some("c"))])),
+        );
+        let single = accumulate_batch_digest(0, &batch(&[(1, "Ada", None)]));
+        assert_eq!(
+            accumulate_batch_digest(0, &batch(&[(1, "Ada", None), (1, "Ada", None)])),
+            single.wrapping_add(single)
+        );
+    }
+
+    #[test]
     fn manifest_key_is_a_sibling_of_the_output_key() {
         let output = ObjectPath::from("prefix/output.parquet");
         assert_eq!(
             CompletionManifest::key_for(&output).as_ref(),
             "prefix/output.parquet.manifest.json"
+        );
+    }
+}
+
+#[cfg(test)]
+mod version_regressions {
+    use super::*;
+    const V1: &[u8] = include_bytes!("../tests/fixtures/manifests/v1.json");
+
+    #[test]
+    fn manifest_version_one_fixture_preserves_persisted_values() {
+        let manifest = decode_completion_manifest(V1).expect("legacy manifest");
+        assert_eq!(manifest.schema_version, 1);
+        assert_eq!(manifest.input_key, "input.csv");
+        assert_eq!(manifest.input_size, 27);
+        assert_eq!(manifest.input_e_tag.as_deref(), Some("captured-etag"));
+        assert_eq!(manifest.row_count, 2);
+        assert_eq!(manifest.content_digest, "0123456789abcdef");
+        let stored: serde_json::Value = serde_json::from_slice(V1).expect("fixture JSON");
+        assert_eq!(serde_json::to_value(manifest).expect("serialize"), stored);
+        let baseline = CompletionManifest::new(
+            &ObjectPath::from("input.csv"),
+            &ObjectMeta {
+                location: ObjectPath::from("input.csv"),
+                last_modified: chrono::DateTime::parse_from_rfc3339("2026-10-20T00:00:00Z")
+                    .expect("timestamp")
+                    .to_utc(),
+                size: 27,
+                e_tag: Some("captured-etag".to_owned()),
+                version: None,
+            },
+            2,
+            0x0123_4567_89ab_cdef,
+        );
+        assert_eq!(
+            serde_json::to_value(baseline).expect("legacy constructor"),
+            stored
+        );
+    }
+
+    #[test]
+    fn manifest_version_rejects_unknown_versions() {
+        for version in [0, 3, 99, u32::MAX] {
+            let mut value: serde_json::Value = serde_json::from_slice(V1).expect("fixture");
+            value["schema_version"] = version.into();
+            assert!(matches!(
+                decode_completion_manifest(&serde_json::to_vec(&value).expect("JSON")),
+                Err(PipelineIoError::UnsupportedManifestVersion { version: actual }) if actual == version
+            ));
+        }
+    }
+
+    #[test]
+    fn manifest_version_requires_well_formed_version_and_required_fields() {
+        for invalid in [serde_json::Value::Null, (-1).into(), "1".into(), 1.5.into()] {
+            let mut value: serde_json::Value = serde_json::from_slice(V1).expect("fixture");
+            value["schema_version"] = invalid;
+            assert!(matches!(
+                decode_completion_manifest(&serde_json::to_vec(&value).expect("JSON")),
+                Err(PipelineIoError::ReadManifest { .. })
+            ));
+        }
+        for field in [
+            "schema_version",
+            "input_key",
+            "input_size",
+            "row_count",
+            "content_digest",
+        ] {
+            let mut value: serde_json::Value = serde_json::from_slice(V1).expect("fixture");
+            value.as_object_mut().expect("object").remove(field);
+            assert!(matches!(
+                decode_completion_manifest(&serde_json::to_vec(&value).expect("JSON")),
+                Err(PipelineIoError::ReadManifest { .. })
+            ));
+        }
+        assert!(matches!(
+            decode_completion_manifest(b"{"),
+            Err(PipelineIoError::ReadManifest { .. })
+        ));
+    }
+    #[test]
+    fn manifest_version_publisher_refuses_unsupported_version() {
+        let mut manifest = decode_completion_manifest(V1).expect("legacy manifest");
+        manifest.schema_version = 99;
+        let store = object_store::memory::InMemory::new();
+        assert!(matches!(
+            crate::object_store_io::put_manifest(
+                &store,
+                &manifest,
+                &ObjectPath::from("output.manifest.json")
+            ),
+            Err(PipelineIoError::UnsupportedManifestVersion { version: 99 })
+        ));
+    }
+    #[test]
+    fn manifest_version_two_fixture_is_supported() {
+        let bytes = include_bytes!("../tests/fixtures/manifests/v2.json");
+        let manifest = decode_completion_manifest(bytes).expect("version two manifest");
+        assert_eq!(manifest.schema_version, 2);
+        assert_eq!(manifest.content_digest, "0123456789abcdef");
+    }
+    #[test]
+    fn manifest_version_two_requires_protocol_fields() {
+        let original: serde_json::Value =
+            serde_json::from_slice(include_bytes!("../tests/fixtures/manifests/v2.json"))
+                .expect("fixture");
+        for (fields, violation) in [
+            (vec!["run_id"], ManifestViolation::MissingRunId),
+            (vec!["output_key"], ManifestViolation::MissingOutputKey),
+            (
+                vec!["output_e_tag", "output_version"],
+                ManifestViolation::MissingOutputIdentity,
+            ),
+            (
+                vec!["digest_scheme"],
+                ManifestViolation::MissingDigestScheme,
+            ),
+        ] {
+            let mut value = original.clone();
+            for field in fields {
+                value.as_object_mut().expect("object").remove(field);
+            }
+            assert!(
+                matches!(decode_completion_manifest(&serde_json::to_vec(&value).expect("JSON")),
+                Err(PipelineIoError::InvalidManifest { violation: actual }) if actual == violation)
+            );
+        }
+        for field in ["output_e_tag", "output_version"] {
+            let mut value = original.clone();
+            value[field] = " ".into();
+            assert!(matches!(
+                decode_completion_manifest(&serde_json::to_vec(&value).expect("JSON")),
+                Err(PipelineIoError::InvalidManifest {
+                    violation: ManifestViolation::EmptyOutputIdentity
+                })
+            ));
+        }
+        for (field, violation) in [
+            ("run_id", ManifestViolation::MissingRunId),
+            ("output_key", ManifestViolation::MissingOutputKey),
+            ("digest_scheme", ManifestViolation::MissingDigestScheme),
+        ] {
+            let mut value = original.clone();
+            value[field] = " ".into();
+            assert!(
+                matches!(decode_completion_manifest(&serde_json::to_vec(&value).expect("JSON")),
+                Err(PipelineIoError::InvalidManifest { violation: actual }) if actual == violation)
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_version_two_accepts_each_identity_and_preserves_wire_values() {
+        let original: serde_json::Value =
+            serde_json::from_slice(include_bytes!("../tests/fixtures/manifests/v2.json"))
+                .expect("fixture");
+        for removed in [None, Some("output_e_tag"), Some("output_version")] {
+            let mut value = original.clone();
+            if let Some(field) = removed {
+                value.as_object_mut().expect("object").remove(field);
+            }
+            let manifest = decode_completion_manifest(&serde_json::to_vec(&value).expect("JSON"))
+                .expect("one identity is sufficient");
+            assert_eq!(manifest.input_version.as_deref(), Some("input-v1"));
+            assert_eq!(manifest.run_id.as_deref(), Some("run-fixture"));
+            assert_eq!(serde_json::to_value(&manifest).expect("serialize"), value);
+            assert!(matches!(
+                crate::object_store_io::put_manifest(
+                    &object_store::memory::InMemory::new(),
+                    &manifest,
+                    &ObjectPath::from("manifest.json")
+                ),
+                Err(PipelineIoError::UnsupportedManifestWriteVersion { version: 2 })
+            ));
+        }
+    }
+
+    #[test]
+    fn manifest_version_two_rejects_unknown_digest_scheme() {
+        let mut value: serde_json::Value =
+            serde_json::from_slice(include_bytes!("../tests/fixtures/manifests/v2.json"))
+                .expect("fixture");
+        value["digest_scheme"] = "future-hash".into();
+        assert!(
+            matches!(decode_completion_manifest(&serde_json::to_vec(&value).expect("JSON")),
+            Err(PipelineIoError::UnsupportedDigestScheme { scheme }) if scheme == "future-hash")
         );
     }
 }

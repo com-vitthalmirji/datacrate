@@ -323,7 +323,7 @@ different guarantees, and a committer that only handles the rename without
 forcing the underlying writes to disk has the identical gap this pipeline
 closes by hand.
 
-## The completion manifest: proof of what was written, not just that something was
+## The completion manifest: recorded counts, input metadata and a fingerprint
 
 `run_bounded_pipeline_s3` publishes one more object after the Parquet output
 lands: a `.manifest.json` sibling of the output key
@@ -332,8 +332,8 @@ staging-then-rename step as the output itself. Before this existed, a caller
 polling the bucket after a run had no way to confirm *what* had been
 written - row count, or whether the output's content actually matched a
 known-good input - without re-downloading and re-parsing the Parquet file.
-The manifest is proof, delivered alongside the data, so a caller can check
-it cheaply instead.
+The manifest records the writer's counts and fingerprint so a caller can
+compare them cheaply. Its presence alone does not verify the output bytes.
 
 The manifest carries a snapshot of the input object (key, size, ETag,
 last-modified) plus the output's row count and a content digest. The digest
@@ -356,9 +356,49 @@ digest never buffers more than a single row's hash regardless of how large
 the output is - it doesn't reopen the memory-envelope question the bounded
 pipeline already answered for the rest of this path.
 
-Worth naming what the digest is not: it's a content-drift fingerprint
-(dropped, duplicated, or reordered rows), not a security boundary. It
-doesn't detect adversarial tampering, and it isn't trying to.
+The digest is order-independent, so it intentionally cannot detect row
+reordering. Collisions can also hide content changes. Earlier wording in
+ADR 0012 included reordered rows among detectable changes; that exceeded
+what this combiner can establish. Fixed seeds preserve repeatability for
+the pinned build, not a portable cross-version or cross-platform hash
+format. It is neither an equality proof nor an authenticity check.
+
+The original JSON fixture preserved a supplied digest string, which did not test
+whether the hashing implementation still produced that value. An independent
+baseline executable now supplies 36 captured observations covering empty input,
+null and empty notes, empty names, field boundaries, duplicates, Unicode, integer
+extrema and different batch sizes. The candidate reproduces them on the same
+compiler and target configuration. A committed regression fixture is limited to
+AES-enabled aarch64 macOS with the pinned Rust and ahash versions. Changing a seed
+makes that regression fail. Other targets still need their own baseline captures;
+this evidence does not turn the legacy scheme into a portable format.
+
+
+Earlier, readers decoded JSON directly and could accept any numeric
+`schema_version`. Use `manifest::decode_completion_manifest` now: it checks
+the supported version and version-specific fields before returning a usable manifest. The publisher
+also refuses unsupported versions. Malformed JSON and missing required
+fields retain JSON error sources; an unsupported numeric version has a
+separate typed error. The persisted version-1 fixture keeps the original
+field values and hexadecimal digest string. Raw `serde_json::from_slice`
+is still available for inspection, but does not replace supported-version
+validation.
+
+The reader accepts versions 1 and 2 and rejects other versions. Version 2
+adds `run_id`, optional `input_version`, `output_key`, `output_e_tag`,
+`output_version` and `digest_scheme`. A nonempty run ID, output key and at
+least one nonempty output identity are required. The only implemented
+scheme is `legacy-ahash-wrapping-sum-v1`, which labels the existing hash;
+it does not change its bytes or strengthen its guarantees. Unknown
+schemes have a separate typed error. Missing new fields remain valid for
+version 1, whose serialized field set stays unchanged.
+
+This slice enables version-2 decoding, not remote version-2 publication.
+The writer still emits version 1 and explicitly refuses version 2 until
+the publication and identity-aware reader protocol is connected. Existing
+readers that only deserialize JSON must migrate to the checked decoder;
+accepting extra fields is not protocol compatibility. Version 1 has no
+output identity and remains weaker completion evidence.
 
 ## Try it yourself
 
