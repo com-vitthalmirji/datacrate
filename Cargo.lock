@@ -4013,6 +4013,8 @@ dependencies = [
  "bytesize",
  "chrono",
  "clap",
+ "connectors-derive",
+ "contracts",
  "csv",
  "datafusion",
  "duckdb",
