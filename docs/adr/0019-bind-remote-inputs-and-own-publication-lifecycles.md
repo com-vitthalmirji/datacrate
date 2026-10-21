@@ -3,15 +3,17 @@
 ## Status
 
 Proposed - 20 October 2026. Unique local staging and explicit local publication
-outcomes are implemented. Remote publication and strict completion reading remain open.
+outcomes are implemented. The single-writer remote protocol and strict completion reader
+are implemented, with fake-backend phase failures and MinIO ETag/version coverage.
+Final combined delivery verification remains open.
 Refines ADRs 0005.2, 0012, 0014 and 0015. Their historical decisions remain unchanged.
 
 ## Context
 
-Datacrate currently records input metadata before a helper performs another HEAD and
+Earlier Datacrate recorded input metadata before a helper performed another HEAD and
 unconditional range GETs. An object can change between those operations. Local/remote staging
-names are deterministic. Final output and its manifest are separate publications; a failed
-manifest can trigger unconditional deletion of the final key.
+names were deterministic. Final output and its manifest are separate publications; a failed
+manifest could trigger unconditional deletion of the final key.
 
 Owned resources need explicit fallible completion, and read results need validation.
 Snapshot enforcement must bind each request to captured identity; a range request alone
@@ -65,6 +67,11 @@ error identifying output/manifest and the last known phase, preserving the origi
 A failed remote request may have taken effect: distinguish definitely uncommitted output from
 an unknown publication/completion outcome that recovery must inspect. Never describe that as
 rollback or promise that an errored manifest PUT left no marker.
+
+Retain the multipart upload until explicit complete or abort. On read, part or completion
+failure, drop outstanding part futures before attempting abort. Preserve primary and abort
+failures separately, then retain any staging-object deletion failure as further recovery
+evidence. Crash recovery still requires backend lifecycle rules for abandoned parts.
 
 Make copy/publication and staging cleanup separate actions rather than hiding both in rename.
 A copy error can leave final visibility unknown; a staging-delete error after successful copy

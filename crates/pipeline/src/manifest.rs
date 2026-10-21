@@ -129,9 +129,46 @@ pub struct CompletionManifest {
 /// Existing digest interpretation; not a portable or cryptographic hash format.
 pub const LEGACY_DIGEST_SCHEME: &str = "legacy-ahash-wrapping-sum-v1";
 
+pub(crate) struct OutputIdentity {
+    run_id: String,
+    key: ObjectPath,
+    meta: ObjectMeta,
+}
+impl OutputIdentity {
+    pub(crate) fn new(
+        run_id: String,
+        key: ObjectPath,
+        meta: ObjectMeta,
+    ) -> Result<Self, PipelineIoError> {
+        if meta.location != key {
+            return Err(PipelineIoError::InvalidSnapshot {
+                key,
+                violation: crate::object_store_io::SnapshotViolation::Location,
+            });
+        }
+        if meta
+            .version
+            .as_ref()
+            .is_none_or(|value| value.trim().is_empty())
+            && meta
+                .e_tag
+                .as_ref()
+                .is_none_or(|value| value.trim().is_empty())
+        {
+            return Err(PipelineIoError::InvalidSnapshot {
+                key,
+                violation: crate::object_store_io::SnapshotViolation::MissingIdentity,
+            });
+        }
+        Ok(Self { run_id, key, meta })
+    }
+}
+
 /// A missing required version-2 completion field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManifestViolation {
+    /// The completion record names a different output from the requested key.
+    OutputKeyMismatch,
     /// Version 2 requires a nonempty run ID.
     MissingRunId,
     /// Version 2 requires a nonempty output key.
@@ -147,6 +184,7 @@ pub enum ManifestViolation {
 impl std::fmt::Display for ManifestViolation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
+            Self::OutputKeyMismatch => "completion names a different output key",
             Self::MissingRunId => "version 2 requires a run ID",
             Self::MissingOutputKey => "version 2 requires an output key",
             Self::MissingOutputIdentity => "version 2 requires an output version or ETag",
@@ -250,6 +288,33 @@ impl CompletionManifest {
             }
             version => Err(PipelineIoError::UnsupportedManifestVersion { version }),
         }
+    }
+
+    pub(crate) fn new_v2(
+        input_key: &ObjectPath,
+        input_meta: &ObjectMeta,
+        row_count: usize,
+        content_digest: u64,
+        output: &OutputIdentity,
+    ) -> Result<Self, PipelineIoError> {
+        let mut manifest = Self::new(input_key, input_meta, row_count, content_digest);
+        manifest.schema_version = 2;
+        manifest.run_id = Some(output.run_id.clone());
+        manifest.input_version = input_meta.version.clone();
+        manifest.output_key = Some(output.key.to_string());
+        manifest.output_e_tag = output
+            .meta
+            .e_tag
+            .clone()
+            .filter(|value| !value.trim().is_empty());
+        manifest.output_version = output
+            .meta
+            .version
+            .clone()
+            .filter(|value| !value.trim().is_empty());
+        manifest.digest_scheme = Some(LEGACY_DIGEST_SCHEME.to_owned());
+        manifest.validate()?;
+        Ok(manifest)
     }
 
     pub(crate) fn new(
@@ -594,14 +659,12 @@ mod version_regressions {
             assert_eq!(manifest.input_version.as_deref(), Some("input-v1"));
             assert_eq!(manifest.run_id.as_deref(), Some("run-fixture"));
             assert_eq!(serde_json::to_value(&manifest).expect("serialize"), value);
-            assert!(matches!(
-                crate::object_store_io::put_manifest(
-                    &object_store::memory::InMemory::new(),
-                    &manifest,
-                    &ObjectPath::from("manifest.json")
-                ),
-                Err(PipelineIoError::UnsupportedManifestWriteVersion { version: 2 })
-            ));
+            crate::object_store_io::put_manifest(
+                &object_store::memory::InMemory::new(),
+                &manifest,
+                &ObjectPath::from("manifest.json"),
+            )
+            .expect("supported v2 publication");
         }
     }
 

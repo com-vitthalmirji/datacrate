@@ -18,9 +18,9 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
 
-use futures_util::StreamExt;
+use futures_util::{StreamExt, stream::FuturesUnordered};
 use object_store::path::Path as ObjectPath;
-use object_store::{GetOptions, ObjectMeta, ObjectStore, ObjectStoreExt, WriteMultipart};
+use object_store::{GetOptions, ObjectMeta, ObjectStore, ObjectStoreExt};
 
 use crate::PipelineIoError;
 use crate::manifest::CompletionManifest;
@@ -30,7 +30,7 @@ const CHUNK_BYTES: usize = 8 * 1024 * 1024;
 /// Limits scheduled upload parts independently of the pipeline batch channel.
 const MAX_UPLOAD_PARTS: usize = 2;
 
-fn block_on<F: std::future::Future>(future: F) -> F::Output {
+pub(crate) fn block_on<F: std::future::Future>(future: F) -> F::Output {
     assert!(
         tokio::runtime::Handle::try_current().is_err(),
         "object_store_io::block_on called from inside an existing Tokio \
@@ -133,101 +133,207 @@ pub fn download_to_temp(
                 key: key.clone(),
                 source,
             })?;
-        let invalid = |violation| PipelineIoError::InvalidSnapshot {
-            key: key.clone(),
-            violation,
+        download_captured(store, key, dest, &mut file, captured).await
+    })
+}
+
+// This boundary shares the range validation with captured-input downloads. The
+// caller supplies the metadata observed under the intended version/condition.
+async fn download_captured(
+    store: &dyn ObjectStore,
+    key: &ObjectPath,
+    dest: &Path,
+    file: &mut File,
+    captured: ObjectMeta,
+) -> Result<ObjectMeta, PipelineIoError> {
+    let invalid = |violation| PipelineIoError::InvalidSnapshot {
+        key: key.clone(),
+        violation,
+    };
+    if captured.location != *key {
+        return Err(invalid(SnapshotViolation::Location));
+    }
+    let version = captured.version.as_ref().filter(|value| !value.is_empty());
+    let etag = captured.e_tag.as_ref().filter(|value| !value.is_empty());
+    if version.is_none() && etag.is_none() {
+        return Err(invalid(SnapshotViolation::MissingIdentity));
+    }
+    let mut offset = 0u64;
+    while offset < captured.size {
+        let end = captured.size.min(offset.saturating_add(CHUNK_BYTES as u64));
+        let requested = offset..end;
+        let options = GetOptions {
+            range: Some(requested.clone().into()),
+            version: version.cloned(),
+            if_match: if version.is_none() {
+                etag.cloned()
+            } else {
+                None
+            },
+            ..Default::default()
         };
-        if captured.location != *key {
-            return Err(invalid(SnapshotViolation::Location));
-        }
-        let version = captured.version.as_ref().filter(|value| !value.is_empty());
-        let etag = captured.e_tag.as_ref().filter(|value| !value.is_empty());
-        if version.is_none() && etag.is_none() {
-            return Err(invalid(SnapshotViolation::MissingIdentity));
-        }
-        let mut offset = 0u64;
-        while offset < captured.size {
-            let end = captured.size.min(offset.saturating_add(CHUNK_BYTES as u64));
-            let requested = offset..end;
-            let options = GetOptions {
-                range: Some(requested.clone().into()),
-                version: version.cloned(),
-                if_match: if version.is_none() {
-                    etag.cloned()
-                } else {
-                    None
-                },
-                ..Default::default()
-            };
-            let response = store.get_opts(key, options).await.map_err(|source| {
-                if matches!(
-                    source,
-                    object_store::Error::Precondition { .. }
-                        | object_store::Error::NotModified { .. }
-                ) {
-                    PipelineIoError::SnapshotPrecondition {
-                        key: key.clone(),
-                        source,
-                    }
-                } else {
-                    PipelineIoError::DownloadObject {
-                        key: key.clone(),
-                        source,
-                    }
-                }
-            })?;
-            if response.meta.location != *key {
-                return Err(invalid(SnapshotViolation::Location));
-            }
-            if response.meta.size != captured.size {
-                return Err(invalid(SnapshotViolation::Size {
-                    expected: captured.size,
-                    actual: response.meta.size,
-                }));
-            }
-            let identity_matches = match version {
-                Some(version) => response.meta.version.as_ref() == Some(version),
-                None => response.meta.e_tag.as_ref() == etag,
-            };
-            if !identity_matches {
-                return Err(invalid(SnapshotViolation::Identity));
-            }
-            if response.range != requested {
-                return Err(invalid(SnapshotViolation::Range {
-                    expected: requested,
-                    actual: response.range,
-                }));
-            }
-            let expected = end - offset;
-            let mut received = 0u64;
-            let mut stream = response.into_stream();
-            while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|source| PipelineIoError::DownloadObject {
+        let response = store.get_opts(key, options).await.map_err(|source| {
+            if matches!(
+                source,
+                object_store::Error::Precondition { .. } | object_store::Error::NotModified { .. }
+            ) {
+                PipelineIoError::SnapshotPrecondition {
                     key: key.clone(),
                     source,
-                })?;
-                received = received.saturating_add(chunk.len() as u64);
-                if received > expected {
-                    return Err(invalid(SnapshotViolation::Length {
-                        expected,
-                        actual: received,
-                    }));
                 }
-                file.write_all(&chunk)
-                    .map_err(|source| PipelineIoError::OpenOutput {
-                        path: dest.to_path_buf(),
-                        source,
-                    })?;
+            } else {
+                PipelineIoError::DownloadObject {
+                    key: key.clone(),
+                    source,
+                }
             }
-            if received != expected {
+        })?;
+        if response.meta.location != *key {
+            return Err(invalid(SnapshotViolation::Location));
+        }
+        if response.meta.size != captured.size {
+            return Err(invalid(SnapshotViolation::Size {
+                expected: captured.size,
+                actual: response.meta.size,
+            }));
+        }
+        let identity_matches = match version {
+            Some(version) => response.meta.version.as_ref() == Some(version),
+            None => response.meta.e_tag.as_ref() == etag,
+        };
+        if !identity_matches {
+            return Err(invalid(SnapshotViolation::Identity));
+        }
+        if response.range != requested {
+            return Err(invalid(SnapshotViolation::Range {
+                expected: requested,
+                actual: response.range,
+            }));
+        }
+        let expected = end - offset;
+        let mut received = 0u64;
+        let mut stream = response.into_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|source| PipelineIoError::DownloadObject {
+                key: key.clone(),
+                source,
+            })?;
+            received = received.saturating_add(chunk.len() as u64);
+            if received > expected {
                 return Err(invalid(SnapshotViolation::Length {
                     expected,
                     actual: received,
                 }));
             }
-            offset = end;
+            file.write_all(&chunk)
+                .map_err(|source| PipelineIoError::OpenOutput {
+                    path: dest.to_path_buf(),
+                    source,
+                })?;
         }
-        Ok(captured)
+        if received != expected {
+            return Err(invalid(SnapshotViolation::Length {
+                expected,
+                actual: received,
+            }));
+        }
+        offset = end;
+    }
+    Ok(captured)
+}
+
+/// Reads a supported completion record and downloads its recorded output identity.
+///
+/// Version 1 remains decodable but is rejected here because it has no output
+/// identity. Versioned reads use that recorded version even if latest has changed;
+/// ETag reads fail on replacement. Backends must honor these conditions.
+/// This verifies identity-bound bytes, not the logical row count or fingerprint.
+///
+/// # Errors
+/// Returns manifest/version errors, CompletionIdentityRequired for version 1,
+/// InvalidManifest for a different output key, or the normal conditional download
+/// errors. A range failure can leave a partial destination; error is not completion.
+pub fn download_completed_output(
+    store: &dyn ObjectStore,
+    output_key: &ObjectPath,
+    dest: &Path,
+) -> Result<CompletionManifest, PipelineIoError> {
+    block_on(async {
+        let manifest_key = CompletionManifest::key_for(output_key);
+        let response =
+            store
+                .get(&manifest_key)
+                .await
+                .map_err(|source| PipelineIoError::DownloadObject {
+                    key: manifest_key.clone(),
+                    source,
+                })?;
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|source| PipelineIoError::DownloadObject {
+                key: manifest_key,
+                source,
+            })?;
+        let manifest = crate::manifest::decode_completion_manifest(&bytes)?;
+        if manifest.schema_version != 2 {
+            return Err(PipelineIoError::CompletionIdentityRequired {
+                version: manifest.schema_version,
+            });
+        }
+        let requested_key = output_key.to_string();
+        if manifest.output_key.as_deref() != Some(requested_key.as_str()) {
+            return Err(PipelineIoError::InvalidManifest {
+                violation: crate::manifest::ManifestViolation::OutputKeyMismatch,
+            });
+        }
+        let version = manifest.output_version.as_ref();
+        let etag = manifest.output_e_tag.as_ref();
+        let captured = store
+            .get_opts(
+                output_key,
+                GetOptions {
+                    head: true,
+                    version: version.cloned(),
+                    if_match: if version.is_none() {
+                        etag.cloned()
+                    } else {
+                        None
+                    },
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|source| match source {
+                source @ (object_store::Error::Precondition { .. }
+                | object_store::Error::NotModified { .. }) => {
+                    PipelineIoError::SnapshotPrecondition {
+                        key: output_key.clone(),
+                        source,
+                    }
+                }
+                source => PipelineIoError::DownloadObject {
+                    key: output_key.clone(),
+                    source,
+                },
+            })?
+            .meta;
+        let identity_matches = match version {
+            Some(version) => captured.version.as_ref() == Some(version),
+            None => captured.e_tag.as_ref() == etag,
+        };
+        if !identity_matches {
+            return Err(PipelineIoError::InvalidSnapshot {
+                key: output_key.clone(),
+                violation: SnapshotViolation::Identity,
+            });
+        }
+        let mut file = File::create(dest).map_err(|source| PipelineIoError::OpenOutput {
+            path: dest.to_owned(),
+            source,
+        })?;
+        download_captured(store, output_key, dest, &mut file, captured).await?;
+        Ok(manifest)
     })
 }
 
@@ -240,7 +346,8 @@ pub fn download_to_temp(
 ///
 /// Returns [`PipelineIoError::OpenInput`] if `src` cannot be opened or read,
 /// or [`PipelineIoError::UploadObject`] if the multipart upload to `store`
-/// fails.
+/// fails. If explicit abort also fails, [`PipelineIoError::MultipartAbort`]
+/// retains both the original failure and the abort failure.
 pub fn upload_from_temp(
     store: &dyn ObjectStore,
     src: &Path,
@@ -264,46 +371,68 @@ pub fn upload_from_temp(
     })
 }
 
-/// Streams a reader through the owned upload with bounded outstanding parts.
+/// Streams aligned parts, retaining the upload until completion or explicit abort.
 async fn write_multipart(
     reader: &mut impl Read,
     src: &Path,
     key: &ObjectPath,
-    upload: Box<dyn object_store::MultipartUpload>,
+    mut upload: Box<dyn object_store::MultipartUpload>,
 ) -> Result<(), PipelineIoError> {
-    let mut writer = WriteMultipart::new_with_chunk_size(upload, CHUNK_BYTES);
-
-    let mut buf = vec![0u8; CHUNK_BYTES];
-    loop {
-        // One aligned write can schedule at most one part. Waiting here also
-        // leaves capacity for a final partial part scheduled by finish().
-        writer
-            .wait_for_capacity(MAX_UPLOAD_PARTS)
-            .await
-            .map_err(|source| PipelineIoError::UploadObject {
-                key: key.clone(),
-                source,
-            })?;
-        let read = reader
-            .read(&mut buf)
-            .map_err(|source| PipelineIoError::OpenInput {
-                path: src.to_path_buf(),
-                source,
-            })?;
-        if read == 0 {
-            break;
+    let mut parts: FuturesUnordered<object_store::UploadPart> = FuturesUnordered::new();
+    let upload_error = |source| PipelineIoError::UploadObject {
+        key: key.clone(),
+        source,
+    };
+    let result = async {
+        loop {
+            if parts.len() == MAX_UPLOAD_PARTS
+                && let Some(result) = parts.next().await
+            {
+                result.map_err(&upload_error)?;
+            }
+            // Short reads must not become undersized non-final S3 parts.
+            let mut buffer = vec![0; CHUNK_BYTES];
+            let mut filled = 0;
+            while filled < buffer.len() {
+                match reader.read(&mut buffer[filled..]) {
+                    Ok(0) => break,
+                    Ok(read) => filled += read,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(source) => {
+                        return Err(PipelineIoError::OpenInput {
+                            path: src.to_path_buf(),
+                            source,
+                        });
+                    }
+                }
+            }
+            if filled != 0 {
+                buffer.truncate(filled);
+                parts.push(upload.put_part(buffer.into()));
+            }
+            if filled < CHUNK_BYTES {
+                break;
+            }
         }
-        writer.write(&buf[..read]);
+        while let Some(result) = parts.next().await {
+            result.map_err(&upload_error)?;
+        }
+        upload.complete().await.map_err(&upload_error)?;
+        Ok(())
     }
-
-    writer
-        .finish()
-        .await
-        .map_err(|source| PipelineIoError::UploadObject {
-            key: key.clone(),
-            source,
-        })
-        .map(|_| ())
+    .await;
+    // Drop outstanding part futures before aborting their owning upload.
+    drop(parts);
+    match result {
+        Ok(()) => Ok(()),
+        Err(source) => match upload.abort().await {
+            Ok(()) => Err(source),
+            Err(abort_source) => Err(PipelineIoError::MultipartAbort {
+                source: Box::new(source),
+                abort_source,
+            }),
+        },
+    }
 }
 
 /// Reads `key`'s metadata from `store`, without downloading its contents —
@@ -335,12 +464,6 @@ pub fn put_manifest(
     key: &ObjectPath,
 ) -> Result<(), PipelineIoError> {
     manifest.validate()?;
-    // Enable version-2 publication only with the identity-aware reader protocol.
-    if manifest.schema_version != 1 {
-        return Err(PipelineIoError::UnsupportedManifestWriteVersion {
-            version: manifest.schema_version,
-        });
-    }
     let body =
         serde_json::to_vec(manifest).map_err(|source| PipelineIoError::WriteManifest { source })?;
     block_on(store.put(key, body.into())).map_err(|source| PipelineIoError::UploadObject {
@@ -350,15 +473,39 @@ pub fn put_manifest(
     Ok(())
 }
 
-/// Publishes a staged object by renaming it to its final key. `object_store`
-/// guarantees `rename` on every backend, falling back to copy-then-delete
-/// where the backend has no atomic rename (e.g. S3) — the object-store-side
-/// counterpart to [`crate::bounded::run_bounded_pipeline`]'s local
-/// staging-path-then-`fs::rename` pattern.
+pub(crate) fn delete_object(
+    store: &dyn ObjectStore,
+    key: &ObjectPath,
+) -> Result<(), PipelineIoError> {
+    match block_on(store.delete(key)) {
+        Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
+        Err(source) => Err(PipelineIoError::DeleteObject {
+            key: key.clone(),
+            source,
+        }),
+    }
+}
+
+pub(crate) fn copy_staged_object(
+    store: &dyn ObjectStore,
+    from: &ObjectPath,
+    to: &ObjectPath,
+) -> Result<(), PipelineIoError> {
+    block_on(store.copy(from, to)).map_err(|source| PipelineIoError::UploadObject {
+        key: to.clone(),
+        source,
+    })
+}
+
+/// Legacy copy-and-delete publication helper, without a completion protocol.
+///
+/// Backend rename may be implemented as separate copy and delete operations.
+/// An error can follow successful final publication. The bounded pipeline instead
+/// uses explicit copy, identity-bound completion and owned cleanup phases.
 ///
 /// # Errors
-///
-/// Returns [`PipelineIoError::UploadObject`] if the rename fails.
+/// Returns [`PipelineIoError::UploadObject`] when backend rename reports failure;
+/// this error alone does not establish whether final output became visible.
 pub fn publish_staged_object(
     store: &dyn ObjectStore,
     from: &ObjectPath,
@@ -548,6 +695,7 @@ mod multipart_regressions {
     #[derive(Debug, Default)]
     struct State {
         active: AtomicUsize,
+        lengths: std::sync::Mutex<Vec<usize>>,
         peak: AtomicUsize,
         bytes: AtomicUsize,
         valid_bytes: AtomicBool,
@@ -555,6 +703,7 @@ mod multipart_regressions {
         aborted: AtomicBool,
         fail_part: bool,
         fail_complete: bool,
+        fail_abort: bool,
     }
     #[derive(Debug)]
     struct Upload(Arc<State>);
@@ -568,6 +717,11 @@ mod multipart_regressions {
     impl MultipartUpload for Upload {
         fn put_part(&mut self, data: PutPayload) -> UploadPart {
             let state = Arc::clone(&self.0);
+            state
+                .lengths
+                .lock()
+                .expect("lengths")
+                .push(data.content_length());
             let active = state.active.fetch_add(1, Ordering::SeqCst) + 1;
             state.peak.fetch_max(active, Ordering::SeqCst);
             state.bytes.fetch_add(
@@ -602,6 +756,12 @@ mod multipart_regressions {
         }
         async fn abort(&mut self) -> object_store::Result<()> {
             self.0.aborted.store(true, Ordering::SeqCst);
+            if self.0.fail_abort {
+                return Err(object_store::Error::Generic {
+                    store: "abort",
+                    source: std::io::Error::other("abort failed").into(),
+                });
+            }
             Ok(())
         }
     }
@@ -732,6 +892,31 @@ mod multipart_regressions {
         }
     }
     #[test]
+    fn multipart_short_reads_form_aligned_parts() {
+        let state = Arc::new(State {
+            valid_bytes: AtomicBool::new(true),
+            ..State::default()
+        });
+        let bytes = vec![7; CHUNK_BYTES * 2 + 17];
+        // Chain forces an initial short read despite ample input remaining.
+        let mut reader = bytes[..13].chain(&bytes[13..]);
+        block_on(write_multipart(
+            &mut reader,
+            Path::new("input"),
+            &ObjectPath::from("output"),
+            Box::new(Upload(Arc::clone(&state))),
+        ))
+        .expect("short reads");
+        assert_eq!(
+            *state.lengths.lock().expect("lengths"),
+            [CHUNK_BYTES, CHUNK_BYTES, 17]
+        );
+        assert_eq!(state.bytes.load(Ordering::SeqCst), bytes.len());
+        assert_eq!(state.peak.load(Ordering::SeqCst), 2);
+        assert!(state.valid_bytes.load(Ordering::SeqCst));
+    }
+
+    #[test]
     fn part_failures_preserve_upload_error_context() {
         let state = Arc::new(State {
             fail_part: true,
@@ -749,6 +934,7 @@ mod multipart_regressions {
             matches!(result, Err(PipelineIoError::UploadObject { key: actual, .. }) if actual == key)
         );
         assert!(!state.complete_called.load(Ordering::SeqCst));
+        assert!(state.aborted.load(Ordering::SeqCst));
     }
     #[test]
     fn completion_failure_is_reported_and_abort_is_attempted() {
@@ -770,6 +956,80 @@ mod multipart_regressions {
         assert!(state.aborted.load(Ordering::SeqCst));
     }
     #[test]
+    fn multipart_failed_abort_preserves_read_and_final_part_errors() {
+        struct Broken;
+        impl Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("read failed"))
+            }
+        }
+        for fail_part in [false, true] {
+            let state = Arc::new(State {
+                fail_part,
+                fail_abort: true,
+                ..State::default()
+            });
+            let mut part_input = std::io::repeat(7).take(17);
+            let reader: &mut dyn Read = if fail_part {
+                &mut part_input
+            } else {
+                &mut Broken
+            };
+            let error = block_on(write_multipart(
+                &mut { reader },
+                Path::new("input"),
+                &ObjectPath::from("output"),
+                Box::new(Upload(Arc::clone(&state))),
+            ))
+            .expect_err("operation and abort fail");
+            let PipelineIoError::MultipartAbort {
+                source,
+                abort_source,
+            } = error
+            else {
+                panic!("both failures required");
+            };
+            if fail_part {
+                assert!(matches!(*source, PipelineIoError::UploadObject { .. }));
+            } else {
+                assert!(matches!(*source, PipelineIoError::OpenInput { .. }));
+            }
+            assert!(abort_source.to_string().contains("abort failed"));
+            assert!(!state.complete_called.load(Ordering::SeqCst));
+            assert!(state.aborted.load(Ordering::SeqCst));
+        }
+    }
+
+    #[test]
+    fn multipart_abort_failure_retains_completion_failure() {
+        let state = Arc::new(State {
+            fail_complete: true,
+            fail_abort: true,
+            ..State::default()
+        });
+        let error = block_on(write_multipart(
+            &mut std::io::empty(),
+            Path::new("input"),
+            &ObjectPath::from("output"),
+            Box::new(Upload(Arc::clone(&state))),
+        ))
+        .expect_err("complete and abort fail");
+        let display = error.to_string();
+        assert!(
+            display.contains("injected failure"),
+            "primary missing: {display}"
+        );
+        assert!(display.contains("abort failed"), "abort missing: {display}");
+        assert!(
+            std::error::Error::source(&error)
+                .expect("primary source")
+                .to_string()
+                .contains("injected failure")
+        );
+        assert!(state.aborted.load(Ordering::SeqCst));
+    }
+
+    #[test]
     fn local_read_failure_preserves_input_error_context() {
         struct Broken;
         impl Read for Broken {
@@ -788,6 +1048,7 @@ mod multipart_regressions {
             matches!(result, Err(PipelineIoError::OpenInput { path, .. }) if path == Path::new("broken-input"))
         );
         assert!(!state.complete_called.load(Ordering::SeqCst));
+        assert!(state.aborted.load(Ordering::SeqCst));
     }
 }
 
