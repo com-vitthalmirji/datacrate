@@ -41,7 +41,7 @@ and the driver never materializes the whole file. It's tempting to assume
 `for record in reader.records()` instead of `.collect()`.
 
 It doesn't come from the loop syntax. `for record in reader.records()`
-(`csv-select.rs:129,141`) is streaming because `csv::Reader` itself never
+(`csv-select.rs:134`) is streaming because `csv::Reader` itself never
 loads the file into memory - it pulls one record at a time off the
 underlying `Read`. `reader.records()` returns a lazy `Iterator`: one CSV
 record allocated per `.next()` call, not a `Vec<StringRecord>` built up
@@ -96,14 +96,17 @@ reader is still alive"]
     end
 ```
 
-What the real code does (`csv-select.rs:120-127`):
+What the real code does (`csv-select.rs:123-134`), guarded by `has_headers`
+so the same function serves both modes:
 
 ```rust
-let headers = reader
-    .headers()
-    .map_err(|source| CliError::ReadRecord { source })?
-    .clone();
-select_and_write(writer, &headers, column)?;
+if has_headers {
+    let headers = reader
+        .headers()
+        .map_err(|source| CliError::ReadRecord { source })?
+        .clone();
+    select_and_write(writer, &headers, column)?;
+}
 
 for record in reader.records() {
 ```
@@ -126,31 +129,46 @@ reason about lifetime overlap."
 ## Fusing lookup and write so a borrow never outlives its use
 
 ```rust
+fn select_field(record: &csv::StringRecord, column: usize) -> Result<&str, CliError> {
+    record.get(column).ok_or(CliError::ColumnOutOfRange {
+        column,
+        available: record.len(),
+    })
+}
+
 fn select_and_write<W: std::io::Write>(
     writer: &mut csv::Writer<W>,
     record: &csv::StringRecord,
     column: usize,
 ) -> Result<(), CliError> {
-    let field = record.get(column).ok_or(CliError::ColumnOutOfRange {
-        column,
-        available: record.len(),
-    })?;
+    let field = select_field(record, column)?;
     writer
         .write_record([field])
         .map_err(|source| CliError::WriteOutput { source })
 }
 ```
 
-`record.get(column)` returns `Option<&str>` - a borrow scoped to `record`.
-Lookup and write are one function instead of two so that borrow never has to
-survive past the function that created it. Splitting them would work today
-(no intervening mutation), but it's exactly the shape that breaks the moment
-someone inserts a line that needs `&mut record` in between. This is also why
-`write_with_headers` and `write_no_headers` (`csv-select.rs:115-146`) look so
-similar instead of being unified - they differ only in whether the first
-record is a header or data, and threading a `bool` through `select_and_write`
-for a distinction only the *caller* needs to know about would leak that
-distinction into a function that shouldn't care.
+`select_field` isolates the lookup so the column-out-of-range check has one
+place to live; `select_and_write` is the function that actually owns the
+borrow. `record.get(column)` returns `Option<&str>` - a borrow scoped to
+`record`. Lookup and write are one function instead of two so that borrow
+never has to survive past the function that created it. Splitting them would
+work today (no intervening mutation), but it's exactly the shape that breaks
+the moment someone inserts a line that needs `&mut record` in between.
+
+`write_selected_column` (`csv-select.rs:117-139`) didn't start this way.
+Earlier revisions had `write_with_headers` and `write_no_headers` as two
+separate functions, kept apart on the theory that threading a `has_headers`
+bool through would leak a distinction only the *caller* needed to know about.
+In practice the two functions were identical below the first few lines - same
+`for record in reader.records()` loop, same `select_and_write` call per
+record - so every change to the per-record loop had to be made twice. A
+later change collapsed them back into one function behind a `has_headers`
+guard: one copy of the loop instead of two, at the cost of the bool the
+earlier design was trying to avoid. Repetition beat the leaked
+distinction - the lesson isn't "never thread a bool," it's that avoiding one
+kind of coupling (a caller detail leaking in) can trade it for a worse one
+(the same logic duplicated and drifting).
 
 ## `?` guarantees no partial output on a bad column
 
@@ -163,10 +181,10 @@ $ echo $?
 
 Nothing is written to stdout before that error - not even the header row,
 even though the header row is written before the data-row loop starts
-(`csv-select.rs:127`, before the `for` at `:129`). That's not an accident of
+(`csv-select.rs:131`, before the `for` at `:134`). That's not an accident of
 ordering; it's guaranteed by `select_and_write` returning `Result` and every
-caller propagating with `?` (`csv-select.rs:125,127,130,131`). The moment
-`record.get(column)` returns `None`, the function returns `Err` before
+caller propagating with `?` (`csv-select.rs:111,131,135,136`). The moment
+`select_field` returns `Err`, the function returns before
 `writer.write_record` is ever called for that record - and because headers
 go through the same `select_and_write` path, a bad column on a headers-mode
 file fails on the header row itself, before any data row is even read.
@@ -198,7 +216,8 @@ already on stdout). Naming which guarantee holds, which doesn't, and why
 fixing the second would cost you the entire reason to stream is the actual
 skill here - not a gap to quietly patch over.
 
-Four failure paths, four tests, all in `crates/csv-cli/tests/csv_select.rs`:
+Five failure paths map to five `CliError` variants, all in
+`crates/csv-cli/tests/csv_select.rs`:
 
 | Failure | Fixture / input | Test | `CliError` variant |
 |---|---|---|---|
@@ -206,6 +225,18 @@ Four failure paths, four tests, all in `crates/csv-cli/tests/csv_select.rs`:
 | Malformed CSV | `fixtures/m1/malformed.csv` | `malformed_csv_fails_with_nonzero_exit_and_stderr` | `ReadRecord` |
 | Column out of range | `--column 99` | `invalid_column_fails_before_writing_any_output` | `ColumnOutOfRange` |
 | Missing required flag | no `--column` | `missing_required_flag_fails_with_clap_usage_error` | clap usage error |
+| Output can't be flushed | downstream closes stdout early | *(no dedicated test - see below)* | `WriteOutput` |
+
+That fifth row has no fixture because it isn't a bad *input*, it's a bad
+*output destination*: `run()` calls `writer.flush().map_err(|source|
+CliError::WriteOutput { source })` (`csv-select.rs:90`) after the row loop
+finishes, so a pipe closed downstream (`csv-select ... | head -1`, for
+example) surfaces here even though every row write before it succeeded.
+`select_and_write`'s own `write_record` call maps to the same
+`CliError::WriteOutput` variant, so "writer broke" is one variant with two
+places it can be first observed: mid-stream on an individual row, or at the
+final flush if the break happened after the last buffered write but before
+the kernel accepted it.
 
 ```console
 $ cargo test -p csv-select-cli
