@@ -1,0 +1,14 @@
+error[E0599]: no associated function or constant named `col_quantity` found for struct `Order` in the current scope
+  --> tests/compile_fail/renamed_field_col_accessor.rs:11:20
+   |
+ 5 | struct Order {
+   | ------------ associated function or constant `col_quantity` not found for this struct
+...
+11 |     let _ = Order::col_quantity();
+   |                    ^^^^^^^^^^^^ associated function or constant not found in `Order`
+   |
+help: there is an associated function `col_id` with a similar name
+   |
+11 -     let _ = Order::col_quantity();
+11 +     let _ = Order::col_id();
+   |

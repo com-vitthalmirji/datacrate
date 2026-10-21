@@ -1,0 +1,5 @@
+error: Connector derive supports only concrete structs; generic parameters and lifetimes are not supported
+ --> tests/compile_fail/generic_struct.rs:4:15
+  |
+4 | struct Generic<T> {
+  |               ^^^

@@ -358,3 +358,22 @@ fn report_overflow_fails_before_the_next_sink_action() {
     assert_eq!((e.stage, e.batch_index), (Stage::Sink, Some(1)));
     assert_eq!(calls.get(), 1);
 }
+
+use datafusion::prelude::SessionContext;
+#[test]
+fn sql_transform_filters_rows_through_datafusion() {
+    let ctx = SessionContext::new();
+    let mut seen = 0;
+    let plan = ContractPipeline::source::<Bronze, _>(|| Ok(std::iter::once(Ok(batch()))))
+        .sql_transform::<Silver>(&ctx, "SELECT id FROM batch WHERE id > 1")
+        .sink::<Silver>(|batch| {
+            seen += batch.num_rows();
+            Ok(())
+        })
+        .build()
+        .expect("prepare");
+    let report = plan.run().expect("run");
+    assert_eq!(seen, 1);
+    assert_eq!(report.rows_processed, 1);
+    assert_eq!(report.batches_processed, 1);
+}

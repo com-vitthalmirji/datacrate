@@ -11,9 +11,15 @@ workspace = true
 [dependencies]
 contracts = { version = "0.2.0", path = "../contracts", features = ["arrow-validation"] }
 arrow = "59"
+# Matches pipeline's and connectors-derive's pin, so a SessionContext built
+# by either crate's register_* helpers can be passed into sql_transform.
+datafusion = "55.1.0"
 object_store = "0.13.2"
 pipeline = { path = "../pipeline" }
+# "rt" (not "rt-multi-thread"): sql_transform builds one current-thread
+# runtime per call to drive ctx.sql(...).collect(), since the surrounding
+# pipeline stays synchronous end-to-end.
+tokio = { version = "1", default-features = false, features = ["rt"] }
 
 [dev-dependencies]
-tokio = { version = "1", default-features = false, features = ["rt"] }
 trybuild = "1"
