@@ -52,6 +52,21 @@ struct Unsupported {
 fn problem() -> CallbackError {
     Box::new(std::io::Error::other("original failure"))
 }
+struct OneBatch {
+    item: Option<Result<RecordBatch, CallbackError>>,
+    dropped: Rc<Cell<bool>>,
+}
+impl Iterator for OneBatch {
+    type Item = Result<RecordBatch, CallbackError>;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.item.take()
+    }
+}
+impl Drop for OneBatch {
+    fn drop(&mut self) {
+        self.dropped.set(true);
+    }
+}
 #[test]
 fn schema_changing_chain_and_source_are_lazy_and_ordered() {
     let events = Rc::new(RefCell::new(Vec::new()));
@@ -180,15 +195,20 @@ fn preserves_original_factory_iterator_transform_and_sink_errors() {
         Stage::Sink,
     ] {
         let downstream = Cell::new(0);
-        let e = ContractPipeline::source::<Bronze, _>(|| {
+        let dropped = Rc::new(Cell::new(false));
+        let release = dropped.clone();
+        let e = ContractPipeline::source::<Bronze, _>(move || {
             if failing == Stage::SourceFactory {
                 return Err(problem());
             }
-            Ok(std::iter::once(if failing == Stage::Source {
-                Err(problem())
-            } else {
-                Ok(batch())
-            }))
+            Ok(OneBatch {
+                item: Some(if failing == Stage::Source {
+                    Err(problem())
+                } else {
+                    Ok(batch())
+                }),
+                dropped: release,
+            })
         })
         .transform::<Silver, Silver>(|b| {
             if failing == Stage::Transform(0) {
@@ -224,6 +244,7 @@ fn preserves_original_factory_iterator_transform_and_sink_errors() {
         );
         assert_eq!(e.source().expect("source").to_string(), "original failure");
         assert_eq!(downstream.get(), 0);
+        assert_eq!(dropped.get(), failing != Stage::SourceFactory);
     }
 }
 struct TrackedInput {
