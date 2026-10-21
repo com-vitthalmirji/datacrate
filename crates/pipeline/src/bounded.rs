@@ -741,6 +741,151 @@ mod tests {
     }
 
     #[test]
+    fn invalid_batch_is_rejected_before_encoder_receives_payload() {
+        use arrow::array::{Int64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use parquet::file::properties::WriterProperties;
+        struct ObservedWriter(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for ObservedWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .expect("observed bytes")
+                    .extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let properties = WriterProperties::builder()
+            .set_max_row_group_row_count(Some(1))
+            .set_compression(Compression::UNCOMPRESSED)
+            .build();
+        let writer = ArrowWriter::try_new(
+            ObservedWriter(Arc::clone(&observed)),
+            schema(),
+            Some(properties),
+        )
+        .expect("writer");
+        let invalid = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("renamed_id", DataType::Int64, false),
+                Field::new("name", DataType::Utf8, false),
+                Field::new("note", DataType::Utf8, true),
+            ])),
+            vec![
+                Arc::new(Int64Array::from(vec![1])),
+                Arc::new(StringArray::from(vec!["x".repeat(20000)])),
+                Arc::new(StringArray::from(vec![None::<&str>])),
+            ],
+        )
+        .expect("invalid contract, valid Arrow");
+        let (sender, receiver) = sync_channel(1);
+        sender
+            .send(Ok(crate::fixture_to_record_batch(&fixture_path(
+                "headers.csv",
+            ))
+            .expect("input")))
+            .expect("send");
+        drop(sender);
+        let transform = |_batch| Ok(invalid.clone());
+        let error = consume_batches(
+            BatchReceiver::Count(receiver),
+            writer,
+            Path::new("unused"),
+            Some(&transform),
+            &CancellationToken::new(),
+        )
+        .expect_err("contract failure");
+        assert!(matches!(
+            error,
+            PipelineError::Io(PipelineIoError::InvalidBatch { .. })
+        ));
+        assert!(
+            observed.lock().expect("bytes").len() <= 4,
+            "only the initial Parquet magic may reach the writer before rejection"
+        );
+    }
+
+    #[test]
+    fn count_transport_consumer_failure_releases_saturated_sender() {
+        use std::sync::mpsc::{TrySendError, channel};
+        use std::time::Duration;
+        for capacity in [0, 1] {
+            let batch =
+                crate::fixture_to_record_batch(&fixture_path("headers.csv")).expect("fixture");
+            let (sender, receiver) = sync_channel(capacity);
+            let (entered, wait_entered) = channel();
+            let (saturated, wait_saturated) = channel();
+            let (attempting, wait_attempting) = channel();
+            let (finished, wait_finished) = channel();
+            let producer = std::thread::spawn(move || {
+                sender.send(Ok(batch.clone())).expect("first batch");
+                wait_entered
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("callback entered");
+                if capacity == 1 {
+                    sender.send(Ok(batch.clone())).expect("fill count slot");
+                }
+                let pending = match sender.try_send(Ok(batch)) {
+                    Err(TrySendError::Full(batch)) => batch,
+                    _ => panic!("callback must hold the receiver while channel is full"),
+                };
+                saturated.send(()).expect("saturation observer");
+                // Expose the pending attempt while callback still owns the live receiver.
+                // No claim is made about an internal std-channel program counter.
+                let result = sender.send({
+                    attempting.send(()).expect("attempt observer");
+                    pending
+                });
+                finished.send(result.is_err()).expect("completion observer");
+            });
+            let transform = |_batch: RecordBatch| {
+                entered.send(()).expect("producer observer");
+                wait_saturated
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("observed full channel");
+                wait_attempting
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("pending send exposed");
+                assert!(matches!(
+                    wait_finished.try_recv(),
+                    Err(std::sync::mpsc::TryRecvError::Empty)
+                ));
+                Err(PipelineIoError::OpenInput {
+                    path: PathBuf::from("callback failure"),
+                    source: std::io::Error::other("callback failure"),
+                })
+            };
+            let writer = ArrowWriter::try_new(Vec::<u8>::new(), schema(), None).expect("writer");
+            let error = consume_batches(
+                BatchReceiver::Count(receiver),
+                writer,
+                Path::new("unused"),
+                Some(&transform),
+                &CancellationToken::new(),
+            )
+            .expect_err("consumer must return callback failure");
+            assert!(matches!(
+                error,
+                PipelineError::Io(PipelineIoError::Callback {
+                    stage: CallbackStage::Transform,
+                    batch_index: 0,
+                    ..
+                })
+            ));
+            assert!(
+                wait_finished
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("receiver drop releases pending send")
+            );
+            producer.join().expect("producer exit");
+        }
+    }
+
+    #[test]
     fn owned_staging_write_and_close_failures_keep_previous_output() {
         use arrow::array::{Int64Array, StringArray};
         use parquet::file::properties::WriterProperties;
