@@ -4,10 +4,14 @@
 //! of the instantiated call. Runtime checks validate actual source/transform
 //! batches. Opaque callbacks may still fail or perform external effects.
 use arrow::array::RecordBatch;
+use arrow::compute::concat_batches;
 use contracts::{
     Contract, ExactOrdered,
     arrow::{BatchValidationError, BatchValidator, MappingError},
 };
+use datafusion::datasource::MemTable;
+use datafusion::prelude::SessionContext;
+use std::sync::Arc;
 use std::{error::Error, marker::PhantomData};
 
 /// A callback's recoverable error, preserved as the original boxed source.
@@ -157,6 +161,45 @@ impl<'a, C: Contract> ContractPipeline<'a, C> {
             plan: self.plan,
             declaration: PhantomData,
         }
+    }
+    /// Like `transform`, but produces the next stage by running `sql` through
+    /// `ctx` instead of a Rust closure. The same compile-time `ExactOrdered`
+    /// check `transform` runs still applies to `O`; only how the batch is
+    /// produced differs.
+    ///
+    /// Each input batch is (re)registered on `ctx` as a table named `batch`
+    /// — `sql` must query that name — then `sql`'s result is collected and
+    /// concatenated back into the single batch `O` is validated against.
+    /// A fresh current-thread Tokio runtime drives the query per call, since
+    /// the pipeline itself stays synchronous; this is the minimum viable way
+    /// to bridge DataFusion's async API, not a pooled or reused runtime.
+    pub fn sql_transform<O: Contract>(
+        self,
+        ctx: &'a SessionContext,
+        sql: &'a str,
+    ) -> ContractPipeline<'a, O> {
+        self.transform::<C, O>(move |batch| {
+            let schema = batch.schema();
+            ctx.deregister_table("batch")
+                .map_err(|e| Box::new(e) as CallbackError)?;
+            let table = MemTable::try_new(schema, vec![vec![batch]])
+                .map_err(|e| Box::new(e) as CallbackError)?;
+            ctx.register_table("batch", Arc::new(table))
+                .map_err(|e| Box::new(e) as CallbackError)?;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| Box::new(e) as CallbackError)?;
+            let (out_schema, batches) = runtime
+                .block_on(async {
+                    let df = ctx.sql(sql).await?;
+                    let out_schema = Arc::new(df.schema().as_arrow().clone());
+                    let batches = df.collect().await?;
+                    Ok::<_, datafusion::error::DataFusionError>((out_schema, batches))
+                })
+                .map_err(|e| Box::new(e) as CallbackError)?;
+            concat_batches(&out_schema, &batches).map_err(|e| Box::new(e) as CallbackError)
+        })
     }
     /// Checks the final declared connection and terminates composition.
     /// The sink receives batches only after source/transform validation succeeds.
