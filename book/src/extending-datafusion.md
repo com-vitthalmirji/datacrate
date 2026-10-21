@@ -176,6 +176,26 @@ exec holds while it computes `RANK()`, `LAG()`, or a running `SUM() OVER`
 - same shape, same reason: the function needs to see the whole partition
 (or a window of it) before it can answer for any single row.
 
+## Preserve scalar representation in the timestamp function
+
+Earlier, `days_since_epoch` expanded every argument with
+`ColumnarValue::values_to_arrays`, including constant scalar inputs. It
+now returns `ScalarValue::Int64` directly for a timestamp scalar and
+builds an `Int64Array` only for array input. A null timestamp scalar stays
+a typed null scalar; array length and nulls are preserved. Negative
+microseconds use Euclidean division, so `-1` microsecond belongs to day
+`-1`. Wrong arity, type or timezone returns an execution error on direct
+invocation instead of indexing or panicking on a failed downcast.
+
+The direct invocation regression checks representation as well as values,
+including `i64` limits. A separate comparison records the old scalar
+expansion and current array buffers at 0, 1, 1,000 and 100,000 rows. The old
+scalar expansion produces a one-element array, not an array of the whole
+query batch. The scalar branch avoids that intermediate array and its
+output array here; downstream operators may still broadcast a scalar.
+This is a representation improvement, without a whole-query speedup claim.
+Existing SQL and constant-folding tests remain separate checks.
+
 ## An async `ScalarUDF`: when producing one value needs an `.await`
 
 **Claim**: DataFusion's scalar-function extension point isn't limited to
