@@ -628,9 +628,9 @@ impl From<arrow::error::ArrowError> for CliError { /* ... */ }
 That pattern - many `From<T>` impls landing on one `CliError` - is only
 representable because `From` took `T` as a generic parameter; if `From` used
 an associated type the way `Iterator` does, `CliError` could only ever
-convert from one source error type. `crates/contracts-derive/src/lib.rs`'s
-`fn type_args(segment: &syn::PathSegment) -> impl Iterator<Item = &Type>` is
-this codebase's associated-type usage from the other side - it names
+convert from one source error type. `crates/typestate/src/contract_pipeline.rs`'s
+`type BatchIterator<'a> = Box<dyn Iterator<Item = Result<RecordBatch, CallbackError>> + 'a>;`
+is this codebase's associated-type usage from the other side - it names
 `Iterator`'s output type directly because there's exactly one to name.
 
 **Scala/FP bridge**: an associated type is what Scala's path-dependent types
