@@ -9,6 +9,8 @@
 #![warn(missing_docs)]
 
 mod batch_contract;
+mod publication;
+mod staging;
 pub use batch_contract::{BatchViolation, validate_ingest_batch};
 
 pub mod bounded;
@@ -52,6 +54,18 @@ impl std::fmt::Display for CallbackStage {
 /// or while writing/reading that batch as Parquet.
 #[derive(Debug)]
 pub enum PipelineIoError {
+    /// An object could not be deleted during an explicit protocol action.
+    DeleteObject {
+        /// The key that could not be deleted.
+        key: object_store::path::Path,
+        /// Original backend failure.
+        source: object_store::Error,
+    },
+    /// Strict completion reading requires an output identity absent from this version.
+    CompletionIdentityRequired {
+        /// Supported but weaker manifest version.
+        version: u32,
+    },
     /// A configured callback returned an error.
     Callback {
         /// The failing stage.
@@ -150,6 +164,13 @@ pub enum PipelineIoError {
         /// The underlying `object_store` error.
         source: object_store::Error,
     },
+    /// A multipart failure was followed by a failed explicit abort.
+    MultipartAbort {
+        /// The original read, part or completion failure.
+        source: Box<PipelineIoError>,
+        /// The secondary backend abort failure.
+        abort_source: object_store::Error,
+    },
     /// An object's metadata could not be read from an
     /// [`object_store::ObjectStore`].
     HeadObject {
@@ -178,11 +199,6 @@ pub enum PipelineIoError {
         /// The scheme named in the persisted record.
         scheme: String,
     },
-    /// Publication is not yet enabled for this manifest version.
-    UnsupportedManifestWriteVersion {
-        /// The requested write version.
-        version: u32,
-    },
     /// A [`manifest::CompletionManifest`] could not be serialized to JSON.
     WriteManifest {
         /// The underlying `serde_json` error.
@@ -193,6 +209,12 @@ pub enum PipelineIoError {
 impl std::fmt::Display for PipelineIoError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            PipelineIoError::DeleteObject { key, source } => {
+                write!(f, "failed to delete {key}: {source}")
+            }
+            PipelineIoError::CompletionIdentityRequired { version } => {
+                write!(f, "manifest version {version} has no bound output identity")
+            }
             PipelineIoError::Callback {
                 stage,
                 batch_index,
@@ -246,6 +268,12 @@ impl std::fmt::Display for PipelineIoError {
             PipelineIoError::UploadObject { key, source } => {
                 write!(f, "failed to upload {key}: {source}")
             }
+            PipelineIoError::MultipartAbort {
+                source,
+                abort_source,
+            } => {
+                write!(f, "{source}; multipart abort also failed: {abort_source}")
+            }
             PipelineIoError::HeadObject { key, source } => {
                 write!(f, "failed to read metadata for {key}: {source}")
             }
@@ -261,10 +289,6 @@ impl std::fmt::Display for PipelineIoError {
             PipelineIoError::UnsupportedDigestScheme { scheme } => {
                 write!(f, "unsupported digest scheme {scheme:?}")
             }
-            PipelineIoError::UnsupportedManifestWriteVersion { version } => write!(
-                f,
-                "completion manifest version {version} publication is not enabled"
-            ),
             PipelineIoError::WriteManifest { source } => {
                 write!(f, "failed to serialize completion manifest: {source}")
             }
@@ -275,6 +299,9 @@ impl std::fmt::Display for PipelineIoError {
 impl std::error::Error for PipelineIoError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            PipelineIoError::MultipartAbort { source, .. } => Some(source.as_ref()),
+            PipelineIoError::DeleteObject { source, .. } => Some(source),
+            PipelineIoError::CompletionIdentityRequired { .. } => None,
             PipelineIoError::Callback { source, .. } => Some(source.as_ref()),
             PipelineIoError::InvalidBatch { violation } => Some(violation),
             PipelineIoError::OpenInput { source, .. } => Some(source),
@@ -296,7 +323,6 @@ impl std::error::Error for PipelineIoError {
             | PipelineIoError::WriteManifest { source } => Some(source),
             PipelineIoError::InvalidManifest { violation } => Some(violation),
             PipelineIoError::UnsupportedManifestVersion { .. }
-            | PipelineIoError::UnsupportedManifestWriteVersion { .. }
             | PipelineIoError::UnsupportedDigestScheme { .. } => None,
         }
     }
@@ -438,6 +464,15 @@ pub(crate) fn open_parquet_writer(
         path: path.to_path_buf(),
         source,
     })?;
+    parquet_writer(file, schema, compression)
+}
+
+/// Opens an encoded writer on an already-owned file, without creating a path.
+pub(crate) fn parquet_writer(
+    file: File,
+    schema: SchemaRef,
+    compression: Compression,
+) -> Result<ArrowWriter<File>, PipelineIoError> {
     let props = WriterProperties::builder()
         .set_compression(compression)
         .build();
@@ -727,3 +762,6 @@ mod tests {
 
 #[cfg(test)]
 mod query_io_tests;
+
+#[cfg(test)]
+mod ordered_stream_tests;

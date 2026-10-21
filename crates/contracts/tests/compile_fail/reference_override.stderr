@@ -1,0 +1,9 @@
+error[E0119]: conflicting implementations of trait `Contract` for type `&Local`
+ --> tests/compile_fail/reference_override.rs:6:1
+  |
+6 | impl Contract for &Local {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: conflicting implementation in crate `contracts`:
+          - impl<T> Contract for &T
+            where T: Contract, T: ?Sized;

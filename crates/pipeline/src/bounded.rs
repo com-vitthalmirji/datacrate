@@ -1,39 +1,48 @@
 //! A bounded input -> Arrow transform -> Parquet output pipeline. Synchronous
 //! by design — backpressure and bounded memory come from a bounded
-//! `mpsc::sync_channel`, not from an executor.
+//! count-limited channel or the optional byte-budget transport, not an executor.
 //!
-//! Output is staged: the writer targets a `.tmp` sibling of the requested
-//! output path and is renamed into place only after a full, successful
-//! close. Any error or cancellation removes the staged file instead of
-//! publishing partial output.
+//! Each local run owns a unique staged file in the output directory. It is
+//! published only after encoding and file synchronization succeed. A parent
+//! sync error after publication reports uncertain durability explicitly.
 //!
 //! See docs/adr/0005-bounded-pipeline-backpressure.md.
 
 use std::fs::File;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 
+use crate::staging::LocalStagedOutput;
 use arrow::array::RecordBatch;
 use object_store::ObjectStore;
 use object_store::path::Path as ObjectPath;
+use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 
+#[path = "bounded/transport.rs"]
+mod transport;
+
 use crate::batch_contract::CheckedIngestBatch;
-use crate::manifest::{self, CompletionManifest};
-use crate::object_store_io::{
-    best_effort_delete, download_to_temp, publish_staged_object, put_manifest, upload_from_temp,
+use crate::manifest;
+#[cfg(test)]
+use crate::manifest::CompletionManifest;
+use crate::object_store_io::download_to_temp;
+pub use crate::publication::{
+    RemotePublicationError, RemotePublicationOutcome, RemotePublicationPhase,
 };
+pub use crate::staging::{LocalPublicationOutcome, LocalPublicationPhase};
 use crate::{
-    CallbackStage, PipelineIoError, Row, batch_from_rows, open_parquet_writer, parse_row, schema,
+    CallbackStage, PipelineIoError, Row, batch_from_rows, parquet_writer, parse_row, schema,
 };
 
 /// Tuning for [`run_bounded_pipeline`]: how many rows make one `RecordBatch`,
 /// and how many batches may be in flight between the reader and writer at
-/// once. Both bound the pipeline's peak memory independently of input size.
+/// once. The optional byte budget limits admitted Arrow array charges, excluding
+/// batch construction, callback internals, Parquet buffers and allocator overhead.
 #[derive(Debug, Clone)]
 pub struct PipelineConfig {
     /// Rows per `RecordBatch`. Smaller values bound memory more tightly at
@@ -42,6 +51,9 @@ pub struct PipelineConfig {
     /// Capacity of the channel between the reader and writer threads. `0`
     /// makes it a rendezvous channel (strictest possible backpressure).
     pub channel_capacity: usize,
+    /// Optional ceiling on admitted Arrow array memory charges. Construction,
+    /// callbacks, Parquet buffers and allocator overhead are outside this budget.
+    pub max_admitted_bytes: Option<NonZeroUsize>,
     /// Parquet compression for the output file.
     pub compression: Compression,
 }
@@ -51,6 +63,7 @@ impl Default for PipelineConfig {
         Self {
             batch_size: NonZeroUsize::new(1_000).expect("default batch size is nonzero"),
             channel_capacity: 4,
+            max_admitted_bytes: None,
             compression: Compression::SNAPPY,
         }
     }
@@ -61,7 +74,10 @@ impl Default for PipelineConfig {
 /// (or immediately, if none was ever sent) and reports
 /// [`PipelineError::Cancelled`] instead of publishing output.
 #[derive(Debug, Clone, Default)]
-pub struct CancellationToken(Arc<AtomicBool>);
+pub struct CancellationToken {
+    cancelled: Arc<AtomicBool>,
+    transports: Arc<Mutex<Vec<Weak<transport::Control>>>>,
+}
 
 impl CancellationToken {
     /// Creates a token that is not yet cancelled.
@@ -71,12 +87,35 @@ impl CancellationToken {
 
     /// Requests cancellation. Idempotent.
     pub fn cancel(&self) {
-        self.0.store(true, Ordering::Relaxed);
+        self.cancelled.store(true, Ordering::Release);
+        let controls = {
+            let mut registry = self.transports.lock().unwrap_or_else(|p| p.into_inner());
+            registry
+                .drain(..)
+                .filter_map(|weak| weak.upgrade())
+                .collect::<Vec<_>>()
+        };
+        for control in controls {
+            control.cancel();
+        }
+    }
+
+    fn register(&self, control: &Arc<transport::Control>) {
+        {
+            let mut registry = self.transports.lock().unwrap_or_else(|p| p.into_inner());
+            registry.retain(|weak| weak.strong_count() > 0);
+            registry.push(Arc::downgrade(control));
+        }
+        // Cancellation sets the flag before visiting registrations. This second check
+        // covers registration after that visit, without acquiring locks in reverse order.
+        if self.is_cancelled() {
+            control.cancel();
+        }
     }
 
     /// Reports whether [`cancel`](Self::cancel) has been called.
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
+        self.cancelled.load(Ordering::Acquire)
     }
 }
 
@@ -90,11 +129,44 @@ pub struct PipelineReport {
     /// `manifest::accumulate_batch_digest`'s final value over every row
     /// written — order- and batch-boundary-independent.
     pub content_digest: u64,
+    /// Retained charge at successful completion (zero); None when budgeting is disabled.
+    pub admitted_bytes: Option<usize>,
+    /// Highest simultaneous admitted Arrow charge; None when budgeting is disabled.
+    pub peak_admitted_bytes: Option<usize>,
 }
 
 /// Errors from [`run_bounded_pipeline`].
 #[derive(Debug)]
 pub enum PipelineError {
+    /// A remote publication operation failed with explicit recovery information.
+    RemotePublication(Box<RemotePublicationError>),
+    /// A local staging or publication operation failed with known visibility.
+    LocalPublication {
+        /// Failed operation.
+        phase: LocalPublicationPhase,
+        /// Final-path visibility known after failure.
+        outcome: LocalPublicationOutcome,
+        /// Requested final output path.
+        output: PathBuf,
+        /// Original I/O or encoding failure.
+        source: Box<PipelineIoError>,
+    },
+    /// A finished producer batch cannot fit in the configured byte budget.
+    BatchTooLarge {
+        /// Estimated retained Arrow bytes.
+        bytes: usize,
+        /// Configured admission ceiling.
+        limit: usize,
+    },
+    /// A transformed batch cannot grow without exceeding the retained byte budget.
+    BatchGrowthExceedsBudget {
+        /// Estimated transformed batch bytes.
+        bytes: usize,
+        /// Bytes available to this lease, including its existing reservation.
+        available: usize,
+    },
+    /// The declared Arrow memory charges cannot be added in usize.
+    ByteChargeOverflow,
     /// The reader or writer failed for a reason [`PipelineIoError`] already
     /// models (I/O, malformed CSV, schema mismatch, Parquet errors).
     Io(PipelineIoError),
@@ -106,6 +178,25 @@ pub enum PipelineError {
 impl std::fmt::Display for PipelineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            PipelineError::LocalPublication {
+                phase,
+                outcome,
+                output,
+                source,
+            } => write!(
+                f,
+                "local publication {phase:?} for {} ({outcome:?}): {source}",
+                output.display()
+            ),
+            PipelineError::BatchTooLarge { bytes, limit } => {
+                write!(f, "batch charge {bytes} exceeds byte budget {limit}")
+            }
+            PipelineError::BatchGrowthExceedsBudget { bytes, available } => write!(
+                f,
+                "transformed batch charge {bytes} exceeds available budget {available}"
+            ),
+            PipelineError::ByteChargeOverflow => f.write_str("batch byte charge overflow"),
+            PipelineError::RemotePublication(error) => write!(f, "{error}"),
             PipelineError::Io(source) => write!(f, "{source}"),
             PipelineError::Cancelled => {
                 write!(f, "pipeline was cancelled before output was published")
@@ -117,8 +208,13 @@ impl std::fmt::Display for PipelineError {
 impl std::error::Error for PipelineError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            PipelineError::RemotePublication(error) => Some(error.as_ref()),
             PipelineError::Io(source) => Some(source),
-            PipelineError::Cancelled => None,
+            PipelineError::LocalPublication { source, .. } => Some(source.as_ref()),
+            PipelineError::Cancelled
+            | PipelineError::BatchTooLarge { .. }
+            | PipelineError::BatchGrowthExceedsBudget { .. }
+            | PipelineError::ByteChargeOverflow => None,
         }
     }
 }
@@ -134,39 +230,61 @@ fn accumulate_batch_stats(report: PipelineReport, checked: &CheckedIngestBatch) 
         batches_written: report.batches_written + 1,
         rows_written: report.rows_written + checked.batch().num_rows(),
         content_digest: manifest::accumulate_batch_digest(report.content_digest, checked),
+        ..report
     }
 }
 
-fn staging_path_for(output: &Path) -> PathBuf {
-    let mut staging = output.as_os_str().to_owned();
-    staging.push(".tmp");
-    PathBuf::from(staging)
+enum BatchSender {
+    Count(SyncSender<Result<RecordBatch, PipelineIoError>>),
+    Budgeted(transport::Sender),
 }
 
-/// The object-store-side counterpart to [`staging_path_for`]: a `.staging`
-/// sibling key, published to `output_key` only after the upload succeeds.
-fn staging_key_for(output_key: &ObjectPath) -> ObjectPath {
-    ObjectPath::from(format!("{output_key}.staging"))
+impl BatchSender {
+    fn send(&self, batch: Result<RecordBatch, PipelineIoError>) -> Result<(), PipelineError> {
+        match self {
+            Self::Count(sender) => sender.send(batch).map_err(|_| PipelineError::Cancelled),
+            Self::Budgeted(sender) => sender.send(batch),
+        }
+    }
+}
+
+enum BatchReceiver {
+    Count(Receiver<Result<RecordBatch, PipelineIoError>>),
+    Budgeted(transport::Receiver),
+}
+
+impl BatchReceiver {
+    fn recv(&self) -> Result<Option<transport::BatchLease>, PipelineError> {
+        match self {
+            Self::Count(receiver) => match receiver.recv() {
+                Ok(batch) => batch
+                    .map(transport::BatchLease::uncharged)
+                    .map(Some)
+                    .map_err(PipelineError::Io),
+                Err(_) => Ok(None),
+            },
+            Self::Budgeted(receiver) => receiver.recv(),
+        }
+    }
 }
 
 /// Reads `path` row by row, grouping every `batch_size` rows into a
 /// `RecordBatch` and sending it on `sender`. Never holds more than
-/// `batch_size` rows in memory at once. Stops early, without error, if
-/// `cancel` is set or the receiving end has gone away.
+/// `batch_size` owned rows at once. Checks cancellation between CSV records;
+/// reports admission failure, and stops when the receiving end closes.
 fn produce_batches(
     path: &Path,
     batch_size: usize,
     cancel: &CancellationToken,
-    sender: SyncSender<Result<RecordBatch, PipelineIoError>>,
-) {
+    sender: BatchSender,
+) -> Result<(), PipelineError> {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(source) => {
-            let _ = sender.send(Err(PipelineIoError::OpenInput {
+            return sender.send(Err(PipelineIoError::OpenInput {
                 path: path.to_path_buf(),
                 source,
             }));
-            return;
         }
     };
     let mut reader = csv::Reader::from_reader(file);
@@ -174,7 +292,7 @@ fn produce_batches(
 
     for (row_index, record) in reader.records().enumerate() {
         if cancel.is_cancelled() {
-            return;
+            return Ok(());
         }
         let row = match record
             .map_err(|source| PipelineIoError::ReadRecord { source })
@@ -182,8 +300,7 @@ fn produce_batches(
         {
             Ok(row) => row,
             Err(err) => {
-                let _ = sender.send(Err(err));
-                return;
+                return sender.send(Err(err));
             }
         };
         chunk.push(row);
@@ -191,29 +308,27 @@ fn produce_batches(
         if chunk.len() == batch_size {
             let batch = batch_from_rows(&chunk);
             chunk.clear();
-            if sender.send(batch).is_err() {
-                return;
-            }
+            sender.send(batch)?;
         }
     }
 
     if !chunk.is_empty() && !cancel.is_cancelled() {
-        let _ = sender.send(batch_from_rows(&chunk));
+        sender.send(batch_from_rows(&chunk))?;
     }
+    Ok(())
 }
 
-/// Receives batches from `receiver`, writing each to a Parquet writer over
-/// `staging_path`. Reports [`PipelineError::Cancelled`] if `cancel` is set
+/// Receives batches from `receiver` and writes them through the owned writer. Reports [`PipelineError::Cancelled`] if `cancel` is set
 /// either before the first batch or between batches, without writing
 /// anything further.
 ///
 /// `receiver` is taken by value so that every early return below drops it:
 /// that drop is what unblocks [`produce_batches`] if it's parked in a
 /// blocking `sender.send()` on a full channel, rather than deadlocking.
-fn consume_batches(
-    receiver: Receiver<Result<RecordBatch, PipelineIoError>>,
-    staging_path: &Path,
-    compression: Compression,
+fn consume_batches<W: std::io::Write + Send>(
+    receiver: BatchReceiver,
+    mut writer: ArrowWriter<W>,
+    output: &Path,
     transform: Option<&dyn Fn(RecordBatch) -> Result<RecordBatch, PipelineIoError>>,
     cancel: &CancellationToken,
 ) -> Result<PipelineReport, PipelineError> {
@@ -221,29 +336,33 @@ fn consume_batches(
         return Err(PipelineError::Cancelled);
     }
 
-    let mut writer = open_parquet_writer(staging_path, schema(), compression)?;
-
     let mut report = PipelineReport::default();
 
-    for received in receiver {
+    while let Some(lease) = receiver.recv()? {
         if cancel.is_cancelled() {
             return Err(PipelineError::Cancelled);
         }
-        let batch = received?;
         // Applied before the digest, not after: the manifest must audit what
         // was actually written, not the raw input.
-        let batch = match transform {
-            Some(f) => f(batch).map_err(|source| PipelineIoError::Callback {
-                stage: CallbackStage::Transform,
-                batch_index: report.batches_written,
-                source: Box::new(source),
+        let lease = match transform {
+            Some(f) => lease.transform(|batch| {
+                f(batch).map_err(|source| PipelineIoError::Callback {
+                    stage: CallbackStage::Transform,
+                    batch_index: report.batches_written,
+                    source: Box::new(source),
+                })
             })?,
-            None => batch,
+            None => lease,
         };
+        let (batch, _reservation) = lease.into_parts();
         let checked = CheckedIngestBatch::try_new(batch)?;
-        writer
-            .write(checked.batch())
-            .map_err(|source| PipelineIoError::WriteParquet { source })?;
+        writer.write(checked.batch()).map_err(|source| {
+            crate::staging::failure(
+                output,
+                LocalPublicationPhase::Write,
+                PipelineIoError::WriteParquet { source },
+            )
+        })?;
         report = accumulate_batch_stats(report, &checked);
     }
 
@@ -251,17 +370,13 @@ fn consume_batches(
         return Err(PipelineError::Cancelled);
     }
 
-    let file = writer
-        .into_inner()
-        .map_err(|source| PipelineIoError::WriteParquet { source })?;
-    // Durability: the rename in `run_bounded_pipeline` only makes the staged
-    // file visible atomically, it doesn't guarantee the file's bytes survive
-    // a crash. fsync here forces them to disk before that rename happens.
-    file.sync_all()
-        .map_err(|source| PipelineIoError::OpenOutput {
-            path: staging_path.to_path_buf(),
-            source,
-        })?;
+    drop(writer.into_inner().map_err(|source| {
+        crate::staging::failure(
+            output,
+            LocalPublicationPhase::Close,
+            PipelineIoError::WriteParquet { source },
+        )
+    })?);
     Ok(report)
 }
 
@@ -271,8 +386,9 @@ fn consume_batches(
 /// channel of capacity `config.channel_capacity`: the reader blocks once
 /// that many batches are unconsumed, bounding memory independently of input
 /// size. Output is staged and renamed into place only on success — any
-/// error or cancellation leaves `output` untouched and removes the staged
-/// file.
+/// error before rename leaves `output` untouched and drops owned staging.
+/// A parent-directory sync failure after rename reports published output with
+/// uncertain durability. The destination directory must be on one filesystem.
 ///
 /// `thread::scope` only returns once the producer thread has observed
 /// `consume_batches`'s receiver drop (as a `SendError`, if it was blocked
@@ -282,7 +398,8 @@ fn consume_batches(
 /// # Errors
 ///
 /// Returns [`PipelineError::Io`] for the same conditions as
-/// [`crate::fixture_to_record_batch`], plus writer/staging I/O failures, or
+/// [`crate::fixture_to_record_batch`], [`PipelineError::LocalPublication`] for
+/// encoding/staging/publication failures, or
 /// [`PipelineError::Cancelled`] if `cancel` was set before output could be
 /// published.
 pub fn run_bounded_pipeline(
@@ -292,52 +409,54 @@ pub fn run_bounded_pipeline(
     transform: Option<&dyn Fn(RecordBatch) -> Result<RecordBatch, PipelineIoError>>,
     cancel: &CancellationToken,
 ) -> Result<PipelineReport, PipelineError> {
-    let (sender, receiver) =
-        sync_channel::<Result<RecordBatch, PipelineIoError>>(config.channel_capacity);
-    let staging_path = staging_path_for(output);
-
+    if cancel.is_cancelled() {
+        return Err(PipelineError::Cancelled);
+    }
+    let staging = LocalStagedOutput::new(output)?;
+    let writer = parquet_writer(staging.file()?, schema(), config.compression)
+        .map_err(|source| crate::staging::failure(output, LocalPublicationPhase::Write, source))?;
+    let (sender, receiver, accounting) = match config.max_admitted_bytes {
+        Some(limit) => {
+            let (sender, receiver, control) =
+                transport::channel(config.channel_capacity, limit.get(), cancel);
+            (
+                BatchSender::Budgeted(sender),
+                BatchReceiver::Budgeted(receiver),
+                Some(control),
+            )
+        }
+        None => {
+            let (sender, receiver) = sync_channel(config.channel_capacity);
+            (
+                BatchSender::Count(sender),
+                BatchReceiver::Count(receiver),
+                None,
+            )
+        }
+    };
+    let mut production = Ok(());
     let result = thread::scope(|scope| {
-        scope.spawn(|| produce_batches(input, config.batch_size.get(), cancel, sender));
-        consume_batches(
-            receiver,
-            &staging_path,
-            config.compression,
-            transform,
-            cancel,
-        )
+        scope
+            .spawn(|| production = produce_batches(input, config.batch_size.get(), cancel, sender));
+        consume_batches(receiver, writer, output, transform, cancel)
+    });
+    // A producer admission error must not publish a successfully closed partial file.
+    let result = result.and_then(|mut report| {
+        production?;
+        if let Some(control) = accounting {
+            let (current, peak) = control.metrics();
+            report.admitted_bytes = Some(current);
+            report.peak_admitted_bytes = Some(peak);
+        }
+        Ok(report)
     });
 
-    match result {
-        Ok(report) => {
-            std::fs::rename(&staging_path, output).map_err(|source| {
-                PipelineIoError::OpenOutput {
-                    path: output.to_path_buf(),
-                    source,
-                }
-            })?;
-            // Durability: fsync the directory entry so the rename itself
-            // survives a crash, not just the file contents synced above.
-            if let Some(parent) = output
-                .parent()
-                .filter(|parent| !parent.as_os_str().is_empty())
-            {
-                let dir = File::open(parent).map_err(|source| PipelineIoError::OpenOutput {
-                    path: parent.to_path_buf(),
-                    source,
-                })?;
-                dir.sync_all()
-                    .map_err(|source| PipelineIoError::OpenOutput {
-                        path: parent.to_path_buf(),
-                        source,
-                    })?;
-            }
-            Ok(report)
-        }
-        Err(err) => {
-            let _ = std::fs::remove_file(&staging_path);
-            Err(err)
-        }
+    let report = result?;
+    if cancel.is_cancelled() {
+        return Err(PipelineError::Cancelled);
     }
+    staging.publish()?;
+    Ok(report)
 }
 
 /// Runs [`run_bounded_pipeline`] against objects in `store` instead of local
@@ -346,23 +465,25 @@ pub fn run_bounded_pipeline(
 /// Local disk staging keeps the bounded pipeline's memory envelope unchanged
 /// from the local-file case — only the two ends of the pipe move.
 ///
-/// Publishing mirrors [`run_bounded_pipeline`]'s local staging pattern on the
-/// object-store side: the upload lands at a `.staging` sibling key first,
-/// then [`publish_staged_object`] renames it to `output_key` — so a reader
-/// never observes a partially-uploaded object at the final key. Only once
-/// that rename succeeds is a [`CompletionManifest`] (row count and an
-/// order-independent content digest) written to `output_key`'s
-/// `.manifest.json` sibling; its presence is the completion signal a reader
-/// should wait for. If the manifest write fails, the published output is
-/// removed (best-effort) rather than left behind without a valid completion
-/// signal.
+/// Each run uploads to a unique owned staging key, invalidates the old
+/// completion marker, copies final output, captures its identity and writes a
+/// version-2 completion record. This requires external single-writer coordination
+/// per output key. Copy and completion are separate publications, not a transaction.
+/// Readers must use [`crate::object_store_io::download_completed_output`] to bind
+/// output reads to the recorded version or ETag. Versioned readers may observe a
+/// completed historical version; this does not promise the latest generation.
+///
+/// Cancellation is checked before input access and before remote publication.
+/// Once publication starts, it finishes or returns explicit recovery state; it is
+/// not interrupted midway and never rolls back by deleting the shared final key.
+/// Owned staging cleanup is attempted explicitly; process failure can leave orphans.
 ///
 /// # Errors
 ///
-/// Returns [`PipelineError::Io`] if the download, the local pipeline run, the
-/// input's metadata read, the publish, or the manifest write fails, or
-/// [`PipelineError::Cancelled`] if `cancel` was set before output could be
-/// published.
+/// Returns download/ingest errors, local publication errors, or
+/// [`PipelineError::RemotePublication`] with phase, known/unknown outcome and
+/// primary/secondary cleanup sources. [`PipelineError::Cancelled`] means a
+/// cooperative cancellation check stopped before remote publication began.
 pub fn run_bounded_pipeline_s3(
     store: &dyn ObjectStore,
     input_key: &ObjectPath,
@@ -371,6 +492,9 @@ pub fn run_bounded_pipeline_s3(
     transform: Option<&dyn Fn(RecordBatch) -> Result<RecordBatch, PipelineIoError>>,
     cancel: &CancellationToken,
 ) -> Result<PipelineReport, PipelineError> {
+    if cancel.is_cancelled() {
+        return Err(PipelineError::Cancelled);
+    }
     let staging_dir = tempfile::tempdir().map_err(|source| PipelineIoError::OpenOutput {
         path: std::env::temp_dir(),
         source,
@@ -381,23 +505,20 @@ pub fn run_bounded_pipeline_s3(
     let input_meta = download_to_temp(store, input_key, &local_input)?;
     let report = run_bounded_pipeline(&local_input, &local_output, config, transform, cancel)?;
 
-    let staging_key = staging_key_for(output_key);
-    upload_from_temp(store, &local_output, &staging_key)?;
-    if let Err(err) = publish_staged_object(store, &staging_key, output_key) {
-        best_effort_delete(store, &staging_key);
-        return Err(err.into());
+    if cancel.is_cancelled() {
+        return Err(PipelineError::Cancelled);
     }
-
-    let manifest = CompletionManifest::new(
+    // Once this sequence starts, complete it or return an explicit partial outcome.
+    // Cancellation cannot roll back a successful or ambiguous remote publication.
+    crate::publication::publish(
+        store,
+        &local_output,
+        output_key,
         input_key,
         &input_meta,
         report.rows_written,
         report.content_digest,
-    );
-    if let Err(err) = put_manifest(store, &manifest, &CompletionManifest::key_for(output_key)) {
-        best_effort_delete(store, output_key);
-        return Err(err.into());
-    }
+    )?;
 
     Ok(report)
 }
@@ -408,6 +529,19 @@ mod tests {
     use crate::read_parquet;
     use object_store::ObjectStoreExt;
     use std::io::Write;
+
+    fn assert_no_owned_staging(output: &Path) {
+        let parent = output.parent().expect("output directory");
+        for entry in std::fs::read_dir(parent).expect("directory") {
+            let entry = entry.expect("entry");
+            assert!(
+                !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".datacrate-")
+            );
+        }
+    }
 
     fn fixture_path(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -462,7 +596,7 @@ mod tests {
 
         assert_eq!(report.rows_written, 3);
         assert!(output.exists());
-        assert!(!staging_path_for(&output).exists());
+        assert_no_owned_staging(&output);
     }
 
     #[test]
@@ -536,7 +670,7 @@ mod tests {
             PipelineError::Io(PipelineIoError::ReadRecord { .. })
         ));
         assert!(!output.exists());
-        assert!(!staging_path_for(&output).exists());
+        assert_no_owned_staging(&output);
     }
 
     #[test]
@@ -557,14 +691,13 @@ mod tests {
 
         assert!(matches!(err, PipelineError::Cancelled));
         assert!(!output.exists());
-        assert!(!staging_path_for(&output).exists());
+        assert_no_owned_staging(&output);
     }
 
     #[test]
     fn writer_open_failure_cleans_up_and_publishes_nothing() {
         let dir = tempfile::tempdir().expect("temp dir should be creatable");
-        // A path inside a directory that doesn't exist: `File::create` for
-        // the staging file must fail before any row is written.
+        // The output directory is required before owned staging can be created.
         let output = dir.path().join("missing-subdir").join("out.parquet");
 
         let err = run_bounded_pipeline(
@@ -578,9 +711,250 @@ mod tests {
 
         assert!(matches!(
             err,
-            PipelineError::Io(PipelineIoError::OpenOutput { .. })
+            PipelineError::LocalPublication {
+                phase: LocalPublicationPhase::Create,
+                outcome: LocalPublicationOutcome::NotPublished,
+                ..
+            }
         ));
         assert!(!output.exists());
+    }
+
+    struct FailingWriter {
+        file: File,
+        remaining: usize,
+    }
+
+    impl std::io::Write for FailingWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let length = bytes.len().min(self.remaining);
+            if length == 0 {
+                return Err(std::io::Error::other("injected writer failure"));
+            }
+            self.file.write_all(&bytes[..length])?;
+            self.remaining -= length;
+            Ok(length)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.file.flush()
+        }
+    }
+
+    #[test]
+    fn invalid_batch_is_rejected_before_encoder_receives_payload() {
+        use arrow::array::{Int64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use parquet::file::properties::WriterProperties;
+        struct ObservedWriter(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for ObservedWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .expect("observed bytes")
+                    .extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let properties = WriterProperties::builder()
+            .set_max_row_group_row_count(Some(1))
+            .set_compression(Compression::UNCOMPRESSED)
+            .build();
+        let writer = ArrowWriter::try_new(
+            ObservedWriter(Arc::clone(&observed)),
+            schema(),
+            Some(properties),
+        )
+        .expect("writer");
+        let invalid = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("renamed_id", DataType::Int64, false),
+                Field::new("name", DataType::Utf8, false),
+                Field::new("note", DataType::Utf8, true),
+            ])),
+            vec![
+                Arc::new(Int64Array::from(vec![1])),
+                Arc::new(StringArray::from(vec!["x".repeat(20000)])),
+                Arc::new(StringArray::from(vec![None::<&str>])),
+            ],
+        )
+        .expect("invalid contract, valid Arrow");
+        let (sender, receiver) = sync_channel(1);
+        sender
+            .send(Ok(crate::fixture_to_record_batch(&fixture_path(
+                "headers.csv",
+            ))
+            .expect("input")))
+            .expect("send");
+        drop(sender);
+        let transform = |_batch| Ok(invalid.clone());
+        let error = consume_batches(
+            BatchReceiver::Count(receiver),
+            writer,
+            Path::new("unused"),
+            Some(&transform),
+            &CancellationToken::new(),
+        )
+        .expect_err("contract failure");
+        assert!(matches!(
+            error,
+            PipelineError::Io(PipelineIoError::InvalidBatch { .. })
+        ));
+        assert!(
+            observed.lock().expect("bytes").len() <= 4,
+            "only the initial Parquet magic may reach the writer before rejection"
+        );
+    }
+
+    #[test]
+    fn count_transport_consumer_failure_releases_saturated_sender() {
+        use std::sync::mpsc::{TrySendError, channel};
+        use std::time::Duration;
+        for capacity in [0, 1] {
+            let batch =
+                crate::fixture_to_record_batch(&fixture_path("headers.csv")).expect("fixture");
+            let (sender, receiver) = sync_channel(capacity);
+            let (entered, wait_entered) = channel();
+            let (saturated, wait_saturated) = channel();
+            let (attempting, wait_attempting) = channel();
+            let (finished, wait_finished) = channel();
+            let producer = std::thread::spawn(move || {
+                sender.send(Ok(batch.clone())).expect("first batch");
+                wait_entered
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("callback entered");
+                if capacity == 1 {
+                    sender.send(Ok(batch.clone())).expect("fill count slot");
+                }
+                let pending = match sender.try_send(Ok(batch)) {
+                    Err(TrySendError::Full(batch)) => batch,
+                    _ => panic!("callback must hold the receiver while channel is full"),
+                };
+                saturated.send(()).expect("saturation observer");
+                // Expose the pending attempt while callback still owns the live receiver.
+                // No claim is made about an internal std-channel program counter.
+                let result = sender.send({
+                    attempting.send(()).expect("attempt observer");
+                    pending
+                });
+                finished.send(result.is_err()).expect("completion observer");
+            });
+            let transform = |_batch: RecordBatch| {
+                entered.send(()).expect("producer observer");
+                wait_saturated
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("observed full channel");
+                wait_attempting
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("pending send exposed");
+                assert!(matches!(
+                    wait_finished.try_recv(),
+                    Err(std::sync::mpsc::TryRecvError::Empty)
+                ));
+                Err(PipelineIoError::OpenInput {
+                    path: PathBuf::from("callback failure"),
+                    source: std::io::Error::other("callback failure"),
+                })
+            };
+            let writer = ArrowWriter::try_new(Vec::<u8>::new(), schema(), None).expect("writer");
+            let error = consume_batches(
+                BatchReceiver::Count(receiver),
+                writer,
+                Path::new("unused"),
+                Some(&transform),
+                &CancellationToken::new(),
+            )
+            .expect_err("consumer must return callback failure");
+            assert!(matches!(
+                error,
+                PipelineError::Io(PipelineIoError::Callback {
+                    stage: CallbackStage::Transform,
+                    batch_index: 0,
+                    ..
+                })
+            ));
+            assert!(
+                wait_finished
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("receiver drop releases pending send")
+            );
+            producer.join().expect("producer exit");
+        }
+    }
+
+    #[test]
+    fn owned_staging_write_and_close_failures_keep_previous_output() {
+        use arrow::array::{Int64Array, StringArray};
+        use parquet::file::properties::WriterProperties;
+        for budgeted in [false, true] {
+            for (row_group, phase) in [
+                (1, LocalPublicationPhase::Write),
+                (1000, LocalPublicationPhase::Close),
+            ] {
+                let dir = tempfile::tempdir().expect("directory");
+                let output = dir.path().join("output");
+                std::fs::write(&output, b"old").expect("old output");
+                let staged = LocalStagedOutput::new(&output).expect("owner");
+                let file = FailingWriter {
+                    file: staged.file().expect("file"),
+                    remaining: 4,
+                };
+                let properties = WriterProperties::builder()
+                    .set_max_row_group_row_count(Some(row_group))
+                    .set_compression(Compression::UNCOMPRESSED)
+                    .build();
+                let writer = ArrowWriter::try_new(file, schema(), Some(properties))
+                    .expect("construct writer");
+                // TrackedWrite buffers small writes. A large uncompressed dictionary
+                // page forces actual I/O during write; the small fixture fails at close.
+                let batch = if phase == LocalPublicationPhase::Write {
+                    RecordBatch::try_new(
+                        schema(),
+                        vec![
+                            Arc::new(Int64Array::from(vec![1])),
+                            Arc::new(StringArray::from(vec!["x".repeat(20_000)])),
+                            Arc::new(StringArray::from(vec![None::<&str>])),
+                        ],
+                    )
+                    .expect("large batch")
+                } else {
+                    crate::fixture_to_record_batch(&fixture_path("headers.csv")).expect("fixture")
+                };
+                let (receiver, accounting) = if budgeted {
+                    let (sender, receiver, control) =
+                        transport::channel(1, 1_000_000, &CancellationToken::new());
+                    sender.send(Ok(batch)).expect("admit");
+                    drop(sender);
+                    (BatchReceiver::Budgeted(receiver), Some(control))
+                } else {
+                    let (sender, receiver) = sync_channel(1);
+                    sender.send(Ok(batch)).expect("send");
+                    drop(sender);
+                    (BatchReceiver::Count(receiver), None)
+                };
+                let error =
+                    consume_batches(receiver, writer, &output, None, &CancellationToken::new())
+                        .expect_err("writer error");
+                assert!(
+                    matches!(&error, PipelineError::LocalPublication { phase: actual, outcome: LocalPublicationOutcome::NotPublished, source, .. } if *actual == phase && matches!(source.as_ref(), PipelineIoError::WriteParquet { .. })),
+                    "expected {phase:?}, got {error:?}"
+                );
+                if let Some(control) = accounting {
+                    assert_eq!(
+                        control.metrics().0,
+                        0,
+                        "failed encoding releases reservations"
+                    );
+                    assert!(control.metrics().1 > 0);
+                }
+                drop(staged);
+                assert_eq!(std::fs::read(&output).expect("output"), b"old");
+                assert_no_owned_staging(&output);
+            }
+        }
     }
 
     #[test]
@@ -681,12 +1055,18 @@ mod tests {
             format!("{:016x}", report.content_digest)
         );
 
-        let staging_key = staging_key_for(&output_key);
-        let staging_result = test_block_on(store.head(&staging_key));
-        assert!(
-            staging_result.is_err(),
-            "the staging key should be renamed away, not left behind after a successful publish"
-        );
+        let objects = test_block_on(async {
+            use futures_util::TryStreamExt;
+            store.list(None).try_collect::<Vec<_>>().await
+        })
+        .expect("objects");
+        assert!(!objects.iter().any(|object| {
+            object
+                .location
+                .to_string()
+                .starts_with(&format!("{output_key}.staging/"))
+        }));
+        assert_eq!(manifest.schema_version, 2);
     }
 
     #[test]
@@ -752,11 +1132,17 @@ mod tests {
             "the final key must not exist after a run that failed before any upload"
         );
 
-        let staging_result = test_block_on(store.head(&staging_key_for(&output_key)));
-        assert!(
-            staging_result.is_err(),
-            "no staging key should be left behind after a failed run"
-        );
+        let objects = test_block_on(async {
+            use futures_util::TryStreamExt;
+            store.list(None).try_collect::<Vec<_>>().await
+        })
+        .expect("objects");
+        assert!(!objects.iter().any(|object| {
+            object
+                .location
+                .to_string()
+                .starts_with(&format!("{output_key}.staging/"))
+        }));
     }
 }
 

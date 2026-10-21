@@ -2,7 +2,9 @@
 
 ## Status
 
-Proposed - 20 October 2026. Acceptance depends on implementation review and verification.
+Proposed - 20 October 2026. The fixed-ingest validator, private checked batch and
+fallible callback boundaries are implemented. Controlled progress and pre-encoder
+rejection regressions supplement runtime and compile fixtures; final CI remains a merge gate.
 This makes ADR 0015's fallible-transform and fixed-schema validation scope concrete.
 It does not accept or complete ADR 0015's other design gates.
 
@@ -11,8 +13,8 @@ It does not accept or complete ADR 0015's other design gates.
 Declaration compatibility, complete builder configuration, and actual data validity are
 different guarantees. The reviewed Datacrate baseline is
 `9a53f7bcabce5e8e18ff8df52544f366babad8db`. Its declaration checks and nonzero
-batch configuration have been repaired. Its bounded consumer still accepts an infallible
-opaque callback, writes its result, then digests fixed column positions. A transform can
+batch configuration had been repaired. At that revision the bounded consumer accepted an
+infallible opaque callback, wrote its result, then digested fixed column positions. A transform could
 violate those assumptions; a complete typestate builder does not prevent that.
 
 A typed wrapper establishes an invariant only when its constructor checks actual data.
