@@ -328,6 +328,38 @@ moment it goes out of scope. No `.use { }` block, because there's nothing to
 opt into - it's the default behavior of every owned value in Rust, not a
 library feature layered on top.
 
+The ordered row query now has a shared `row_query_plan` used by both the
+collecting wrapper and `stream_orders` example. Its regressions check
+independent expected values, order and nulls, projection that removes the
+predicate column, empty/limited results, conditional cast errors, and
+release of query reservations after an early stream drop. These are
+consumer and semantic checks; a global sort can still buffer upstream.
+The existing constrained aggregate/spill test checks its separate cleanup
+path under the configured runtime.
+
+## Count logical reads after checking the result
+
+Earlier pushdown checks used engine plan metrics. The test-only
+`query_io_tests` wrapper now also observes the `ObjectStore` registered on
+the query's actual runtime. It forwards read options and response metadata,
+and separately counts attempted HEADs, attempted GETs, successful GET
+responses, requested bytes in bounded ranges, non-bounded GETs, and payload
+bytes actually yielded to the reader. A failed precondition increments
+attempts but contributes no successful response or payload bytes. Repeated
+logical reads count again. The test's measurement boundary includes table
+registration and query execution.
+
+These are library observations. HTTP retries, cache hits beneath the
+wrapper, wire bytes and billed requests are unavailable, not zero. A
+selective multi-row-group fixture must first match independent expected
+IDs with pruning enabled and disabled; only then does it check avoided
+payload work. Another fixture verifies its Parquet metadata has no column
+statistics and checks the same null/boundary results with pruning both
+ways. Missing statistics cannot justify discarding candidate rows.
+A controlled GET failure while the listing remains valid verifies that
+stream errors reach the consumer. Removing a file before physical planning
+can instead produce an empty listing, which is a different condition.
+
 ## Run the whole chapter live
 
 ```console

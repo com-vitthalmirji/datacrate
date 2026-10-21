@@ -29,8 +29,7 @@ mod transport;
 use crate::batch_contract::CheckedIngestBatch;
 use crate::manifest::{self, CompletionManifest};
 use crate::object_store_io::{
-    best_effort_delete, download_to_temp, head_object, publish_staged_object, put_manifest,
-    upload_from_temp,
+    best_effort_delete, download_to_temp, publish_staged_object, put_manifest, upload_from_temp,
 };
 pub use crate::staging::{LocalPublicationOutcome, LocalPublicationPhase};
 use crate::{
@@ -496,8 +495,7 @@ pub fn run_bounded_pipeline_s3(
     let local_input = staging_dir.path().join("input.csv");
     let local_output = staging_dir.path().join("output.parquet");
 
-    let input_meta = head_object(store, input_key)?;
-    download_to_temp(store, input_key, &local_input)?;
+    let input_meta = download_to_temp(store, input_key, &local_input)?;
     let report = run_bounded_pipeline(&local_input, &local_output, config, transform, cancel)?;
 
     let staging_key = staging_key_for(output_key);
@@ -899,7 +897,7 @@ mod tests {
                 .expect("manifest object bytes should be readable")
         });
         let manifest: CompletionManifest =
-            serde_json::from_slice(&manifest_bytes).expect("manifest should be valid JSON");
+            manifest::decode_completion_manifest(&manifest_bytes).expect("supported manifest");
 
         assert_eq!(manifest.input_key, input_key.to_string());
         assert_eq!(manifest.row_count, report.rows_written);
@@ -917,12 +915,10 @@ mod tests {
     }
 
     #[test]
-    fn s3_pipeline_reports_head_object_when_the_input_key_is_missing_on_a_real_backend() {
+    fn s3_pipeline_reports_download_object_when_the_input_key_is_missing_on_a_real_backend() {
         use object_store::path::Path as ObjectPath;
 
-        let minio = crate::minio_test_support::MinioContainer::start(
-            "s3-pipeline-reports-head-object-when-the-input-key-is-missing",
-        );
+        let minio = crate::minio_test_support::MinioContainer::start("s3-missing-input-download");
         let store = minio.store();
         let input_key = ObjectPath::from("missing-input.csv");
         let output_key = ObjectPath::from("output.parquet");
@@ -939,7 +935,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            PipelineError::Io(PipelineIoError::HeadObject { .. })
+            PipelineError::Io(PipelineIoError::DownloadObject { .. })
         ));
     }
 

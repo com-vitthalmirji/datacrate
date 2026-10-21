@@ -1,0 +1,15 @@
+{
+  "schema_version": 2,
+  "input_key": "input.csv",
+  "input_size": 27,
+  "input_e_tag": "captured-etag",
+  "input_last_modified": "2026-10-20T00:00:00+00:00",
+  "row_count": 2,
+  "content_digest": "0123456789abcdef",
+  "run_id": "run-fixture",
+  "input_version": "input-v1",
+  "output_key": "output.parquet",
+  "output_e_tag": "output-etag",
+  "output_version": "output-v1",
+  "digest_scheme": "legacy-ahash-wrapping-sum-v1"
+}

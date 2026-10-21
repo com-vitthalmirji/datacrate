@@ -130,6 +130,20 @@ pub enum PipelineIoError {
         /// The underlying `object_store` error.
         source: object_store::Error,
     },
+    /// A downloaded response did not satisfy the captured-object contract.
+    InvalidSnapshot {
+        /// The object being read.
+        key: object_store::path::Path,
+        /// The response or identity requirement that failed.
+        violation: object_store_io::SnapshotViolation,
+    },
+    /// The backend rejected the captured object's read condition.
+    SnapshotPrecondition {
+        /// The object being read.
+        key: object_store::path::Path,
+        /// The original backend condition failure.
+        source: object_store::Error,
+    },
     /// An object could not be uploaded to an [`object_store::ObjectStore`].
     UploadObject {
         /// The object key that could not be uploaded.
@@ -144,6 +158,31 @@ pub enum PipelineIoError {
         key: object_store::path::Path,
         /// The underlying `object_store` error.
         source: object_store::Error,
+    },
+    /// A completion manifest could not be decoded from JSON.
+    ReadManifest {
+        /// The underlying JSON decoding error.
+        source: serde_json::Error,
+    },
+    /// The persisted manifest version is not supported by this reader.
+    UnsupportedManifestVersion {
+        /// The version declared in the manifest.
+        version: u32,
+    },
+    /// A supported manifest lacks required protocol information.
+    InvalidManifest {
+        /// The violated version-specific requirement.
+        violation: manifest::ManifestViolation,
+    },
+    /// The reader does not implement the declared digest interpretation.
+    UnsupportedDigestScheme {
+        /// The scheme named in the persisted record.
+        scheme: String,
+    },
+    /// Publication is not yet enabled for this manifest version.
+    UnsupportedManifestWriteVersion {
+        /// The requested write version.
+        version: u32,
     },
     /// A [`manifest::CompletionManifest`] could not be serialized to JSON.
     WriteManifest {
@@ -199,12 +238,34 @@ impl std::fmt::Display for PipelineIoError {
             PipelineIoError::DownloadObject { key, source } => {
                 write!(f, "failed to download {key}: {source}")
             }
+            PipelineIoError::InvalidSnapshot { key, violation } => {
+                write!(f, "invalid snapshot response for {key}: {violation}")
+            }
+            PipelineIoError::SnapshotPrecondition { key, source } => {
+                write!(f, "snapshot condition failed for {key}: {source}")
+            }
             PipelineIoError::UploadObject { key, source } => {
                 write!(f, "failed to upload {key}: {source}")
             }
             PipelineIoError::HeadObject { key, source } => {
                 write!(f, "failed to read metadata for {key}: {source}")
             }
+            PipelineIoError::ReadManifest { source } => {
+                write!(f, "failed to decode completion manifest: {source}")
+            }
+            PipelineIoError::UnsupportedManifestVersion { version } => {
+                write!(f, "unsupported completion manifest version {version}")
+            }
+            PipelineIoError::InvalidManifest { violation } => {
+                write!(f, "invalid completion manifest: {violation}")
+            }
+            PipelineIoError::UnsupportedDigestScheme { scheme } => {
+                write!(f, "unsupported digest scheme {scheme:?}")
+            }
+            PipelineIoError::UnsupportedManifestWriteVersion { version } => write!(
+                f,
+                "completion manifest version {version} publication is not enabled"
+            ),
             PipelineIoError::WriteManifest { source } => {
                 write!(f, "failed to serialize completion manifest: {source}")
             }
@@ -227,10 +288,17 @@ impl std::error::Error for PipelineIoError {
             PipelineIoError::WriteParquet { source } | PipelineIoError::ReadParquet { source } => {
                 Some(source)
             }
-            PipelineIoError::DownloadObject { source, .. }
+            PipelineIoError::InvalidSnapshot { violation, .. } => Some(violation),
+            PipelineIoError::SnapshotPrecondition { source, .. }
+            | PipelineIoError::DownloadObject { source, .. }
             | PipelineIoError::UploadObject { source, .. }
             | PipelineIoError::HeadObject { source, .. } => Some(source),
-            PipelineIoError::WriteManifest { source } => Some(source),
+            PipelineIoError::ReadManifest { source }
+            | PipelineIoError::WriteManifest { source } => Some(source),
+            PipelineIoError::InvalidManifest { violation } => Some(violation),
+            PipelineIoError::UnsupportedManifestVersion { .. }
+            | PipelineIoError::UnsupportedManifestWriteVersion { .. }
+            | PipelineIoError::UnsupportedDigestScheme { .. } => None,
         }
     }
 }
@@ -666,3 +734,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod query_io_tests;

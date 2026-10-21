@@ -2,16 +2,17 @@
 
 ## Status
 
-Proposed - 20 October 2026. Unique local staging and explicit local publication
-outcomes are implemented. Remote publication and strict completion reading remain open.
+Proposed - 20 October 2026. Unique local staging, explicit local publication
+outcomes, captured input reads and versioned manifest parsing are implemented.
+The single-writer remote protocol and strict completion reader remain open here.
 Refines ADRs 0005.2, 0012, 0014 and 0015. Their historical decisions remain unchanged.
 
 ## Context
 
-Datacrate currently records input metadata before a helper performs another HEAD and
-unconditional range GETs. An object can change between those operations. Local/remote staging
-names are deterministic. Final output and its manifest are separate publications; a failed
-manifest can trigger unconditional deletion of the final key.
+Earlier, Datacrate recorded input metadata before a helper performed another HEAD and
+unconditional range GETs. An object could change between those operations. Local staging
+now has a unique owner; remote staging and output/manifest publication still need their
+own failure protocol. A failed manifest can otherwise trigger deletion of the final key.
 
 Owned resources need explicit fallible completion, and read results need validation.
 Snapshot enforcement must bind each request to captured identity; a range request alone

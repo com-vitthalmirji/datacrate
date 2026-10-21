@@ -176,6 +176,26 @@ exec holds while it computes `RANK()`, `LAG()`, or a running `SUM() OVER`
 - same shape, same reason: the function needs to see the whole partition
 (or a window of it) before it can answer for any single row.
 
+## Preserve scalar representation in the timestamp function
+
+Earlier, `days_since_epoch` expanded every argument with
+`ColumnarValue::values_to_arrays`, including constant scalar inputs. It
+now returns `ScalarValue::Int64` directly for a timestamp scalar and
+builds an `Int64Array` only for array input. A null timestamp scalar stays
+a typed null scalar; array length and nulls are preserved. Negative
+microseconds use Euclidean division, so `-1` microsecond belongs to day
+`-1`. Wrong arity, type or timezone returns an execution error on direct
+invocation instead of indexing or panicking on a failed downcast.
+
+The direct invocation regression checks representation as well as values,
+including `i64` limits. A separate comparison records the old scalar
+expansion and current array buffers at 0, 1, 1,000 and 100,000 rows. The old
+scalar expansion produces a one-element array, not an array of the whole
+query batch. The scalar branch avoids that intermediate array and its
+output array here; downstream operators may still broadcast a scalar.
+This is a representation improvement, without a whole-query speedup claim.
+Existing SQL and constant-folding tests remain separate checks.
+
 ## An async `ScalarUDF`: when producing one value needs an `.await`
 
 **Claim**: DataFusion's scalar-function extension point isn't limited to
@@ -240,8 +260,8 @@ alongside the built-in ones (predicate pushdown, dead-filter elimination,
 and the rest).
 
 **Code**: `MaxRowsGuardrail` caps every top-level result set at a
-configured `max_rows`, the way a platform team might guard a shared SQL
-endpoint against an accidental unbounded scan. It's deliberately *not*
+configured nonnegative `max_rows`, as a platform team's output policy for
+a shared SQL endpoint. It's deliberately *not*
 something a generic optimizer rule could express, because the right cap
 for a given deployment isn't a general SQL simplification - it's a
 decision this specific rule exists to encode.
@@ -288,12 +308,20 @@ guardrail set to 5 returns exactly 5 rows (not 8). `SELECT id FROM orders
 ORDER BY id LIMIT 3` with the same guardrail still returns exactly 3 rows
 - the rule caps, it never raises a query's own tighter limit.
 
-**The trade-off, named explicitly**: this is a reliability trade, not a
-free win. It buys protection against an unbounded-scan resource blowup at
-the cost of *silently* truncating a legitimate large result rather than
-erroring. A production version would need to surface the cap back to the
-caller somehow (a warning, a response header) - this chapter proves only
-the rewrite itself, not that follow-up.
+Earlier wording described this as protection against unbounded-scan
+resource exhaustion. The actual guarantee is a cap on output rows: a
+scan, global sort or aggregate may still process its whole input before
+returning those rows. It can silently truncate a legitimate result. A
+production version would need to surface that policy to the caller.
+The example stays test-scoped and is not a memory or scan budget.
+
+The constructor now rejects negative configured caps; zero is a valid
+empty-result policy. Additional tests check repeated rewriting is stable,
+smaller existing limits survive, larger limits are reduced, and offsets
+are preserved. A controlled volatile lookup test returns different values
+for repeated keys and on subsequent queries. `Volatility::Volatile` does
+not permit caching or deduplication based only on equal keys; an `Fn`
+callback can still perform observable actions.
 
 **Scala/Spark bridge**: Spark doesn't have an equivalent plug-in point in
 Catalyst's optimizer that's exposed this simply to end users -
