@@ -167,5 +167,12 @@ its transformed output before writing and digesting it. Both use the fixed inges
 `id: Int64`, `name: Utf8`, nullable `note: Utf8`, in that order. Invalid output returns
 `InvalidBatch`; stage completeness alone remains the narrower compiler guarantee.
 
+Earlier, the local builder could return an arbitrary schema from a callback. It now
+requires the fixed ingest schema after both callbacks. Schema-changing projections,
+renames and aggregations that previously worked locally are therefore rejected.
+This is an intentional restriction of this builder; the general Contract-to-Arrow
+schema adapter does not broaden its accepted output. Use the query APIs for results
+with a different schema, or define a separate validated pipeline boundary.
+
 A callback can still perform external actions or panic. A later error cannot undo those
 actions, and the local final callback is not a transactional storage sink.

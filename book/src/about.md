@@ -1,28 +1,26 @@
 # About & contributing
 
-`datacrate` is an end-to-end data engineering platform in Rust: one typed
-Cargo workspace spanning the whole pipeline lifecycle - streaming ingestion,
-compile-time schema contracts, typed transforms, columnar storage (Parquet),
-a SQL/DataFrame query engine (DataFusion), distributed execution (Ballista),
-and cloud object storage - the same ground a JVM data stack covers, without
-the JVM.
+`datacrate` is a Rust data-engineering workspace covering CSV/Arrow ingestion,
+Parquet storage, DataFusion SQL and DataFrame queries, and cloud object-store I/O.
+Optional Ballista examples explore distributed execution. Comet examples accelerate
+operators inside Spark, which retains its JVM runtime.
 
-Schema contracts are the anchor: declare what a dataset's columns and types
-must be once, and every stage that reads or writes it is checked against
-that declaration at compile time. A schema mismatch fails `cargo build`,
-not a pipeline run three hours in.
+The current guarantees apply at distinct boundaries:
 
-JVM data stacks pay for GC pauses and schema drift you only discover at
-runtime - this proves the same job gets done without either. Rust's
-ownership model and compile-time schema contracts catch memory and schema
-bugs before a job ever runs, with Arrow, DataFusion, and Ballista supplying
-the columnar engine and distributed execution - all in one Cargo workspace
-covering ingestion, transforms, storage, query, and distributed execution
-end to end.
+- **Contract declarations:** explicit, evaluated `SchemaConforms::CHECK` or
+  `contracts::enforce` checks compare Rust type shapes during `cargo build`.
+  They do not inspect external files, SQL results or arbitrary callback output.
+- **Builder configuration:** typestate requires source, transform and sink stages
+  before `build()` is available. Callback success and data validity remain runtime checks.
+- **Ingest batches:** local and bounded pipeline callbacks return `Result` and
+  must preserve the fixed `id`, `name`, nullable `note` schema. Actual batches
+  are checked at runtime before being accepted by the corresponding consumers.
 
-Using Ballista or Comet feels just like Spark, so that part is easy. Rust
-itself is the hard part - once you go past using the pipeline and start
-building your own handlers and pieces.
+The optional Contract-to-Arrow adapter constructs physical schemas and returns
+errors for unsupported representations. It does not certify array values.
+Resource controls and publication protocols have explicit limits documented in
+the guide; no general performance or end-to-end schema-safety guarantee follows
+from compiling the workspace.
 
 ## Contributing
 

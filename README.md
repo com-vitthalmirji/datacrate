@@ -11,29 +11,27 @@
 
 # datacrate
 
-An end-to-end data engineering platform in Rust: one typed Cargo workspace
-spanning the whole pipeline lifecycle - streaming ingestion, compile-time
-schema contracts, typed transforms, columnar storage (Parquet), a
-SQL/DataFrame query engine (DataFusion), distributed execution (Ballista),
-and cloud object storage - the same ground a JVM data stack covers, without
-the JVM.
+`datacrate` is a Rust data-engineering workspace covering CSV/Arrow ingestion,
+Parquet storage, DataFusion SQL and DataFrame queries, and cloud object-store I/O.
+Optional Ballista examples explore distributed execution. Comet examples accelerate
+operators inside Spark, which retains its JVM runtime.
 
-Schema contracts are the anchor: declare what a dataset's columns and types
-must be once, and every stage that reads or writes it is checked against
-that declaration at compile time. A schema mismatch fails `cargo build`,
-not a pipeline run three hours in.
+The current guarantees apply at distinct boundaries:
 
-JVM data stacks pay for GC pauses and schema drift you only discover at
-runtime - this proves the same job gets done without either. Rust's
-ownership model and compile-time schema contracts catch memory and schema
-bugs before a job ever runs, with Arrow, DataFusion, and Ballista supplying
-the columnar engine and distributed execution - all in one Cargo workspace
-covering ingestion, transforms, storage, query, and distributed execution
-end to end.
+- **Contract declarations:** explicit, evaluated `SchemaConforms::CHECK` or
+  `contracts::enforce` checks compare Rust type shapes during `cargo build`.
+  They do not inspect external files, SQL results or arbitrary callback output.
+- **Builder configuration:** typestate requires source, transform and sink stages
+  before `build()` is available. Callback success and data validity remain runtime checks.
+- **Ingest batches:** local and bounded pipeline callbacks return `Result` and
+  must preserve the fixed `id`, `name`, nullable `note` schema. Actual batches
+  are checked at runtime before being accepted by the corresponding consumers.
 
-Using Ballista or Comet feels just like Spark, so that part is easy. Rust
-itself is the hard part - once you go past using the pipeline and start
-building your own handlers and pieces.
+The optional Contract-to-Arrow adapter constructs physical schemas and returns
+errors for unsupported representations. It does not certify array values.
+Resource controls and publication protocols have explicit limits documented in
+the guide; no general performance or end-to-end schema-safety guarantee follows
+from compiling the workspace.
 
 See [Getting Started](https://com-vitthalmirji.github.io/datacrate/getting-started.html)
 for a walkthrough of the workspace and each chapter.
@@ -67,7 +65,7 @@ cargo run -p csv-select-cli --bin csv-select -- fixtures/m1/headers.csv --column
 | `just fmt`     | `cargo fmt --all --check`                                  |
 | `just lint`    | `cargo clippy --all-targets --all-features -- -D warnings` |
 | `just test`    | `cargo test --all-targets --all-features --locked`         |
-| `just release` | `cargo build --release --locked`                           |
+| `just release` | `cargo build --profile ci-release --locked`                           |
 | `just verify`  | all of the above, plus `git diff --check`                  |
 
 Run `just verify` before opening a pull request - it is the same check CI runs.
@@ -106,3 +104,15 @@ branching, and the pull request process.
 - API reference (also on docs.rs): https://docs.rs/dtl-core
 - API reference (local): `cargo doc -p dtl-core --open`
 - Guide (local): `cargo install mdbook --locked && mdbook serve book`
+
+For the precise boundaries and migration steps, see:
+
+- [Contract checks, Arrow mapping and the 0.2 reference migration](book/src/contracts.md)
+- [Callback errors and fixed-ingest validation](book/src/typestate.md)
+- [Memory, cancellation and local publication](book/src/datafusion.md)
+- [Captured object reads and remote publication](book/src/object-store.md)
+- [Dependency audit policy and recorded exceptions](docs/adr/0009-supply-chain-policy-gate.md)
+
+A green dependency audit reflects the advisory database and configured exceptions
+at that run. Dependency fixes must reach `main` before related issues are treated
+as resolved there.
