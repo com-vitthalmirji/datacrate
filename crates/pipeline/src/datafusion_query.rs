@@ -48,7 +48,7 @@ use datafusion::physical_plan::{
     ChildrenPropertiesMode, DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning,
     PlanProperties, ReplaceChildrenOptions, SendableRecordBatchStream,
 };
-use datafusion::prelude::{SessionConfig, SessionContext, lit};
+use datafusion::prelude::{DataFrame, SessionConfig, SessionContext, lit};
 use object_store::ObjectStore;
 use url::Url;
 
@@ -571,20 +571,27 @@ pub fn context_with_memory_limit(
     Ok(SessionContext::new_with_config_rt(config, runtime))
 }
 
-/// Runs the row-level filter/projection/ordering query (`amount > 50.00`,
-/// `id, amount, placed_at, note`, ordered by `placed_at`) via the SQL API.
+/// Plans the row-level filter/projection/ordering query without collecting it.
+/// Callers choose collection or streaming. The global sort may buffer or spill
+/// before returning the first output batch.
 ///
 /// # Errors
-///
-/// Returns a [`DataFusionError`] if the query cannot be planned or executed.
-pub async fn row_query_sql(ctx: &SessionContext) -> Result<Vec<RecordBatch>, DataFusionError> {
+/// Returns a [`DataFusionError`] if the query cannot be planned.
+pub async fn row_query_plan(ctx: &SessionContext) -> Result<DataFrame, DataFusionError> {
     ctx.sql(
         "SELECT id, amount, placed_at, note FROM orders \
          WHERE amount > 50.00 ORDER BY placed_at ASC",
     )
-    .await?
-    .collect()
     .await
+}
+
+/// Collects the planned row-level query. Use [`row_query_plan`] to consume
+/// its output as a stream instead.
+///
+/// # Errors
+/// Returns a [`DataFusionError`] if the query cannot be planned or executed.
+pub async fn row_query_sql(ctx: &SessionContext) -> Result<Vec<RecordBatch>, DataFusionError> {
+    row_query_plan(ctx).await?.collect().await
 }
 
 /// Runs the same row-level filter/projection/ordering query as
@@ -1516,6 +1523,196 @@ mod tests {
         let object_store_batches = row_query_sql(&ctx).await.expect("object-store query");
 
         assert_eq!(local_batches, object_store_batches);
+    }
+
+    #[tokio::test]
+    async fn streamed_row_query_preserves_expected_values_and_order() {
+        use futures_util::TryStreamExt;
+        let (ctx, _parquet) = context_over_fixture().await;
+        let mut stream = row_query_plan(&ctx)
+            .await
+            .expect("row plan")
+            .execute_stream()
+            .await
+            .expect("stream");
+        let mut rows = Vec::new();
+        while let Some(batch) = stream.try_next().await.expect("next batch") {
+            let ids = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .expect("ids");
+            let amounts = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Decimal128Array>()
+                .expect("amounts");
+            let times = batch
+                .column(2)
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .expect("timestamps");
+            let notes = batch
+                .column(3)
+                .as_any()
+                .downcast_ref::<StringViewArray>()
+                .expect("notes");
+            assert_eq!(
+                batch.schema().field(1).data_type(),
+                &DataType::Decimal128(10, 2)
+            );
+            for row in 0..batch.num_rows() {
+                rows.push((
+                    ids.value(row),
+                    amounts.value(row),
+                    times.value(row),
+                    (!notes.is_null(row)).then(|| notes.value(row).to_owned()),
+                ));
+            }
+            tokio::task::yield_now().await;
+        }
+        let expected = [
+            (4, 100_000, "2026-01-01T00:00:00", None),
+            (2, 25_075, "2026-01-03T08:15:00", None),
+            (1, 10_000, "2026-01-05T10:00:00", Some("First order")),
+            (8, 99_999_999, "2026-01-06T18:20:00", Some("Largest")),
+            (3, 9_999, "2026-01-07T23:59:59", Some("Rush")),
+        ]
+        .map(|(id, amount, time, note)| {
+            (
+                id,
+                amount,
+                NaiveDateTime::parse_from_str(time, "%Y-%m-%dT%H:%M:%S")
+                    .expect("expected time")
+                    .and_utc()
+                    .timestamp_micros(),
+                note.map(str::to_owned),
+            )
+        });
+        assert_eq!(rows, expected);
+    }
+
+    #[tokio::test]
+    async fn streamed_row_query_keeps_filter_only_columns_and_respects_limits() {
+        use futures_util::TryStreamExt;
+        let (ctx, _parquet) = context_over_fixture().await;
+        let mut stream = row_query_plan(&ctx)
+            .await
+            .expect("plan")
+            .select(vec![col("id")])
+            .expect("project away predicate column")
+            .limit(0, Some(2))
+            .expect("limit")
+            .execute_stream()
+            .await
+            .expect("stream");
+        let mut ids: Vec<i64> = Vec::new();
+        while let Some(batch) = stream.try_next().await.expect("batch") {
+            assert_eq!(batch.num_columns(), 1);
+            ids.extend(
+                batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .expect("ids")
+                    .values(),
+            );
+        }
+        assert_eq!(ids, vec![4_i64, 2]);
+        let mut empty = row_query_plan(&ctx)
+            .await
+            .expect("plan")
+            .filter(lit(false))
+            .expect("filter")
+            .execute_stream()
+            .await
+            .expect("empty stream");
+        while let Some(batch) = empty.try_next().await.expect("empty batch") {
+            assert_eq!(batch.num_rows(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn streamed_row_query_preserves_conditional_cast_errors() {
+        use datafusion::logical_expr::{cast, when};
+        use futures_util::TryStreamExt;
+        let (ctx, _parquet) = context_over_fixture().await;
+        for safe in [true, false] {
+            let expression = when(lit(safe), lit(1_i64))
+                .otherwise(cast(col("note"), DataType::Int64))
+                .expect("case");
+            let mut stream = row_query_plan(&ctx)
+                .await
+                .expect("plan")
+                .select(vec![expression])
+                .expect("select case")
+                .execute_stream()
+                .await
+                .expect("stream");
+            if safe {
+                let mut count = 0;
+                while let Some(batch) = stream.try_next().await.expect("unselected invalid cast") {
+                    let values = batch
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<Int64Array>()
+                        .expect("ints");
+                    assert!(values.iter().all(|value| value == Some(1)));
+                    count += batch.num_rows();
+                }
+                assert_eq!(count, 5);
+            } else {
+                let mut failed = false;
+                while !failed {
+                    match stream.try_next().await {
+                        Err(_) => failed = true,
+                        Ok(Some(_)) => {}
+                        Ok(None) => break,
+                    }
+                }
+                assert!(failed, "selected malformed note cast must fail");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn streamed_row_query_can_be_dropped_after_one_small_batch() {
+        use futures_util::TryStreamExt;
+        let config = SessionConfig::new()
+            .with_batch_size(1)
+            .with_target_partitions(1);
+        let (ctx, _parquet) =
+            context_over_fixture_with(SessionContext::new_with_config(config)).await;
+        let mut stream = row_query_plan(&ctx)
+            .await
+            .expect("plan")
+            .execute_stream()
+            .await
+            .expect("stream");
+        let first = stream
+            .try_next()
+            .await
+            .expect("first result")
+            .expect("first batch");
+        assert_eq!(first.num_rows(), 1);
+        assert_eq!(
+            first
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .expect("ids")
+                .value(0),
+            4
+        );
+        drop(stream);
+        drop(first);
+        for _ in 0..1000 {
+            if ctx.runtime_env().memory_pool.reserved() == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(ctx.runtime_env().memory_pool.reserved(), 0);
     }
 
     #[tokio::test]
