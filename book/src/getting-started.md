@@ -19,11 +19,18 @@ core pipeline runs natively in Rust; Comet operates within Spark's JVM runtime.
 
 - **Contracts** compare Rust declarations when an explicit check or typed
   stage connection is instantiated by `cargo build`. The opt-in Arrow validator
-  checks actual batches against supported physical schemas.
+  checks actual batches against supported physical schemas. `#[derive(Connector)]`
+  builds on the same derived shape to register a contract's batches on a
+  DataFusion `SessionContext` - in memory, or from Parquet/CSV with the
+  contract's schema taken as authoritative over the file - and to generate one
+  typed `col_<field>()` accessor per field, so a renamed field breaks the
+  build instead of a query silently returning zero rows.
 - **Typed pipeline** automatically checks every declared source, transform and
   sink connection during a build, then validates source and transform batches
-  before downstream callbacks. The existing builders still enforce their own
-  stage-presence rules; callback failures remain runtime results.
+  before downstream callbacks. A transform stage can run SQL instead of a Rust
+  closure via `sql_transform` and still gets the same compile-time check. The
+  existing builders still enforce their own stage-presence rules; callback
+  failures remain runtime results.
 - **Ingest validation** checks actual callback output against the current fixed
   `id`, `name`, nullable `note` schema before accepting it at the pipeline boundary.
 
