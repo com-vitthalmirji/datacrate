@@ -2,27 +2,32 @@
 
 <img src="images/cover.png" alt="datacrate" width="480">
 
-`datacrate` is a Rust data-engineering workspace covering CSV/Arrow ingestion,
-Parquet storage, DataFusion SQL and DataFrame queries, and cloud object-store I/O.
-Optional Ballista examples explore distributed execution. Comet examples accelerate
-operators inside Spark, which retains its JVM runtime.
+`datacrate` is an end-to-end data-engineering platform in Rust, under active
+development. One Cargo workspace brings together streaming CSV/Arrow ingestion,
+compile-time schema contracts, typestate pipeline builders, Parquet storage,
+DataFusion SQL and DataFrame queries, and cloud object-store I/O. Ballista examples
+extend query execution across scheduler and executor processes; Comet examples
+explore native acceleration inside Spark.
 
-The current guarantees apply at distinct boundaries:
+The engineering focus is on explicit pipeline boundaries: compiler-resolved type
+shapes and const-evaluated compatibility checks, fallible callbacks with checked
+batch output, bounded batch transport with optional byte admission, captured object
+identity, and owned output publication with recoverable failure information. The
+core pipeline runs natively in Rust; Comet operates within Spark's JVM runtime.
 
-- **Contract declarations:** explicit, evaluated `SchemaConforms::CHECK` or
-  `contracts::enforce` checks compare Rust type shapes during `cargo build`.
-  They do not inspect external files, SQL results or arbitrary callback output.
-- **Builder configuration:** typestate requires source, transform and sink stages
-  before `build()` is available. Callback success and data validity remain runtime checks.
-- **Ingest batches:** local and bounded pipeline callbacks return `Result` and
-  must preserve the fixed `id`, `name`, nullable `note` schema. Actual batches
-  are checked at runtime before being accepted by the corresponding consumers.
+### Where the guarantees apply
 
-The optional Contract-to-Arrow adapter constructs physical schemas and returns
-errors for unsupported representations. It does not certify array values.
-Resource controls and publication protocols have explicit limits documented in
-the guide; no general performance or end-to-end schema-safety guarantee follows
-from compiling the workspace.
+- **Contracts** compare Rust declarations when an explicit `SchemaConforms::CHECK`
+  or `contracts::enforce` check is evaluated during a build. The optional Arrow
+  adapter maps supported declarations to physical schemas.
+- **Typestate** makes source, transform and sink configuration a compile-time
+  requirement. Callback errors remain explicit runtime results.
+- **Ingest validation** checks actual callback output against the current fixed
+  `id`, `name`, nullable `note` schema before accepting it at the pipeline boundary.
+
+These layers complement each other. External data still needs runtime validation;
+memory accounting, schema mappings and publication guarantees have defined scopes
+explained in the guide.
 
 ## Prerequisites
 
