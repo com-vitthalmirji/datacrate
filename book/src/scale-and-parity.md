@@ -402,6 +402,60 @@ speed claim" discipline the two-pass discipline section above applies to
 every cross-engine comparison in this chapter, now applied to Polars
 against itself.
 
+## Compare physical layout before changing a writer default
+
+Earlier, `compression_comparison` ran Snappy and default-level Zstd once over
+one synthetic ingest batch. It checked values, but that could not establish a
+workload-wide compression or row-group policy. The example now takes an explicit
+candidate and bounded fixture settings. It compares the existing Snappy settings,
+Zstd level 3 with the same row-group limit, and Snappy with 65,536-row groups.
+The pinned default row-group limit is 1,048,576 rows. A batch write is not a promise
+of one physical row group; the example inspects the resulting metadata.
+
+```sh
+cargo build --release -p pipeline --example compression_comparison --locked
+./target/release/examples/compression_comparison --dataset orders --candidate baseline --rows 200000
+./target/release/examples/compression_comparison --dataset orders --candidate zstd3 --rows 200000
+./target/release/examples/compression_comparison --dataset orders --candidate small-groups --rows 200000
+```
+
+Use `--dataset ingest` for the separate three-column ingest schema. Optional
+`--shuffled`, `--high-cardinality` and `--long-notes` flags vary physical workload
+properties; ID-based logical values remain deterministic with shuffle seed 42.
+Notes include nulls, Unicode, commas and newlines. Fixtures are capped at 250,000
+rows, or 20,000 with long notes, because generation deliberately materializes this
+bounded experimental input before timing. This is not the production ingest path.
+
+Each run checks the complete Parquet schema, values and nulls outside timing,
+including orders decimals and microsecond timestamps. Full-scan and narrow selective
+queries additionally check counts and ID sums against an independent arithmetic
+oracle. Reports include effective writer settings, physical row groups, columns
+with min/max statistics, footer metadata size and native engine metrics. Tests
+also cross a physical 65,536-row boundary and exercise all three candidates.
+
+Write wall time includes file creation through Parquet close, excludes generation,
+and does not include fsync. Scan wall time excludes planning but includes draining,
+row counting and the client ID checksum. Scans follow the untimed full equality
+decode, so these are warm-cache measurements. Native `bytes_scanned` counts scan
+reader requested range lengths before reads; footer metadata can use a separate
+fetch path. It is not total storage traffic, returned bytes or wire bytes.
+Object-store request counts, wire bytes and per-stage CPU are reported unavailable.
+An external process CPU/RSS measurement includes generation, verification, runtime
+startup and teardown; it must not be attributed to one write or scan stage.
+
+Interleave candidate order, warm up once and retain at least five raw samples
+before comparing median and range. Include sorted/shuffled, repeated/high-cardinality
+and short/long/null inputs with full-scan and write controls. Five samples do not
+characterize tail latency. Small long-note fixtures that fit one row group are a
+negative control for row-group splitting. These controls support a workload-specific
+decision; they do not earn a production policy type, automatic tuner or default
+migration on their own. In the local repeated comparison, smaller groups reduced
+requested scan bytes for sorted IDs but increased them for shuffled IDs. Zstd
+reduced file size while commonly exceeding the declared write or full-scan
+regression guard. Long fixtures remained one row group under both Snappy settings.
+Those trade-offs support retaining the production default; they establish no
+cloud-traffic or application-throughput improvement. Snappy remains the production default.
+
 ## Try it yourself
 
 Every command above assumes `benchmark/m3.6/orders` and `benchmark/m3.8/`
