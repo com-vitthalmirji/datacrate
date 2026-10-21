@@ -18,8 +18,9 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
 
+use futures_util::StreamExt;
 use object_store::path::Path as ObjectPath;
-use object_store::{ObjectMeta, ObjectStore, ObjectStoreExt, WriteMultipart};
+use object_store::{GetOptions, ObjectMeta, ObjectStore, ObjectStoreExt, WriteMultipart};
 
 use crate::PipelineIoError;
 use crate::manifest::CompletionManifest;
@@ -44,25 +45,63 @@ fn block_on<F: std::future::Future>(future: F) -> F::Output {
         .block_on(future)
 }
 
-enum DownloadStepError {
-    Store(object_store::Error),
-    Io(std::io::Error),
+/// A conditional download response did not match the captured object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SnapshotViolation {
+    /// The backend did not supply a usable version or ETag.
+    MissingIdentity,
+    /// Metadata named a different object.
+    Location,
+    /// The returned version or ETag differs from the captured identity.
+    Identity,
+    /// The backend returned a different object size.
+    Size {
+        /// Captured size.
+        expected: u64,
+        /// Returned size.
+        actual: u64,
+    },
+    /// The backend returned a different range.
+    Range {
+        /// Requested range.
+        expected: std::ops::Range<u64>,
+        /// Returned range.
+        actual: std::ops::Range<u64>,
+    },
+    /// The response body length differs from the requested range length.
+    Length {
+        /// Requested length.
+        expected: u64,
+        /// Received length.
+        actual: u64,
+    },
 }
 
-impl From<object_store::Error> for DownloadStepError {
-    fn from(source: object_store::Error) -> Self {
-        Self::Store(source)
+impl std::fmt::Display for SnapshotViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingIdentity => f.write_str("no object version or ETag is available"),
+            Self::Location => f.write_str("response names a different object"),
+            Self::Identity => f.write_str("response identity differs from the captured identity"),
+            Self::Size { expected, actual } => {
+                write!(f, "expected object size {expected}, got {actual}")
+            }
+            Self::Range { expected, actual } => {
+                write!(f, "expected range {expected:?}, got {actual:?}")
+            }
+            Self::Length { expected, actual } => {
+                write!(f, "expected {expected} response bytes, got {actual}")
+            }
+        }
     }
 }
-
-impl From<std::io::Error> for DownloadStepError {
-    fn from(source: std::io::Error) -> Self {
-        Self::Io(source)
-    }
-}
+impl std::error::Error for SnapshotViolation {}
 
 /// Downloads `key` from `store` and writes it to `dest`, overwriting any
-/// existing file. Streams the object in `CHUNK_BYTES`-sized ranges rather
+/// existing file. Returns the metadata captured once before reading. Every
+/// range is bound to its version, or its ETag when no version is available;
+/// unsupported conditions are errors, never unconditional retries.
+/// Streams the object in `CHUNK_BYTES`-sized ranges rather
 /// than materializing it whole in memory, so peak RSS stays flat as the
 /// object grows — a whole-file `get`/`bytes()` here was measured to scale
 /// peak memory linearly with input size. See
@@ -72,37 +111,123 @@ impl From<std::io::Error> for DownloadStepError {
 ///
 /// Returns [`PipelineIoError::DownloadObject`] if `key`'s metadata or any
 /// range of it cannot be read from `store`, or [`PipelineIoError::OpenOutput`]
-/// if `dest` cannot be created or written to.
+/// if `dest` cannot be created or written to. Missing identity or invalid
+/// responses return [`PipelineIoError::InvalidSnapshot`]; a failed read
+/// condition returns [`PipelineIoError::SnapshotPrecondition`]. A failed
+/// download may leave a partial destination and must not be treated as input.
 pub fn download_to_temp(
     store: &dyn ObjectStore,
     key: &ObjectPath,
     dest: &Path,
-) -> Result<(), PipelineIoError> {
+) -> Result<ObjectMeta, PipelineIoError> {
     let mut file = File::create(dest).map_err(|source| PipelineIoError::OpenOutput {
         path: dest.to_path_buf(),
         source,
     })?;
 
     block_on(async {
-        let size = store.head(key).await?.size;
+        let captured = store
+            .head(key)
+            .await
+            .map_err(|source| PipelineIoError::DownloadObject {
+                key: key.clone(),
+                source,
+            })?;
+        let invalid = |violation| PipelineIoError::InvalidSnapshot {
+            key: key.clone(),
+            violation,
+        };
+        if captured.location != *key {
+            return Err(invalid(SnapshotViolation::Location));
+        }
+        let version = captured.version.as_ref().filter(|value| !value.is_empty());
+        let etag = captured.e_tag.as_ref().filter(|value| !value.is_empty());
+        if version.is_none() && etag.is_none() {
+            return Err(invalid(SnapshotViolation::MissingIdentity));
+        }
         let mut offset = 0u64;
-        while offset < size {
-            let end = size.min(offset + CHUNK_BYTES as u64);
-            let chunk = store.get_range(key, offset..end).await?;
-            file.write_all(&chunk)?;
+        while offset < captured.size {
+            let end = captured.size.min(offset.saturating_add(CHUNK_BYTES as u64));
+            let requested = offset..end;
+            let options = GetOptions {
+                range: Some(requested.clone().into()),
+                version: version.cloned(),
+                if_match: if version.is_none() {
+                    etag.cloned()
+                } else {
+                    None
+                },
+                ..Default::default()
+            };
+            let response = store.get_opts(key, options).await.map_err(|source| {
+                if matches!(
+                    source,
+                    object_store::Error::Precondition { .. }
+                        | object_store::Error::NotModified { .. }
+                ) {
+                    PipelineIoError::SnapshotPrecondition {
+                        key: key.clone(),
+                        source,
+                    }
+                } else {
+                    PipelineIoError::DownloadObject {
+                        key: key.clone(),
+                        source,
+                    }
+                }
+            })?;
+            if response.meta.location != *key {
+                return Err(invalid(SnapshotViolation::Location));
+            }
+            if response.meta.size != captured.size {
+                return Err(invalid(SnapshotViolation::Size {
+                    expected: captured.size,
+                    actual: response.meta.size,
+                }));
+            }
+            let identity_matches = match version {
+                Some(version) => response.meta.version.as_ref() == Some(version),
+                None => response.meta.e_tag.as_ref() == etag,
+            };
+            if !identity_matches {
+                return Err(invalid(SnapshotViolation::Identity));
+            }
+            if response.range != requested {
+                return Err(invalid(SnapshotViolation::Range {
+                    expected: requested,
+                    actual: response.range,
+                }));
+            }
+            let expected = end - offset;
+            let mut received = 0u64;
+            let mut stream = response.into_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|source| PipelineIoError::DownloadObject {
+                    key: key.clone(),
+                    source,
+                })?;
+                received = received.saturating_add(chunk.len() as u64);
+                if received > expected {
+                    return Err(invalid(SnapshotViolation::Length {
+                        expected,
+                        actual: received,
+                    }));
+                }
+                file.write_all(&chunk)
+                    .map_err(|source| PipelineIoError::OpenOutput {
+                        path: dest.to_path_buf(),
+                        source,
+                    })?;
+            }
+            if received != expected {
+                return Err(invalid(SnapshotViolation::Length {
+                    expected,
+                    actual: received,
+                }));
+            }
             offset = end;
         }
-        Ok::<(), DownloadStepError>(())
-    })
-    .map_err(|err| match err {
-        DownloadStepError::Store(source) => PipelineIoError::DownloadObject {
-            key: key.clone(),
-            source,
-        },
-        DownloadStepError::Io(source) => PipelineIoError::OpenOutput {
-            path: dest.to_path_buf(),
-            source,
-        },
+        Ok(captured)
     })
 }
 
@@ -564,3 +689,7 @@ mod multipart_regressions {
         assert!(!state.complete_called.load(Ordering::SeqCst));
     }
 }
+
+#[cfg(test)]
+#[path = "object_store_io/snapshot_tests.rs"]
+mod snapshot_tests;
