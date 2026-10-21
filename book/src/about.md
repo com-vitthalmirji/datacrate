@@ -1,28 +1,31 @@
 # About & contributing
 
-`datacrate` is an end-to-end data engineering platform in Rust: one typed
-Cargo workspace spanning the whole pipeline lifecycle - streaming ingestion,
-compile-time schema contracts, typed transforms, columnar storage (Parquet),
-a SQL/DataFrame query engine (DataFusion), distributed execution (Ballista),
-and cloud object storage - the same ground a JVM data stack covers, without
-the JVM.
+`datacrate` is an end-to-end data-engineering platform in Rust, under active
+development. One Cargo workspace brings together streaming CSV/Arrow ingestion,
+compile-time schema contracts, typestate pipeline builders, Parquet storage,
+DataFusion SQL and DataFrame queries, and cloud object-store I/O. Ballista examples
+extend query execution across scheduler and executor processes; Comet examples
+explore native acceleration inside Spark.
 
-Schema contracts are the anchor: declare what a dataset's columns and types
-must be once, and every stage that reads or writes it is checked against
-that declaration at compile time. A schema mismatch fails `cargo build`,
-not a pipeline run three hours in.
+The engineering focus is on explicit pipeline boundaries: compiler-resolved type
+shapes and const-evaluated compatibility checks, fallible callbacks with checked
+batch output, bounded batch transport with optional byte admission, captured object
+identity, and owned output publication with recoverable failure information. The
+core pipeline runs natively in Rust; Comet operates within Spark's JVM runtime.
 
-JVM data stacks pay for GC pauses and schema drift you only discover at
-runtime - this proves the same job gets done without either. Rust's
-ownership model and compile-time schema contracts catch memory and schema
-bugs before a job ever runs, with Arrow, DataFusion, and Ballista supplying
-the columnar engine and distributed execution - all in one Cargo workspace
-covering ingestion, transforms, storage, query, and distributed execution
-end to end.
+### Where the guarantees apply
 
-Using Ballista or Comet feels just like Spark, so that part is easy. Rust
-itself is the hard part - once you go past using the pipeline and start
-building your own handlers and pieces.
+- **Contracts** compare Rust declarations when an explicit `SchemaConforms::CHECK`
+  or `contracts::enforce` check is evaluated during a build. The optional Arrow
+  adapter maps supported declarations to physical schemas.
+- **Typestate** makes source, transform and sink configuration a compile-time
+  requirement. Callback errors remain explicit runtime results.
+- **Ingest validation** checks actual callback output against the current fixed
+  `id`, `name`, nullable `note` schema before accepting it at the pipeline boundary.
+
+These layers complement each other. External data still needs runtime validation;
+memory accounting, schema mappings and publication guarantees have defined scopes
+explained in the guide.
 
 ## Contributing
 

@@ -70,8 +70,10 @@ a policy that says exactly what kind of drift is tolerable - exact agreement,
 backward-compatible, forward-compatible, or both. If the shapes don't conform,
 the crate doesn't compile. Not "the tests fail once someone remembers to run
 them" - it doesn't build. The disagreement between two parts of the pipeline
-becomes visible at the moment it's introduced, to the person who introduced
-it, instead of becoming a production incident weeks later with no clear owner.
+becomes visible when the caller explicitly forces the check to evaluate. An
+item-level `const _: () = SchemaConforms::<P, C, M>::CHECK;` supplies that point;
+an unused generic call does not. These checks compare declarations. External
+files and batches returned by arbitrary transforms still need runtime validation.
 
 ## The thread running through it
 
