@@ -1,0 +1,298 @@
+{
+  "baseline_revision": "053edc0",
+  "rustc": "1.97.1",
+  "ahash": "0.8.12",
+  "target": "aarch64-apple-darwin",
+  "required_feature": "aes",
+  "scheme": "legacy-ahash-wrapping-sum-v1",
+  "observations": [
+    {
+      "case": "empty",
+      "batch_size": 1,
+      "empty_note": false,
+      "rows": 0,
+      "digest": "0000000000000000",
+      "csv": "id,name,note\n"
+    },
+    {
+      "case": "empty",
+      "batch_size": 1,
+      "empty_note": true,
+      "rows": 0,
+      "digest": "0000000000000000",
+      "csv": "id,name,note\n"
+    },
+    {
+      "case": "empty",
+      "batch_size": 2,
+      "empty_note": false,
+      "rows": 0,
+      "digest": "0000000000000000",
+      "csv": "id,name,note\n"
+    },
+    {
+      "case": "empty",
+      "batch_size": 2,
+      "empty_note": true,
+      "rows": 0,
+      "digest": "0000000000000000",
+      "csv": "id,name,note\n"
+    },
+    {
+      "case": "empty",
+      "batch_size": 1000,
+      "empty_note": false,
+      "rows": 0,
+      "digest": "0000000000000000",
+      "csv": "id,name,note\n"
+    },
+    {
+      "case": "empty",
+      "batch_size": 1000,
+      "empty_note": true,
+      "rows": 0,
+      "digest": "0000000000000000",
+      "csv": "id,name,note\n"
+    },
+    {
+      "case": "null-note",
+      "batch_size": 1,
+      "empty_note": false,
+      "rows": 1,
+      "digest": "ffbfaf396de0201b",
+      "csv": "id,name,note\n1,a,\n"
+    },
+    {
+      "case": "null-note",
+      "batch_size": 1,
+      "empty_note": true,
+      "rows": 1,
+      "digest": "7764291a127bdfbf",
+      "csv": "id,name,note\n1,a,\n"
+    },
+    {
+      "case": "null-note",
+      "batch_size": 2,
+      "empty_note": false,
+      "rows": 1,
+      "digest": "ffbfaf396de0201b",
+      "csv": "id,name,note\n1,a,\n"
+    },
+    {
+      "case": "null-note",
+      "batch_size": 2,
+      "empty_note": true,
+      "rows": 1,
+      "digest": "7764291a127bdfbf",
+      "csv": "id,name,note\n1,a,\n"
+    },
+    {
+      "case": "null-note",
+      "batch_size": 1000,
+      "empty_note": false,
+      "rows": 1,
+      "digest": "ffbfaf396de0201b",
+      "csv": "id,name,note\n1,a,\n"
+    },
+    {
+      "case": "null-note",
+      "batch_size": 1000,
+      "empty_note": true,
+      "rows": 1,
+      "digest": "7764291a127bdfbf",
+      "csv": "id,name,note\n1,a,\n"
+    },
+    {
+      "case": "empty-name",
+      "batch_size": 1,
+      "empty_note": false,
+      "rows": 1,
+      "digest": "fa191cc9cca13a23",
+      "csv": "id,name,note\n1,,note\n"
+    },
+    {
+      "case": "empty-name",
+      "batch_size": 1,
+      "empty_note": true,
+      "rows": 1,
+      "digest": "3d2b1a1d8d9e8894",
+      "csv": "id,name,note\n1,,note\n"
+    },
+    {
+      "case": "empty-name",
+      "batch_size": 2,
+      "empty_note": false,
+      "rows": 1,
+      "digest": "fa191cc9cca13a23",
+      "csv": "id,name,note\n1,,note\n"
+    },
+    {
+      "case": "empty-name",
+      "batch_size": 2,
+      "empty_note": true,
+      "rows": 1,
+      "digest": "3d2b1a1d8d9e8894",
+      "csv": "id,name,note\n1,,note\n"
+    },
+    {
+      "case": "empty-name",
+      "batch_size": 1000,
+      "empty_note": false,
+      "rows": 1,
+      "digest": "fa191cc9cca13a23",
+      "csv": "id,name,note\n1,,note\n"
+    },
+    {
+      "case": "empty-name",
+      "batch_size": 1000,
+      "empty_note": true,
+      "rows": 1,
+      "digest": "3d2b1a1d8d9e8894",
+      "csv": "id,name,note\n1,,note\n"
+    },
+    {
+      "case": "boundaries",
+      "batch_size": 1,
+      "empty_note": false,
+      "rows": 2,
+      "digest": "a3ef366bd2892c44",
+      "csv": "id,name,note\n1,ab,c\n1,a,bc\n"
+    },
+    {
+      "case": "boundaries",
+      "batch_size": 1,
+      "empty_note": true,
+      "rows": 2,
+      "digest": "7b14d41b9ae50885",
+      "csv": "id,name,note\n1,ab,c\n1,a,bc\n"
+    },
+    {
+      "case": "boundaries",
+      "batch_size": 2,
+      "empty_note": false,
+      "rows": 2,
+      "digest": "a3ef366bd2892c44",
+      "csv": "id,name,note\n1,ab,c\n1,a,bc\n"
+    },
+    {
+      "case": "boundaries",
+      "batch_size": 2,
+      "empty_note": true,
+      "rows": 2,
+      "digest": "7b14d41b9ae50885",
+      "csv": "id,name,note\n1,ab,c\n1,a,bc\n"
+    },
+    {
+      "case": "boundaries",
+      "batch_size": 1000,
+      "empty_note": false,
+      "rows": 2,
+      "digest": "a3ef366bd2892c44",
+      "csv": "id,name,note\n1,ab,c\n1,a,bc\n"
+    },
+    {
+      "case": "boundaries",
+      "batch_size": 1000,
+      "empty_note": true,
+      "rows": 2,
+      "digest": "7b14d41b9ae50885",
+      "csv": "id,name,note\n1,ab,c\n1,a,bc\n"
+    },
+    {
+      "case": "duplicates",
+      "batch_size": 1,
+      "empty_note": false,
+      "rows": 2,
+      "digest": "56555aa069e2ff20",
+      "csv": "id,name,note\n1,a,note\n1,a,note\n"
+    },
+    {
+      "case": "duplicates",
+      "batch_size": 1,
+      "empty_note": true,
+      "rows": 2,
+      "digest": "eec8523424f7bf7e",
+      "csv": "id,name,note\n1,a,note\n1,a,note\n"
+    },
+    {
+      "case": "duplicates",
+      "batch_size": 2,
+      "empty_note": false,
+      "rows": 2,
+      "digest": "56555aa069e2ff20",
+      "csv": "id,name,note\n1,a,note\n1,a,note\n"
+    },
+    {
+      "case": "duplicates",
+      "batch_size": 2,
+      "empty_note": true,
+      "rows": 2,
+      "digest": "eec8523424f7bf7e",
+      "csv": "id,name,note\n1,a,note\n1,a,note\n"
+    },
+    {
+      "case": "duplicates",
+      "batch_size": 1000,
+      "empty_note": false,
+      "rows": 2,
+      "digest": "56555aa069e2ff20",
+      "csv": "id,name,note\n1,a,note\n1,a,note\n"
+    },
+    {
+      "case": "duplicates",
+      "batch_size": 1000,
+      "empty_note": true,
+      "rows": 2,
+      "digest": "eec8523424f7bf7e",
+      "csv": "id,name,note\n1,a,note\n1,a,note\n"
+    },
+    {
+      "case": "limits",
+      "batch_size": 1,
+      "empty_note": false,
+      "rows": 2,
+      "digest": "1f604b5ed702aaa7",
+      "csv": "id,name,note\n-9223372036854775808,Zoë,one\n9223372036854775807,東京,two\n"
+    },
+    {
+      "case": "limits",
+      "batch_size": 1,
+      "empty_note": true,
+      "rows": 2,
+      "digest": "ef6a1592ec7a66c4",
+      "csv": "id,name,note\n-9223372036854775808,Zoë,one\n9223372036854775807,東京,two\n"
+    },
+    {
+      "case": "limits",
+      "batch_size": 2,
+      "empty_note": false,
+      "rows": 2,
+      "digest": "1f604b5ed702aaa7",
+      "csv": "id,name,note\n-9223372036854775808,Zoë,one\n9223372036854775807,東京,two\n"
+    },
+    {
+      "case": "limits",
+      "batch_size": 2,
+      "empty_note": true,
+      "rows": 2,
+      "digest": "ef6a1592ec7a66c4",
+      "csv": "id,name,note\n-9223372036854775808,Zoë,one\n9223372036854775807,東京,two\n"
+    },
+    {
+      "case": "limits",
+      "batch_size": 1000,
+      "empty_note": false,
+      "rows": 2,
+      "digest": "1f604b5ed702aaa7",
+      "csv": "id,name,note\n-9223372036854775808,Zoë,one\n9223372036854775807,東京,two\n"
+    },
+    {
+      "case": "limits",
+      "batch_size": 1000,
+      "empty_note": true,
+      "rows": 2,
+      "digest": "ef6a1592ec7a66c4",
+      "csv": "id,name,note\n-9223372036854775808,Zoë,one\n9223372036854775807,東京,two\n"
+    }
+  ]
+}

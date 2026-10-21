@@ -15,16 +15,15 @@ use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
 
-#[cfg(test)]
-use arrow::array::{Array, Float64Array};
 use arrow::array::{
-    ArrayRef, Decimal128Array, Int64Array, RecordBatch, StringArray, TimestampMicrosecondArray,
+    Array, Decimal128Array, Int64Array, RecordBatch, StringArray, TimestampMicrosecondArray,
 };
+#[cfg(test)]
+use arrow::array::{ArrayRef, Float64Array};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use chrono::NaiveDateTime;
 #[cfg(test)]
 use datafusion::catalog::{Session, TableProvider};
-#[cfg(test)]
 use datafusion::common::ScalarValue;
 #[cfg(test)]
 use datafusion::common::tree_node::{Transformed, TreeNodeRecursion};
@@ -49,7 +48,7 @@ use datafusion::physical_plan::{
     ChildrenPropertiesMode, DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning,
     PlanProperties, ReplaceChildrenOptions, SendableRecordBatchStream,
 };
-use datafusion::prelude::{SessionConfig, SessionContext, lit};
+use datafusion::prelude::{DataFrame, SessionConfig, SessionContext, lit};
 use object_store::ObjectStore;
 use url::Url;
 
@@ -404,29 +403,13 @@ const MICROS_PER_DAY: i64 = 86_400_000_000;
 /// A single-column scalar UDF (`days_since_epoch(placed_at) -> BIGINT`)
 /// compared, in [`explain_days_since_epoch_udf_vs_builtin`], against the
 /// equivalent built-in expression `CAST(placed_at AS BIGINT) / 86400000000`
-/// to prove native Rust scalar UDFs get the same
-/// constant-folding/simplification treatment as built-ins, not a
-/// row-by-row performance penalty.
+/// to compare constant-folding/simplification with the built-in expression.
+/// This plan comparison does not measure execution cost.
 ///
-/// # Panics
-///
-/// The returned UDF's implementation panics if DataFusion invokes it with an
-/// argument that isn't a `Timestamp(Microsecond)` array — this cannot happen
-/// in practice because `create_udf` below fixes the signature to exactly
-/// that type.
+/// Scalar inputs remain scalar; arrays preserve length and nulls. Malformed
+/// direct invocations return an error instead of relying on planner coercion.
 pub fn days_since_epoch_udf() -> datafusion::logical_expr::ScalarUDF {
-    let implementation = std::sync::Arc::new(|args: &[ColumnarValue]| {
-        let args = ColumnarValue::values_to_arrays(args)?;
-        let timestamps = args[0]
-            .as_any()
-            .downcast_ref::<TimestampMicrosecondArray>()
-            .expect("days_since_epoch is registered with a Timestamp(Microsecond) signature");
-        let days: Int64Array = timestamps
-            .iter()
-            .map(|micros| micros.map(|m| m.div_euclid(MICROS_PER_DAY)))
-            .collect();
-        Ok(ColumnarValue::from(std::sync::Arc::new(days) as ArrayRef))
-    });
+    let implementation = Arc::new(invoke_days_since_epoch);
 
     create_udf(
         "days_since_epoch",
@@ -435,6 +418,47 @@ pub fn days_since_epoch_udf() -> datafusion::logical_expr::ScalarUDF {
         Volatility::Immutable,
         implementation,
     )
+}
+
+fn invoke_days_since_epoch(args: &[ColumnarValue]) -> Result<ColumnarValue, DataFusionError> {
+    let [input] = args else {
+        return Err(DataFusionError::Execution(format!(
+            "days_since_epoch expects one argument, got {}",
+            args.len()
+        )));
+    };
+    let expected = DataType::Timestamp(TimeUnit::Microsecond, None);
+    if input.data_type() != expected {
+        return Err(DataFusionError::Execution(format!(
+            "days_since_epoch expects {expected}, got {}",
+            input.data_type()
+        )));
+    }
+    match input {
+        ColumnarValue::Scalar(ScalarValue::TimestampMicrosecond(micros, None)) => {
+            Ok(ColumnarValue::Scalar(ScalarValue::Int64(
+                micros.map(|value| value.div_euclid(MICROS_PER_DAY)),
+            )))
+        }
+        ColumnarValue::Array(array) => {
+            let timestamps = array
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .ok_or_else(|| {
+                    DataFusionError::Execution(
+                        "days_since_epoch requires a timestamp microsecond array".to_owned(),
+                    )
+                })?;
+            let days: Int64Array = timestamps
+                .iter()
+                .map(|micros| micros.map(|value| value.div_euclid(MICROS_PER_DAY)))
+                .collect();
+            Ok(ColumnarValue::Array(Arc::new(days)))
+        }
+        _ => Err(DataFusionError::Execution(
+            "days_since_epoch requires a timestamp microsecond scalar".to_owned(),
+        )),
+    }
 }
 
 /// Runs `EXPLAIN` (plan-only; the comparison only needs to prove optimizer
@@ -547,20 +571,27 @@ pub fn context_with_memory_limit(
     Ok(SessionContext::new_with_config_rt(config, runtime))
 }
 
-/// Runs the row-level filter/projection/ordering query (`amount > 50.00`,
-/// `id, amount, placed_at, note`, ordered by `placed_at`) via the SQL API.
+/// Plans the row-level filter/projection/ordering query without collecting it.
+/// Callers choose collection or streaming. The global sort may buffer or spill
+/// before returning the first output batch.
 ///
 /// # Errors
-///
-/// Returns a [`DataFusionError`] if the query cannot be planned or executed.
-pub async fn row_query_sql(ctx: &SessionContext) -> Result<Vec<RecordBatch>, DataFusionError> {
+/// Returns a [`DataFusionError`] if the query cannot be planned.
+pub async fn row_query_plan(ctx: &SessionContext) -> Result<DataFrame, DataFusionError> {
     ctx.sql(
         "SELECT id, amount, placed_at, note FROM orders \
          WHERE amount > 50.00 ORDER BY placed_at ASC",
     )
-    .await?
-    .collect()
     .await
+}
+
+/// Collects the planned row-level query. Use [`row_query_plan`] to consume
+/// its output as a stream instead.
+///
+/// # Errors
+/// Returns a [`DataFusionError`] if the query cannot be planned or executed.
+pub async fn row_query_sql(ctx: &SessionContext) -> Result<Vec<RecordBatch>, DataFusionError> {
+    row_query_plan(ctx).await?.collect().await
 }
 
 /// Runs the same row-level filter/projection/ordering query as
@@ -759,9 +790,9 @@ pub async fn multi_predicate_query_dataframe(
 ///
 /// Trade-off named explicitly (DDIA ch04/ch07 lens): this provider
 /// materializes every batch up front and keeps them all resident for the
-/// table's lifetime - the same choice `register_orders` makes for Parquet
-/// via `fixture_to_orders_batch`. That's the right trade for this crate's
-/// fixture-sized data; a provider over a table larger than memory would need
+/// table's lifetime. `fixture_to_orders_batch` materializes the fixture, but
+/// `register_orders` itself registers a lazy Parquet source rather than
+/// collecting its rows. A memory provider over a table larger than memory would need
 /// to replace the `Vec<RecordBatch>` field with a chunked/streaming scan
 /// instead, at the cost of a more complex `scan()`.
 #[cfg(test)]
@@ -1256,28 +1287,10 @@ impl datafusion::logical_expr::async_udf::AsyncScalarUDFImpl for RegionMultiplie
     }
 }
 
-/// A custom [`OptimizerRule`], the sixth extension point this file proves
-/// end-to-end: a logical-plan rewrite that caps every top-level result set
-/// at `max_rows`, the way a platform team would guard a shared SQL endpoint
-/// against an accidental unbounded scan. Unlike the generic simplifications
-/// already built into `datafusion-optimizer` (e.g. duplicate-predicate or
-/// dead-filter elimination), this rule encodes a decision no generic rule
-/// could know - the right cap for *this* deployment - so it genuinely needs
-/// to be a custom rule rather than a request to change upstream.
-///
-/// DDIA lens: this is a deliberate reliability/correctness trade-off, not a
-/// free win. It buys protection against unbounded-scan resource exhaustion
-/// at the cost of silently truncating a legitimate large result instead of
-/// erroring. A production version of this guardrail would surface the cap
-/// back to the caller (a warning, a response header); this demo proves only
-/// the rewrite itself, not that follow-up.
-///
-/// Software Design Depth Doctrine lens ("define errors out of existence"):
-/// without this rule, "forgetting a LIMIT" is a runtime risk every query
-/// author must remember to avoid. With it registered, that risk is removed
-/// from the plan shape itself - every top-level plan that reaches execution
-/// already has an acceptable `fetch`, so there is no separate missing-limit
-/// error path to write or forget.
+/// A test-only output policy that caps a top-level result at `max_rows`.
+/// It may silently truncate a legitimate result. A scan, global sort or
+/// aggregate can still do substantial upstream work before yielding those
+/// rows; a result cap is not a resource-exhaustion boundary.
 ///
 /// Grokking Simplicity lens: [`OptimizerRule::rewrite`] is a Calculation -
 /// same [`LogicalPlan`] in, same [`Transformed<LogicalPlan>`] out, no I/O,
@@ -1293,8 +1306,13 @@ struct MaxRowsGuardrail {
 
 #[cfg(test)]
 impl MaxRowsGuardrail {
-    fn new(max_rows: i64) -> Self {
-        Self { max_rows }
+    fn new(max_rows: i64) -> Result<Self, DataFusionError> {
+        if max_rows < 0 {
+            return Err(DataFusionError::Configuration(
+                "result cap must be nonnegative".to_owned(),
+            ));
+        }
+        Ok(Self { max_rows })
     }
 }
 
@@ -1492,6 +1510,196 @@ mod tests {
         let object_store_batches = row_query_sql(&ctx).await.expect("object-store query");
 
         assert_eq!(local_batches, object_store_batches);
+    }
+
+    #[tokio::test]
+    async fn streamed_row_query_preserves_expected_values_and_order() {
+        use futures_util::TryStreamExt;
+        let (ctx, _parquet) = context_over_fixture().await;
+        let mut stream = row_query_plan(&ctx)
+            .await
+            .expect("row plan")
+            .execute_stream()
+            .await
+            .expect("stream");
+        let mut rows = Vec::new();
+        while let Some(batch) = stream.try_next().await.expect("next batch") {
+            let ids = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .expect("ids");
+            let amounts = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Decimal128Array>()
+                .expect("amounts");
+            let times = batch
+                .column(2)
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .expect("timestamps");
+            let notes = batch
+                .column(3)
+                .as_any()
+                .downcast_ref::<StringViewArray>()
+                .expect("notes");
+            assert_eq!(
+                batch.schema().field(1).data_type(),
+                &DataType::Decimal128(10, 2)
+            );
+            for row in 0..batch.num_rows() {
+                rows.push((
+                    ids.value(row),
+                    amounts.value(row),
+                    times.value(row),
+                    (!notes.is_null(row)).then(|| notes.value(row).to_owned()),
+                ));
+            }
+            tokio::task::yield_now().await;
+        }
+        let expected = [
+            (4, 100_000, "2026-01-01T00:00:00", None),
+            (2, 25_075, "2026-01-03T08:15:00", None),
+            (1, 10_000, "2026-01-05T10:00:00", Some("First order")),
+            (8, 99_999_999, "2026-01-06T18:20:00", Some("Largest")),
+            (3, 9_999, "2026-01-07T23:59:59", Some("Rush")),
+        ]
+        .map(|(id, amount, time, note)| {
+            (
+                id,
+                amount,
+                NaiveDateTime::parse_from_str(time, "%Y-%m-%dT%H:%M:%S")
+                    .expect("expected time")
+                    .and_utc()
+                    .timestamp_micros(),
+                note.map(str::to_owned),
+            )
+        });
+        assert_eq!(rows, expected);
+    }
+
+    #[tokio::test]
+    async fn streamed_row_query_keeps_filter_only_columns_and_respects_limits() {
+        use futures_util::TryStreamExt;
+        let (ctx, _parquet) = context_over_fixture().await;
+        let mut stream = row_query_plan(&ctx)
+            .await
+            .expect("plan")
+            .select(vec![col("id")])
+            .expect("project away predicate column")
+            .limit(0, Some(2))
+            .expect("limit")
+            .execute_stream()
+            .await
+            .expect("stream");
+        let mut ids: Vec<i64> = Vec::new();
+        while let Some(batch) = stream.try_next().await.expect("batch") {
+            assert_eq!(batch.num_columns(), 1);
+            ids.extend(
+                batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .expect("ids")
+                    .values(),
+            );
+        }
+        assert_eq!(ids, vec![4_i64, 2]);
+        let mut empty = row_query_plan(&ctx)
+            .await
+            .expect("plan")
+            .filter(lit(false))
+            .expect("filter")
+            .execute_stream()
+            .await
+            .expect("empty stream");
+        while let Some(batch) = empty.try_next().await.expect("empty batch") {
+            assert_eq!(batch.num_rows(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn streamed_row_query_preserves_conditional_cast_errors() {
+        use datafusion::logical_expr::{cast, when};
+        use futures_util::TryStreamExt;
+        let (ctx, _parquet) = context_over_fixture().await;
+        for safe in [true, false] {
+            let expression = when(lit(safe), lit(1_i64))
+                .otherwise(cast(col("note"), DataType::Int64))
+                .expect("case");
+            let mut stream = row_query_plan(&ctx)
+                .await
+                .expect("plan")
+                .select(vec![expression])
+                .expect("select case")
+                .execute_stream()
+                .await
+                .expect("stream");
+            if safe {
+                let mut count = 0;
+                while let Some(batch) = stream.try_next().await.expect("unselected invalid cast") {
+                    let values = batch
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<Int64Array>()
+                        .expect("ints");
+                    assert!(values.iter().all(|value| value == Some(1)));
+                    count += batch.num_rows();
+                }
+                assert_eq!(count, 5);
+            } else {
+                let mut failed = false;
+                while !failed {
+                    match stream.try_next().await {
+                        Err(_) => failed = true,
+                        Ok(Some(_)) => {}
+                        Ok(None) => break,
+                    }
+                }
+                assert!(failed, "selected malformed note cast must fail");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn streamed_row_query_can_be_dropped_after_one_small_batch() {
+        use futures_util::TryStreamExt;
+        let config = SessionConfig::new()
+            .with_batch_size(1)
+            .with_target_partitions(1);
+        let (ctx, _parquet) =
+            context_over_fixture_with(SessionContext::new_with_config(config)).await;
+        let mut stream = row_query_plan(&ctx)
+            .await
+            .expect("plan")
+            .execute_stream()
+            .await
+            .expect("stream");
+        let first = stream
+            .try_next()
+            .await
+            .expect("first result")
+            .expect("first batch");
+        assert_eq!(first.num_rows(), 1);
+        assert_eq!(
+            first
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .expect("ids")
+                .value(0),
+            4
+        );
+        drop(stream);
+        drop(first);
+        for _ in 0..1000 {
+            if ctx.runtime_env().memory_pool.reserved() == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(ctx.runtime_env().memory_pool.reserved(), 0);
     }
 
     #[tokio::test]
@@ -2060,10 +2268,132 @@ mod tests {
         }
     }
 
+    #[test]
+    fn result_cap_rejects_negative_configuration() {
+        assert!(MaxRowsGuardrail::new(-1).is_err());
+    }
+
+    #[tokio::test]
+    async fn result_cap_rewrite_is_stable_on_repeated_application() {
+        use datafusion::optimizer::optimizer::OptimizerContext;
+        let (ctx, _parquet) = context_over_fixture().await;
+        let rule = MaxRowsGuardrail::new(5).expect("cap");
+        let config = OptimizerContext::new();
+        for sql in [
+            "SELECT id FROM orders ORDER BY id",
+            "SELECT id FROM orders ORDER BY id LIMIT 2 OFFSET 1",
+            "SELECT id FROM orders ORDER BY id LIMIT 99 OFFSET 2",
+        ] {
+            let plan = ctx.sql(sql).await.expect("query").into_unoptimized_plan();
+            let first = rule.rewrite(plan, &config).expect("first rewrite").data;
+            let second = rule
+                .rewrite(first.clone(), &config)
+                .expect("second rewrite");
+            assert!(!second.transformed);
+            assert_eq!(second.data, first);
+        }
+    }
+
+    #[tokio::test]
+    async fn result_cap_preserves_offsets_lower_limits_and_zero() {
+        for (cap, sql, expected) in [
+            (
+                5,
+                "SELECT id FROM orders ORDER BY id LIMIT 2 OFFSET 2",
+                vec![3, 4],
+            ),
+            (
+                5,
+                "SELECT id FROM orders ORDER BY id LIMIT 99 OFFSET 2",
+                vec![3, 4, 5, 6, 7],
+            ),
+            (
+                5,
+                "SELECT id FROM orders ORDER BY id OFFSET 2",
+                vec![3, 4, 5, 6, 7],
+            ),
+            (0, "SELECT id FROM orders ORDER BY id", vec![]),
+            (
+                i64::MAX,
+                "SELECT id FROM orders ORDER BY id LIMIT 2",
+                vec![1, 2],
+            ),
+        ] {
+            let (ctx, _parquet) = context_over_fixture().await;
+            ctx.add_optimizer_rule(Arc::new(MaxRowsGuardrail::new(cap).expect("valid cap")));
+            let batches = ctx
+                .sql(sql)
+                .await
+                .expect("plan")
+                .collect()
+                .await
+                .expect("query");
+            let ids: Vec<i64> = batches
+                .iter()
+                .flat_map(|batch| {
+                    batch
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<Int64Array>()
+                        .expect("ids")
+                        .values()
+                        .to_vec()
+                })
+                .collect();
+            assert_eq!(ids, expected, "{sql} with cap {cap}");
+        }
+    }
+
+    #[tokio::test]
+    async fn volatile_lookup_preserves_repeated_keys_and_changing_responses() {
+        use std::sync::atomic::{AtomicI64, Ordering};
+        let ctx = SessionContext::new();
+        let calls = Arc::new(AtomicI64::new(0));
+        let observed = Arc::clone(&calls);
+        let lookup = create_udf(
+            "changing_lookup",
+            vec![DataType::Int64],
+            DataType::Int64,
+            Volatility::Volatile,
+            Arc::new(move |args| {
+                let arrays = ColumnarValue::values_to_arrays(args)?;
+                let ids = arrays[0]
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .expect("test signature");
+                let responses: Int64Array = ids
+                    .iter()
+                    .map(|id| id.map(|_| observed.fetch_add(1, Ordering::SeqCst) + 1))
+                    .collect();
+                Ok(ColumnarValue::Array(Arc::new(responses)))
+            }),
+        );
+        ctx.register_udf(lookup);
+        for expected in [vec![1, 2, 3], vec![4, 5, 6]] {
+            let batches = ctx.sql("SELECT changing_lookup(id) AS response FROM (VALUES (7), (7), (7)) AS repeated(id)")
+                .await.expect("plan").collect().await.expect("volatile lookup");
+            let mut actual: Vec<i64> = batches
+                .iter()
+                .flat_map(|batch| {
+                    batch
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<Int64Array>()
+                        .expect("responses")
+                        .values()
+                        .to_vec()
+                })
+                .collect();
+            actual.sort_unstable();
+            assert_eq!(actual, expected);
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 6);
+    }
+
     #[tokio::test]
     async fn optimizer_rule_max_rows_guardrail_caps_but_does_not_override_smaller_limit() {
         let (ctx, _parquet) = context_over_fixture().await;
-        ctx.add_optimizer_rule(Arc::new(MaxRowsGuardrail::new(5)));
+        ctx.add_optimizer_rule(Arc::new(MaxRowsGuardrail::new(5).expect("valid cap")));
 
         let uncapped = ctx
             .sql("SELECT id FROM orders ORDER BY id")
@@ -2541,5 +2871,132 @@ mod amount_regressions {
             fixture_to_orders_batch(&path),
             Err(PipelineIoError::InvalidAmount { .. })
         ));
+    }
+}
+
+#[cfg(test)]
+mod timestamp_representation_regressions {
+    use super::*;
+    use datafusion::common::ScalarValue;
+    use datafusion::logical_expr::ScalarFunctionArgs;
+
+    fn invoke(args: Vec<ColumnarValue>) -> Result<ColumnarValue, DataFusionError> {
+        let arg_fields = args
+            .iter()
+            .map(|arg| Arc::new(Field::new("input", arg.data_type(), true)))
+            .collect();
+        days_since_epoch_udf().invoke_with_args(ScalarFunctionArgs {
+            args,
+            arg_fields,
+            number_rows: 100_000,
+            return_field: Arc::new(Field::new("days", DataType::Int64, true)),
+            config_options: Arc::new(Default::default()),
+        })
+    }
+
+    #[test]
+    fn days_since_epoch_scalar_preserves_representation_and_values() {
+        for (micros, expected) in [
+            (None, None),
+            (Some(0), Some(0)),
+            (Some(-1), Some(-1)),
+            (Some(-86_400_000_000), Some(-1)),
+            (Some(i64::MIN), Some(-106_751_992)),
+            (Some(i64::MAX), Some(106_751_991)),
+        ] {
+            let result = invoke(vec![ColumnarValue::Scalar(
+                ScalarValue::TimestampMicrosecond(micros, None),
+            )])
+            .expect("timestamp scalar");
+            match result {
+                ColumnarValue::Scalar(value) => assert_eq!(value, ScalarValue::Int64(expected)),
+                ColumnarValue::Array(_) => panic!("scalar input was expanded to an array"),
+            }
+        }
+    }
+    #[test]
+    fn days_since_epoch_arrays_preserve_length_nulls_and_values() {
+        for values in [
+            vec![],
+            vec![None, None],
+            vec![Some(0), None, Some(-1), Some(i64::MIN), Some(i64::MAX)],
+        ] {
+            let expected = values
+                .iter()
+                .map(|value| {
+                    value.map(|micros| {
+                        let quotient = micros / 86_400_000_000;
+                        quotient - i64::from(micros % 86_400_000_000 < 0)
+                    })
+                })
+                .collect::<Vec<_>>();
+            let result = invoke(vec![ColumnarValue::Array(Arc::new(
+                TimestampMicrosecondArray::from(values),
+            ))])
+            .expect("timestamp array");
+            let ColumnarValue::Array(array) = result else {
+                panic!("array input became scalar");
+            };
+            assert_eq!(array.data_type(), &DataType::Int64);
+            let days = array
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .expect("Int64 array");
+            assert_eq!(days.iter().collect::<Vec<_>>(), expected);
+        }
+    }
+
+    #[test]
+    fn days_since_epoch_rejects_wrong_arity_type_and_timezone() {
+        let timestamp = ColumnarValue::Scalar(ScalarValue::TimestampMicrosecond(Some(0), None));
+        for args in [
+            vec![],
+            vec![timestamp.clone(), timestamp],
+            vec![ColumnarValue::Scalar(ScalarValue::Int64(Some(0)))],
+            vec![ColumnarValue::Scalar(ScalarValue::TimestampMicrosecond(
+                None,
+                Some("UTC".into()),
+            ))],
+            vec![ColumnarValue::Array(Arc::new(Int64Array::from(vec![0])))],
+            vec![ColumnarValue::Array(Arc::new(
+                TimestampMicrosecondArray::from(vec![Some(0)]).with_timezone("UTC"),
+            ))],
+        ] {
+            let error = invoke(args).expect_err("invalid invocation");
+            assert!(matches!(error, DataFusionError::Execution(_)), "{error}");
+        }
+    }
+    #[test]
+    fn days_since_epoch_representation_cost_is_explicit() {
+        let scalar = ColumnarValue::Scalar(ScalarValue::TimestampMicrosecond(Some(-1), None));
+        let expanded = ColumnarValue::values_to_arrays(std::slice::from_ref(&scalar))
+            .expect("baseline expansion");
+        assert_eq!(expanded[0].len(), 1);
+        let output = invoke(vec![scalar]).expect("scalar invocation");
+        assert!(matches!(
+            output,
+            ColumnarValue::Scalar(ScalarValue::Int64(Some(-1)))
+        ));
+        println!(
+            "baseline scalar expansion: {} rows, {} buffer bytes; current output: Int64 scalar",
+            expanded[0].len(),
+            expanded[0].get_buffer_memory_size()
+        );
+        for length in [0, 1, 1_000, 100_000] {
+            let input = TimestampMicrosecondArray::from(vec![Some(-1); length]);
+            let output =
+                invoke(vec![ColumnarValue::Array(Arc::new(input))]).expect("array invocation");
+            let ColumnarValue::Array(array) = output else {
+                panic!("array representation");
+            };
+            assert_eq!(array.len(), length);
+            assert_eq!(array.data_type(), &DataType::Int64);
+            let values = array.as_any().downcast_ref::<Int64Array>().expect("Int64");
+            assert!(values.iter().all(|value| value == Some(-1)));
+            println!(
+                "array output: {length} rows, {} buffer bytes",
+                array.get_buffer_memory_size()
+            );
+        }
     }
 }

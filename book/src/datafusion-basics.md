@@ -121,15 +121,32 @@ runs an ordinary filter/projection/ordering query through the SQL string
 API:
 
 ```rust
-pub async fn row_query_sql(ctx: &SessionContext) -> Result<Vec<RecordBatch>, DataFusionError> {
+pub async fn row_query_plan(ctx: &SessionContext) -> Result<DataFrame, DataFusionError> {
     ctx.sql(
         "SELECT id, amount, placed_at, note FROM orders \
          WHERE amount > 50.00 ORDER BY placed_at ASC",
-    )
-    .await?
-    .collect()
-    .await
+    ).await
 }
+
+pub async fn row_query_sql(ctx: &SessionContext) -> Result<Vec<RecordBatch>, DataFusionError> {
+    row_query_plan(ctx).await?.collect().await
+}
+```
+
+Earlier, `row_query_sql` constructed and collected the query in one
+function. `row_query_plan` now owns that query intent and returns a
+`DataFrame`, so the existing wrapper can collect it while a consumer can
+call `execute_stream` on the same plan. The independent DataFrame
+expression path remains a separate correctness oracle.
+
+`crates/pipeline/examples/stream_orders.rs` consumes the actual planned
+query one batch at a time and reports batch and row counts. It retains no
+whole output collection. The global `ORDER BY` may buffer or spill before
+the first output; streaming the result does not make the sort online or
+bound total query memory. Run it with a four-column orders Parquet file:
+
+```console
+$ cargo run -p pipeline --example stream_orders -- orders.parquet
 ```
 
 `row_query_dataframe` (`datafusion_query.rs:473`) runs the *identical* query
@@ -347,15 +364,7 @@ UDF - `days_since_epoch(placed_at) -> BIGINT` - built with `create_udf`:
 
 ```rust
 pub fn days_since_epoch_udf() -> ScalarUDF {
-    let implementation = Arc::new(|args: &[ColumnarValue]| {
-        let args = ColumnarValue::values_to_arrays(args)?;
-        let timestamps = args[0].as_any().downcast_ref::<TimestampMicrosecondArray>()...;
-        let days: Int64Array = timestamps
-            .iter()
-            .map(|micros| micros.map(|m| m.div_euclid(MICROS_PER_DAY)))
-            .collect();
-        Ok(ColumnarValue::from(Arc::new(days) as ArrayRef))
-    });
+    let implementation = Arc::new(invoke_days_since_epoch);
 
     create_udf(
         "days_since_epoch",
@@ -368,9 +377,14 @@ pub fn days_since_epoch_udf() -> ScalarUDF {
 ```
 
 Two things matter here beyond "how do I write a UDF." First, the
-implementation operates on whole `ArrayRef`s, not row-by-row callbacks -
-`timestamps.iter().map(...)` walks one Arrow array and produces another,
-which is what makes this vectorized rather than a per-row function call.
+implementation now branches on `ColumnarValue`: a timestamp scalar returns
+an `Int64` scalar, including typed nulls, while an array is mapped into an
+`Int64Array` with the same length and nulls. Earlier it expanded every
+input through `values_to_arrays`; preserving scalars avoids that
+intermediate array. The private invocation function also returns errors
+for wrong arity, type or timezone rather than indexing or downcasting with
+`expect`. The direct representation tests in `extending-datafusion.md`
+check execution separately from constant folding.
 Second, `Volatility::Immutable` isn't a formality: it tells DataFusion's
 optimizer the function is safe to constant-fold. `register_udf` puts it on
 the context, then it's callable from SQL like any built-in:
