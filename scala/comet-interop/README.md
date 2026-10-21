@@ -17,7 +17,7 @@ workspace. It has its own toolchain:
   sbt's own Scala 2.12, not Scala 3 - that is why it uses brace syntax while
   everything else in this project uses braceless syntax.
 
-Run `sbt compile` and `sbt test` from inside `comet-interop/` to build it.
+Run `sbt compile` and `sbt test` from inside `scala/comet-interop/` to build it.
 
 ## Why this doesn't extend real Spark/Comet classes
 
