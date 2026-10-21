@@ -9,6 +9,7 @@ publish = false
 workspace = true
 
 [dependencies]
+contracts = { version = "0.2.0", path = "../contracts", features = ["arrow-validation"] }
 arrow = "59"
 object_store = "0.13.2"
 pipeline = { path = "../pipeline" }

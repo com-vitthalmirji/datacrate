@@ -6311,6 +6311,7 @@ name = "typestate"
 version = "0.1.0"
 dependencies = [
  "arrow 59.3.0",
+ "contracts",
  "object_store",
  "pipeline",
  "tokio",

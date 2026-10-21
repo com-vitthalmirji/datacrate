@@ -1,0 +1,18 @@
+error[E0599]: no method named `transform` found for struct `ContractSink<'a>` in the current scope
+ --> tests/contract_compile_fail/after_sink.rs:8:77
+  |
+8 | fn main(){let _=ContractPipeline::source::<A,_>(input).sink::<A>(|_|Ok(())).transform::<A,A>(Ok);}
+  |                 --------------------------------------                      ^^^^^^^^^
+  |                 |
+  |                 method `transform` is available on `ContractPipeline<'_, A>`
+  |
+ ::: $CARGO/yoke-$VERSION/src/yokeable.rs
+  |
+  |     fn transform(&'a self) -> &'a Self::Output;
+  |        --------- the method is available for `&ContractSink<'_>` here
+  |
+help: there is a method `transform_owned` with a similar name, but with different arguments
+ --> $CARGO/yoke-$VERSION/src/yokeable.rs
+  |
+  |     fn transform_owned(self) -> Self::Output;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
