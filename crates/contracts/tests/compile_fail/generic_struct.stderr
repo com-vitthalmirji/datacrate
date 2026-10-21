@@ -1,4 +1,4 @@
-error: Contract cannot be derived for generic structs: a type parameter has no shape the macro can see, so distinct instantiations (e.g. Wrapper<i64> vs Wrapper<String>) would compare as identical
+error: Contract derive supports only concrete structs; generic parameters and lifetimes are not supported
  --> tests/compile_fail/generic_struct.rs:4:15
   |
 4 | struct Generic<T> {

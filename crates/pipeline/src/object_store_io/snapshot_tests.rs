@@ -31,6 +31,7 @@ struct SnapshotStore {
     scenario: Scenario,
     requests: Mutex<Vec<GetOptions>>,
     heads: AtomicUsize,
+    head_keys: Mutex<Vec<ObjectPath>>,
     gets: AtomicUsize,
     size: usize,
 }
@@ -42,6 +43,7 @@ impl SnapshotStore {
             scenario,
             requests: Mutex::new(Vec::new()),
             heads: AtomicUsize::new(0),
+            head_keys: Mutex::new(Vec::new()),
             gets: AtomicUsize::new(0),
             size,
         };
@@ -88,6 +90,7 @@ impl ObjectStore for SnapshotStore {
         let mut opts = opts;
         if head {
             self.heads.fetch_add(1, Ordering::SeqCst);
+            self.head_keys.lock().expect("head keys").push(key.clone());
         } else {
             let index = self.gets.fetch_add(1, Ordering::SeqCst) + 1;
             if matches!(self.scenario, Scenario::ReplaceAt(at) | Scenario::IgnoreConditionAt(at) if index == at)
@@ -413,7 +416,10 @@ fn snapshot_pipeline_manifest_uses_the_download_metadata_without_an_extra_head()
         &crate::bounded::CancellationToken::new(),
     )
     .expect("pipeline");
-    assert_eq!(store.heads.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        *store.head_keys.lock().expect("head keys"),
+        [input.clone(), output.clone()]
+    );
     let bytes = block_on(async {
         store
             .inner

@@ -2,7 +2,10 @@
 
 ## Status
 
-Proposed - 20 October 2026. Experiment and evidence design, not measured improvement.
+Proposed - 20 October 2026. The bounded physical-layout comparison is implemented;
+production defaults remain unchanged. Evidence retains stage versus process measurement
+boundaries and unavailable metrics. Initial host-contended timings are exploratory;
+performance acceptance awaits controlled reruns. Other conditional evaluations remain separate.
 Extends ADR 0006 and preserves ADR 0007/0007.1 resource-control limitations.
 
 ## Context
@@ -13,7 +16,7 @@ for requested lengths can include failed reads; they are not successful network 
 or independent backend service latency.
 
 Datacrate already has runtime projection/filter evidence and a compression comparison.
-The latter runs Snappy then default-level Zstd once on one ordered dataset. That cannot
+The earlier comparison ran Snappy then default-level Zstd once on one ordered dataset. That could not
 support a broad default-policy migration. Existing Spark/DataFusion timings retain their
 published timing boundaries and establish none of the new candidates' benefits.
 

@@ -5,22 +5,16 @@
 //! [`TypeShape`]: https://doc.rust-lang.org/nightly/std/index.html
 
 use proc_macro::TokenStream;
-use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{
-    Data, DataStruct, DeriveInput, Fields, GenericArgument, PathArguments, Type, parse_macro_input,
-};
+use syn::{Data, DataStruct, DeriveInput, Fields, parse_macro_input};
 
 /// Derives `contracts::Contract` for a struct with named fields, recording
 /// each field's name and shape (primitive, `Option`, `Vec`, `HashMap`/
 /// `BTreeMap`, recursively) as a `const SHAPE: TypeShape`.
 ///
 /// Generic structs are rejected at the derive site (see `derive_contract`'s
-/// generics check) rather than silently accepted: a bare type parameter
-/// (e.g. `struct Wrapper<T> { v: T }`) has no shape the macro can see, so
-/// recording it as an opaque `Primitive("T")` would make `Wrapper<i64>` and
-/// `Wrapper<String>` compare as identical shapes — defeating the exact
-/// purpose of this crate.
+/// generics check) rather than silently accepted: this derive intentionally supports concrete declarations only.
+/// Field shapes are resolved by the compiler through `Contract`, including aliases.
 ///
 /// # Panics
 ///
@@ -36,9 +30,7 @@ pub fn derive_contract(input: TokenStream) -> TokenStream {
     if !input.generics.params.is_empty() {
         return syn::Error::new_spanned(
             &input.generics,
-            "Contract cannot be derived for generic structs: a type parameter has no \
-             shape the macro can see, so distinct instantiations (e.g. Wrapper<i64> vs \
-             Wrapper<String>) would compare as identical",
+            "Contract derive supports only concrete structs; generic parameters and lifetimes are not supported",
         )
         .to_compile_error()
         .into();
@@ -66,7 +58,8 @@ pub fn derive_contract(input: TokenStream) -> TokenStream {
             .as_ref()
             .expect("named field guaranteed by Fields::Named")
             .to_string();
-        let shape = shape_tokens(&f.ty);
+        let ty = &f.ty;
+        let shape = quote! { <#ty as ::contracts::Contract>::SHAPE };
         let has_default = match has_default_attr(f) {
             Ok(value) => value,
             Err(error) => return error.to_compile_error().into(),
@@ -85,89 +78,6 @@ pub fn derive_contract(input: TokenStream) -> TokenStream {
     };
 
     expanded.into()
-}
-
-/// Builds the tokens for a single field's [`TypeShape`], recursing through
-/// `Option<T>`, `Vec<T>`, and `HashMap`/`BTreeMap<K, V>` so nested
-/// optionality (e.g. `Vec<Option<T>>`) is preserved rather than collapsed
-/// to the outer container's shape alone.
-///
-/// Any named type recognized as a Rust/std primitive (`bool`, `char`, `str`,
-/// `String`, the integer and float types) is recorded as an opaque
-/// `Primitive`, comparable only by name. Anything else is assumed to be a
-/// nested `#[derive(Contract)]` type and emitted as `<T as Contract>::SHAPE`
-/// so `diagnose` can recurse into it and name a mismatched field by its full
-/// path (e.g. `shipTo.zip`).
-///
-/// This is a heuristic, not a type resolution — a proc macro sees syntax,
-/// not resolved types, so it cannot actually confirm a field's type
-/// implements `Contract`. A field typed with a non-primitive that does *not*
-/// derive `Contract` (e.g. `uuid::Uuid` used directly) fails to compile with
-/// an unsatisfied-trait-bound error rather than silently comparing wrong —
-/// consistent with this crate's premise that drift is a compile error, not a
-/// silent gap.
-///
-/// Container detection matches on the last path segment's *name* only
-/// (`"Option"`, `"Vec"`, `"HashMap"`, `"BTreeMap"`) — the same syntactic
-/// limitation applies here too. To stay safe under that ambiguity, a segment
-/// is only treated as a container when its generic-argument count matches
-/// the container's arity (one for `Option`/`Vec`, two for the maps);
-/// anything else — including a non-generic type that happens to be named
-/// `Vec` — falls through to the primitive/nested-`Contract` case below
-/// instead of panicking.
-fn shape_tokens(ty: &Type) -> TokenStream2 {
-    if let Type::Reference(r) = ty {
-        return shape_tokens(&r.elem);
-    }
-
-    if let Type::Path(p) = ty {
-        let segment = p
-            .path
-            .segments
-            .last()
-            .expect("a type path always has at least one segment");
-        let ident = segment.ident.to_string();
-
-        match ident.as_str() {
-            "Option" => {
-                if let Some(inner) = single_type_arg(segment) {
-                    let inner = shape_tokens(inner);
-                    return quote! { ::contracts::TypeShape::Optional(&#inner) };
-                }
-            }
-            "Vec" => {
-                if let Some(inner) = single_type_arg(segment) {
-                    let inner = shape_tokens(inner);
-                    return quote! { ::contracts::TypeShape::Sequence(&#inner) };
-                }
-            }
-            "HashMap" | "BTreeMap" => {
-                if let Some((key, value)) = pair_type_args(segment) {
-                    let key_name = quote!(#key).to_string();
-                    if !is_atomic_key_name(&key_name) {
-                        let msg = format!(
-                            "Contract map key must be an atomic type (bool, String, or an \
-                             integer type); found `{key_name}` — matching \
-                             compile-time-data-contracts' `isAtomicKey` restriction, which \
-                             rejects non-atomic map keys at derive time"
-                        );
-                        return syn::Error::new_spanned(key, msg).to_compile_error();
-                    }
-                    let key = shape_tokens(key);
-                    let value = shape_tokens(value);
-                    return quote! { ::contracts::TypeShape::Map(&#key, &#value) };
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let name = quote!(#ty).to_string();
-    if is_primitive_name(&name) {
-        quote! { ::contracts::TypeShape::Primitive(#name) }
-    } else {
-        quote! { <#ty as ::contracts::Contract>::SHAPE }
-    }
 }
 
 /// Detects `#[contract(default)]` on a field — the Rust-side stand-in for a
@@ -209,90 +119,4 @@ fn has_default_attr(field: &syn::Field) -> syn::Result<bool> {
         found = true;
     }
     Ok(found)
-}
-
-/// Rust/std primitive type names left as opaque `Primitive` shapes rather
-/// than being treated as a nested `Contract` type. `str` is included even
-/// though field types are practically always `String`, not a bare `str`.
-fn is_primitive_name(name: &str) -> bool {
-    matches!(
-        name,
-        "bool"
-            | "char"
-            | "str"
-            | "String"
-            | "i8"
-            | "i16"
-            | "i32"
-            | "i64"
-            | "i128"
-            | "u8"
-            | "u16"
-            | "u32"
-            | "u64"
-            | "u128"
-            | "usize"
-            | "isize"
-            | "f32"
-            | "f64"
-    )
-}
-
-/// Rust equivalents of CTDC's `isAtomicKey` whitelist (`String`, `Int`,
-/// `Long`, `Short`, `Byte`, `Boolean`) — the types considered permissible
-/// `Map` keys. Notably narrower than [`is_primitive_name`]: no `char`, `str`,
-/// or floats, matching CTDC's own exclusion of those from map keys.
-fn is_atomic_key_name(name: &str) -> bool {
-    matches!(
-        name,
-        "bool"
-            | "String"
-            | "i8"
-            | "i16"
-            | "i32"
-            | "i64"
-            | "i128"
-            | "u8"
-            | "u16"
-            | "u32"
-            | "u64"
-            | "u128"
-            | "usize"
-            | "isize"
-    )
-}
-
-/// Returns the segment's sole generic type argument, or `None` if it has
-/// zero or more than one — callers treat `None` as "not actually this
-/// container" rather than an error.
-fn single_type_arg(segment: &syn::PathSegment) -> Option<&Type> {
-    let mut args = type_args(segment);
-    let first = args.next()?;
-    if args.next().is_some() {
-        return None;
-    }
-    Some(first)
-}
-
-/// Returns the segment's two generic type arguments (key, value), or `None`
-/// if it doesn't have exactly two.
-fn pair_type_args(segment: &syn::PathSegment) -> Option<(&Type, &Type)> {
-    let mut args = type_args(segment);
-    let key = args.next()?;
-    let value = args.next()?;
-    if args.next().is_some() {
-        return None;
-    }
-    Some((key, value))
-}
-
-fn type_args(segment: &syn::PathSegment) -> impl Iterator<Item = &Type> {
-    let args = match &segment.arguments {
-        PathArguments::AngleBracketed(args) => Some(&args.args),
-        _ => None,
-    };
-    args.into_iter().flatten().filter_map(|arg| match arg {
-        GenericArgument::Type(t) => Some(t),
-        _ => None,
-    })
 }

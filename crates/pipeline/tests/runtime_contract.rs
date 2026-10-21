@@ -216,3 +216,215 @@ fn callback_error_releases_waiting_producer_and_preserves_context() {
         assert_eq!(std::fs::read_dir(dir.path()).expect("outputs").count(), 1);
     }
 }
+
+#[test]
+fn byte_admission_pipeline_preserves_results_and_reports_retained_charge() {
+    use std::num::NonZeroUsize;
+    for capacity in [0, 1, 4] {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let input = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/m1/headers.csv");
+        let output = dir.path().join("output.parquet");
+        let config = PipelineConfig {
+            batch_size: NonZeroUsize::new(1).expect("positive"),
+            channel_capacity: capacity,
+            max_admitted_bytes: NonZeroUsize::new(16_384),
+            ..PipelineConfig::default()
+        };
+        let report =
+            run_bounded_pipeline(&input, &output, &config, None, &CancellationToken::new())
+                .expect("bounded budget");
+        let actual = pipeline::read_parquet(&output).expect("published output");
+        assert_eq!(
+            actual,
+            pipeline::fixture_to_record_batch(&input).expect("reference")
+        );
+        assert_eq!(report.rows_written, 3);
+        assert_eq!(report.admitted_bytes, Some(0));
+        assert!(
+            report
+                .peak_admitted_bytes
+                .is_some_and(|bytes| bytes > 0 && bytes <= 16_384)
+        );
+    }
+}
+
+#[test]
+fn byte_admission_producer_error_cannot_publish_partial_output() {
+    use pipeline::bounded::PipelineError;
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let output = dir.path().join("output.parquet");
+    std::fs::write(&output, b"previous").expect("old output");
+    let config = PipelineConfig {
+        max_admitted_bytes: std::num::NonZeroUsize::new(1),
+        ..PipelineConfig::default()
+    };
+    let input = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/m1/headers.csv");
+    assert!(matches!(
+        run_bounded_pipeline(&input, &output, &config, None, &CancellationToken::new()),
+        Err(PipelineError::BatchTooLarge { .. })
+    ));
+    assert_eq!(std::fs::read(output).expect("old output"), b"previous");
+    assert_eq!(
+        std::fs::read_dir(dir.path())
+            .expect("output directory")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn byte_admission_late_producer_error_discards_already_processed_rows() {
+    use pipeline::bounded::PipelineError;
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let input = dir.path().join("input.csv");
+    std::fs::write(
+        &input,
+        format!("id,name,note\n1,small,\n2,{},\n", "x".repeat(50_000)),
+    )
+    .expect("input");
+    let output = dir.path().join("output.parquet");
+    std::fs::write(&output, b"previous").expect("old output");
+    let config = PipelineConfig {
+        batch_size: std::num::NonZeroUsize::new(1).expect("positive"),
+        channel_capacity: 0,
+        max_admitted_bytes: std::num::NonZeroUsize::new(4096),
+        ..PipelineConfig::default()
+    };
+    let observed = std::cell::Cell::new(0);
+    let transform = |batch| {
+        observed.set(observed.get() + 1);
+        Ok(batch)
+    };
+    let result = run_bounded_pipeline(
+        &input,
+        &output,
+        &config,
+        Some(&transform),
+        &CancellationToken::new(),
+    );
+    assert!(matches!(result, Err(PipelineError::BatchTooLarge { .. })));
+    assert_eq!(
+        observed.get(),
+        1,
+        "the first admitted batch reached consumer processing"
+    );
+    assert_eq!(std::fs::read(output).expect("old output"), b"previous");
+    assert_eq!(std::fs::read_dir(dir.path()).expect("files").count(), 2);
+}
+
+#[test]
+fn byte_admission_callback_error_releases_budget_and_keeps_source() {
+    use pipeline::bounded::PipelineError;
+    use pipeline::{CallbackStage, PipelineIoError};
+    for capacity in [0, 1] {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let config = PipelineConfig {
+            channel_capacity: capacity,
+            max_admitted_bytes: std::num::NonZeroUsize::new(16_384),
+            ..PipelineConfig::default()
+        };
+        let input = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/m1/headers.csv");
+        let transform = |_| {
+            Err(PipelineIoError::InvalidId {
+                row: 7,
+                value: "callback".into(),
+            })
+        };
+        assert!(matches!(
+            run_bounded_pipeline(
+                &input,
+                &dir.path().join("output"),
+                &config,
+                Some(&transform),
+                &CancellationToken::new()
+            ),
+            Err(PipelineError::Io(PipelineIoError::Callback {
+                stage: CallbackStage::Transform,
+                batch_index: 0,
+                ..
+            }))
+        ));
+        assert_eq!(
+            std::fs::read_dir(dir.path())
+                .expect("output directory")
+                .count(),
+            0
+        );
+    }
+}
+
+#[test]
+fn runtime_contract_rejects_malformed_callback_shapes_with_typed_errors() {
+    use arrow::array::UInt64Array;
+    use pipeline::bounded::PipelineError;
+    use pipeline::{BatchViolation, PipelineIoError};
+    for shape in 0..3 {
+        for budget in [None, std::num::NonZeroUsize::new(16_384)] {
+            let dir = tempfile::tempdir().expect("directory");
+            let output = dir.path().join("output");
+            std::fs::write(&output, b"old").expect("old output");
+            let transform = |batch: RecordBatch| {
+                if shape == 0 {
+                    return Ok(batch.project(&[0, 1]).expect("two columns"));
+                }
+                let fields = vec![
+                    Field::new(
+                        "id",
+                        if shape == 1 {
+                            DataType::UInt64
+                        } else {
+                            DataType::Int64
+                        },
+                        shape == 2,
+                    ),
+                    Field::new("name", DataType::Utf8, false),
+                    Field::new("note", DataType::Utf8, true),
+                ];
+                let mut columns = batch.columns().to_vec();
+                if shape == 1 {
+                    columns[0] = Arc::new(UInt64Array::from(vec![1; batch.num_rows()]));
+                }
+                Ok(RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
+                    .expect("safely constructible drift"))
+            };
+            let input = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/m1/headers.csv");
+            let config = PipelineConfig {
+                max_admitted_bytes: budget,
+                ..PipelineConfig::default()
+            };
+            let error = run_bounded_pipeline(
+                &input,
+                &output,
+                &config,
+                Some(&transform),
+                &CancellationToken::new(),
+            )
+            .expect_err("reject callback drift");
+            match (shape, error) {
+                (
+                    0,
+                    PipelineError::Io(PipelineIoError::InvalidBatch {
+                        violation: BatchViolation::ColumnCount { .. },
+                    }),
+                )
+                | (
+                    1,
+                    PipelineError::Io(PipelineIoError::InvalidBatch {
+                        violation: BatchViolation::DataType { index: 0, .. },
+                    }),
+                )
+                | (
+                    2,
+                    PipelineError::Io(PipelineIoError::InvalidBatch {
+                        violation: BatchViolation::Nullability { index: 0, .. },
+                    }),
+                ) => (),
+                (_, error) => {
+                    panic!("expected contract rejection before writer/digest, got {error:?}")
+                }
+            }
+            assert_eq!(std::fs::read(output).expect("previous output"), b"old");
+            assert_eq!(std::fs::read_dir(dir.path()).expect("directory").count(), 1);
+        }
+    }
+}

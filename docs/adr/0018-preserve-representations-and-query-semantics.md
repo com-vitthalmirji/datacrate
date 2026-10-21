@@ -2,7 +2,9 @@
 
 ## Status
 
-Proposed - 20 October 2026. Source-derived opportunities; no new performance result.
+Proposed - 20 October 2026. Scalar preservation, aggregate precision and shared query
+construction are implemented, with controlled ordered-stream spill/progress coverage.
+Direct ingestion remains an experiment pending controlled allocation/performance evidence.
 Refines ADR 0006 and the representation/query candidates extending ADR 0015.
 
 ## Context
@@ -11,10 +13,11 @@ Preserving constants, processing typed chunks, and refusing rewrites that change
 null behavior can avoid unnecessary work. Apply those principles through Datacrate's
 existing Arrow/DataFusion interfaces.
 
-Datacrate's timestamp UDF currently expands inputs through `values_to_arrays`. The bounded
-CSV producer creates owned rows before copying strings into Arrow. Row-query helpers collect
-their results; normal Parquet registration is already lazy. Its test-only amount-range
-aggregate declares precision 10 for a difference that can need precision 11.
+Earlier, the timestamp UDF expanded inputs through `values_to_arrays`, row-query helpers
+combined planning with collection, and the amount-range aggregate declared precision 10
+for a difference that can need precision 11. Those boundaries are corrected as specified
+below. Normal Parquet registration was already lazy. The bounded CSV producer still creates
+owned rows; changing that path requires the separate controlled measurement gate.
 
 ## Decision
 
@@ -34,7 +37,7 @@ For precision-10 scale-2 inputs, unscaled extrema `-9_999_999_999` and `9_999_99
 have range `19_999_999_998`. Prefer an exact precision-11/scale-2 result over retaining
 precision 10 and rejecting valid inputs. Keep min/max partial state precision 10.
 Change both declared return type and evaluated scalar, then test merged/partitioned output.
-This is currently a source observation, not a newly executed reproduction.
+The regression checks an engine-returned batch, including its declared type and actual value.
 
 ### Direct construction, only where earned
 

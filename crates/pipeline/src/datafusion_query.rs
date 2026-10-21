@@ -987,7 +987,7 @@ impl datafusion::logical_expr::AggregateUDFImpl for AmountRangeUdf {
     }
 
     fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType, DataFusionError> {
-        Ok(DataType::Decimal128(10, 2))
+        Ok(DataType::Decimal128(11, 2))
     }
 
     fn accumulator(
@@ -1046,7 +1046,7 @@ impl datafusion::logical_expr::Accumulator for AmountRangeAccumulator {
             (Some(min), Some(max)) => Some(max - min),
             _ => None,
         };
-        Ok(datafusion::common::ScalarValue::Decimal128(range, 10, 2))
+        Ok(datafusion::common::ScalarValue::Decimal128(range, 11, 2))
     }
 
     fn size(&self) -> usize {
@@ -2144,7 +2144,7 @@ mod tests {
             .column(0)
             .as_any()
             .downcast_ref::<Decimal128Array>()
-            .expect("range column is Decimal128(10, 2)");
+            .expect("range column is Decimal128(11, 2)");
         // fixtures/m3/orders.csv: max 999999.99, min 0.01 - computed by hand
         // from the fixture file, not derived from the accumulator under test.
         let expected_range_unscaled = 99_999_999i128 - 1i128;
@@ -2419,6 +2419,66 @@ mod tests {
     }
 
     #[test]
+    fn amount_range_partial_merge_orders_preserve_extremes_and_null_state() {
+        use datafusion::common::ScalarValue;
+        use datafusion::logical_expr::Accumulator;
+        let mut states = Vec::new();
+        for values in [
+            vec![Some(-9_999_999_999)],
+            vec![None],
+            vec![Some(9_999_999_999)],
+        ] {
+            let mut partial = AmountRangeAccumulator::default();
+            partial
+                .update_batch(&[Arc::new(
+                    Decimal128Array::from(values)
+                        .with_precision_and_scale(10, 2)
+                        .expect("valid input"),
+                )])
+                .expect("update partial");
+            states.push(partial.state().expect("serialize partial"));
+        }
+        let expected = ScalarValue::Decimal128(Some(19_999_999_998), 11, 2);
+        for order in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            let mut merged = AmountRangeAccumulator::default();
+            for index in order {
+                let columns = states[index]
+                    .iter()
+                    .map(|value| value.to_array_of_size(1).expect("state array"))
+                    .collect::<Vec<_>>();
+                merged.merge_batch(&columns).expect("merge ordered state");
+            }
+            assert_eq!(
+                merged.evaluate().expect("merged range"),
+                expected,
+                "order {order:?}"
+            );
+            let columns = (0..2)
+                .map(|column| {
+                    ScalarValue::iter_to_array(
+                        order.into_iter().map(|index| states[index][column].clone()),
+                    )
+                    .expect("combined state array")
+                })
+                .collect::<Vec<_>>();
+            let mut batched = AmountRangeAccumulator::default();
+            batched.merge_batch(&columns).expect("merge batched states");
+            assert_eq!(
+                batched.evaluate().expect("batched range"),
+                expected,
+                "batched order {order:?}"
+            );
+        }
+    }
+
+    #[test]
     fn amount_range_accumulator_merge_batch_combines_partial_states() {
         use datafusion::logical_expr::Accumulator;
 
@@ -2483,7 +2543,7 @@ mod tests {
             range,
             datafusion::common::ScalarValue::Decimal128(
                 Some(decimal("999999.99") - decimal("0.01")),
-                10,
+                11,
                 2
             ),
             "merging two partitions' partial state must reproduce the fixture's full \
@@ -2871,6 +2931,110 @@ mod amount_regressions {
             fixture_to_orders_batch(&path),
             Err(PipelineIoError::InvalidAmount { .. })
         ));
+    }
+}
+
+#[cfg(test)]
+mod amount_range_regressions {
+    use super::*;
+    use datafusion::datasource::MemTable;
+    use datafusion::logical_expr::AggregateUDF;
+
+    async fn range_result(partitions: &[&[Option<i128>]]) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "amount",
+            DataType::Decimal128(10, 2),
+            true,
+        )]));
+        let batches = partitions
+            .iter()
+            .map(|values| {
+                let amounts = Decimal128Array::from(values.to_vec())
+                    .with_precision_and_scale(10, 2)
+                    .expect("input precision");
+                vec![
+                    RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(amounts)])
+                        .expect("input batch"),
+                ]
+            })
+            .collect();
+        let ctx = SessionContext::new();
+        ctx.register_table(
+            "amounts",
+            Arc::new(MemTable::try_new(schema, batches).expect("partitions")),
+        )
+        .expect("table");
+        ctx.register_udaf(AggregateUDF::from(AmountRangeUdf::new()));
+        let result = ctx
+            .sql("SELECT amount_range(amount) AS amount_range FROM amounts")
+            .await
+            .expect("query")
+            .collect()
+            .await
+            .expect("aggregate result");
+        assert_eq!(result.len(), 1);
+        result.into_iter().next().expect("result batch")
+    }
+
+    #[tokio::test]
+    async fn amount_range_extreme_values_need_precision_eleven() {
+        let batch = range_result(&[&[Some(-9_999_999_999)], &[Some(9_999_999_999)]]).await;
+        assert_eq!(
+            batch.schema().field(0).data_type(),
+            &DataType::Decimal128(11, 2)
+        );
+        let values = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Decimal128Array>()
+            .expect("decimal result");
+        assert_eq!(values.value(0), 19_999_999_998);
+        values
+            .validate_decimal_precision(11)
+            .expect("range fits declared precision");
+    }
+
+    fn assert_range(batch: &RecordBatch, expected: Option<i128>) {
+        assert_eq!(
+            batch.schema().field(0).data_type(),
+            &DataType::Decimal128(11, 2)
+        );
+        let values = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Decimal128Array>()
+            .expect("decimal range");
+        assert_eq!(values.iter().collect::<Vec<_>>(), vec![expected]);
+        values
+            .validate_decimal_precision(11)
+            .expect("declared result precision");
+    }
+
+    #[tokio::test]
+    async fn amount_range_empty_input_is_null() {
+        assert_range(&range_result(&[&[]]).await, None);
+    }
+
+    #[tokio::test]
+    async fn amount_range_all_null_input_is_null() {
+        assert_range(&range_result(&[&[None, None]]).await, None);
+    }
+
+    #[tokio::test]
+    async fn amount_range_single_value_is_zero() {
+        assert_range(&range_result(&[&[Some(-123)]]).await, Some(0));
+    }
+
+    #[tokio::test]
+    async fn amount_range_partial_merge_preserves_extrema_in_any_partition_order() {
+        for partitions in [
+            vec![vec![Some(-300), None], vec![Some(25)], vec![Some(100)]],
+            vec![vec![Some(100)], vec![Some(25)], vec![None, Some(-300)]],
+            vec![vec![Some(100), Some(-300), None, Some(25)]],
+        ] {
+            let references = partitions.iter().map(Vec::as_slice).collect::<Vec<_>>();
+            assert_range(&range_result(&references).await, Some(400));
+        }
     }
 }
 
