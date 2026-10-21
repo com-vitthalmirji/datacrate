@@ -5,8 +5,8 @@ use object_store::path::Path as ObjectPath;
 use pipeline::bounded::PipelineConfig;
 use typestate::RemotePipelineBuilder;
 
-fn identity(batch: arrow::array::RecordBatch) -> arrow::array::RecordBatch {
-    batch
+fn identity(batch: arrow::array::RecordBatch) -> Result<arrow::array::RecordBatch, pipeline::PipelineIoError> {
+    Ok(batch)
 }
 
 fn main() {

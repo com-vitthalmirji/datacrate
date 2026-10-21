@@ -229,6 +229,37 @@ existing memory is free to create and free to destroy, and a Rust API that
 returns `&str` instead of `String` is making a deliberate promise about
 that.
 
+## Comparing row ownership with direct Arrow construction
+
+The bounded ingest producer first owns each parsed row's strings, then copies their
+contents into Arrow arrays. The `ingest_comparison` example now keeps that path as
+an explicit control and compares it with a reusable CSV record and typed Arrow
+builders. The candidate appends borrowed field contents before reading the next
+record. Arrow still owns copied bytes; this is not zero-copy ingestion.
+
+Both paths keep at most one batch of rows or builders in the construction step.
+Tests compare schema, values, nulls and batch boundaries against an independently
+written expected batch, including quoted commas, multiline fields and Unicode.
+They also check invalid IDs, invalid UTF-8, unequal field counts and consumer
+closure. The example preserves the producer's current positional field handling.
+It does not introduce a new schema inference or column-name mapping policy.
+
+Build once, then profile the binary separately:
+
+```sh
+cargo build --release -p pipeline --example ingest_comparison --locked
+target/release/examples/ingest_comparison rows input.csv rows.parquet 1000
+target/release/examples/ingest_comparison direct input.csv direct.parquet 1000
+cargo test -p pipeline --example ingest_comparison --locked
+```
+
+These commands write experiment outputs directly and can leave partial files on
+failure. They do not exercise the bounded channel or staged publication protocol.
+Measure CSV read, construction and Parquet write together only when that is the
+named workload; allocation profiling and output validation need separate runs.
+The production producer remains the row path until allocation and workload evidence
+justify a change. A passing equality test by itself establishes no speedup.
+
 ## Try it yourself
 
 ```sh

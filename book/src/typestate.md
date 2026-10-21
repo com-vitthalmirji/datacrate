@@ -121,7 +121,7 @@ real, not just documented.
 That boxed `Fn` design solved capturing, but still rejected a callback that
 consumed a captured resource. The local `build` consumes the builder and calls
 each callback once, so requiring repeatability bought no additional guarantee.
-Local callbacks now use `Box<dyn FnOnce(RecordBatch) -> RecordBatch>`, and their
+Local callbacks now use `Box<dyn FnOnce(RecordBatch) -> Result<RecordBatch, PipelineIoError>>`, and their
 setters accept `FnOnce + 'static`. Remote transforms retain a separate repeatable
 `Fn` alias because they run once per batch. These bounds do not add thread-sharing
 requirements or imply schema validation.
@@ -153,3 +153,19 @@ let config = PipelineConfig {
 Defaults remain 1,000 rows per batch, capacity 4 and Snappy compression. Capacity
 zero remains a valid rendezvous channel. A row-count bound is not a byte ceiling:
 wide input rows, transformed batches and backend allocations still matter.
+
+## Returning callback failures and checking results
+
+Callbacks originally returned a batch directly. They could panic, but had no ordinary
+return path for an expected failure. They now return `Result<RecordBatch, PipelineIoError>`.
+An unchanged batch can be returned with `Ok(batch)`; a callback failure retains its original
+error under a `Callback` error naming the stage and zero-based batch index.
+
+The local builder validates the transform result before invoking the final callback, then
+validates that callback's result before returning success. The bounded remote path validates
+its transformed output before writing and digesting it. Both use the fixed ingest contract:
+`id: Int64`, `name: Utf8`, nullable `note: Utf8`, in that order. Invalid output returns
+`InvalidBatch`; stage completeness alone remains the narrower compiler guarantee.
+
+A callback can still perform external actions or panic. A later error cannot undo those
+actions, and the local final callback is not a transactional storage sink.

@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use typestate::PipelineBuilder;
 
-fn identity(batch: arrow::array::RecordBatch) -> arrow::array::RecordBatch {
-    batch
+fn identity(batch: arrow::array::RecordBatch) -> Result<arrow::array::RecordBatch, pipeline::PipelineIoError> {
+    Ok(batch)
 }
 
 fn main() {

@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed - 20 October 2026. Design only; no implementation or new execution evidence.
+Proposed - 20 October 2026. Acceptance depends on implementation review and verification.
 This makes ADR 0015's fallible-transform and fixed-schema validation scope concrete.
 It does not accept or complete ADR 0015's other design gates.
 

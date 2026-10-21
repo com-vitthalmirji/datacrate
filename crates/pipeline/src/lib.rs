@@ -8,6 +8,9 @@
 
 #![warn(missing_docs)]
 
+mod batch_contract;
+pub use batch_contract::{BatchViolation, validate_ingest_batch};
+
 pub mod bounded;
 pub mod datafusion_query;
 pub mod manifest;
@@ -20,17 +23,49 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{ArrayRef, Int64Array, RecordBatch, StringArray};
-use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use arrow::datatypes::{Field, Schema, SchemaRef};
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::basic::Compression;
 use parquet::errors::ParquetError;
 use parquet::file::properties::WriterProperties;
 
+/// A configured callback's position in the pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallbackStage {
+    /// The transform after reading input.
+    Transform,
+    /// The local final callback.
+    Sink,
+}
+
+impl std::fmt::Display for CallbackStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transform => f.write_str("transform"),
+            Self::Sink => f.write_str("sink"),
+        }
+    }
+}
+
 /// Errors that can occur while converting a CSV fixture into a `RecordBatch`,
 /// or while writing/reading that batch as Parquet.
 #[derive(Debug)]
 pub enum PipelineIoError {
+    /// A configured callback returned an error.
+    Callback {
+        /// The failing stage.
+        stage: CallbackStage,
+        /// Zero-based input batch index.
+        batch_index: usize,
+        /// The original callback failure.
+        source: Box<PipelineIoError>,
+    },
+    /// A batch violates the fixed ingest schema.
+    InvalidBatch {
+        /// The violated invariant.
+        violation: BatchViolation,
+    },
     /// The input file could not be opened.
     OpenInput {
         /// The path that could not be opened.
@@ -158,6 +193,14 @@ pub enum PipelineIoError {
 impl std::fmt::Display for PipelineIoError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            PipelineIoError::Callback {
+                stage,
+                batch_index,
+                source,
+            } => write!(f, "{stage} callback at batch {batch_index}: {source}"),
+            PipelineIoError::InvalidBatch { violation } => {
+                write!(f, "invalid ingest batch: {violation}")
+            }
             PipelineIoError::OpenInput { path, source } => {
                 write!(f, "failed to open {}: {source}", path.display())
             }
@@ -232,6 +275,8 @@ impl std::fmt::Display for PipelineIoError {
 impl std::error::Error for PipelineIoError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            PipelineIoError::Callback { source, .. } => Some(source.as_ref()),
+            PipelineIoError::InvalidBatch { violation } => Some(violation),
             PipelineIoError::OpenInput { source, .. } => Some(source),
             PipelineIoError::ReadRecord { source } => Some(source),
             PipelineIoError::InvalidId { .. }
@@ -261,11 +306,12 @@ impl std::error::Error for PipelineIoError {
 /// nullable) every [`fixture_to_record_batch`]/[`fixture_to_record_batches`]
 /// batch shares.
 pub fn schema() -> SchemaRef {
-    Arc::new(Schema::new(vec![
-        Field::new("id", DataType::Int64, false),
-        Field::new("name", DataType::Utf8, false),
-        Field::new("note", DataType::Utf8, true),
-    ]))
+    Arc::new(Schema::new(
+        batch_contract::INGEST_FIELDS
+            .into_iter()
+            .map(|(name, data_type, nullable)| Field::new(name, data_type, nullable))
+            .collect::<Vec<_>>(),
+    ))
 }
 
 /// A single parsed `id,name,note` row. `note` is `None` when the CSV field
@@ -466,6 +512,7 @@ pub fn read_parquet(path: &Path) -> Result<RecordBatch, PipelineIoError> {
 mod tests {
     use super::*;
     use arrow::array::Array;
+    use arrow::datatypes::DataType;
 
     fn fixture_path(name: &str) -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

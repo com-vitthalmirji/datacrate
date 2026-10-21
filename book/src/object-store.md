@@ -414,3 +414,16 @@ docker compose -f docker-compose.minio.yml down
 The in-memory tests prove the logic; the MinIO round trip proves the wiring.
 Both are worth running - they check different things, and neither one
 substitutes for the other.
+
+## Check transformed data before writing or hashing it
+
+The bounded consumer previously trusted a transform to preserve the ingest schema.
+A renamed `id` field could still be written and hashed successfully because the two
+consumers relied on column positions and physical types. The consumer now constructs
+a checked batch before either operation. It requires exactly `id: Int64`, `name: Utf8`
+and nullable `note: Utf8`, in that order, with nonnullable `id` and `name`.
+
+Writer and digest share that checked output. Invalid names, types or nullability return
+`InvalidBatch` before writing transformed data; schema metadata is not interpreted.
+This validates the fixed ingest representation, not business rules or arbitrary declared
+contracts. The digest's typed views share Arrow buffers instead of copying payloads.

@@ -175,7 +175,7 @@ one owner's data to the heap, for one of two reasons: the value is
 recursive or too large to want on the stack, or you need to erase its
 concrete type behind `dyn Trait` (the closures section above, and
 [the typestate builder](typestate.md)'s `Box<dyn FnOnce(RecordBatch) ->
-RecordBatch>`, are exactly this second case). When a `Box<T>`'s owner goes
+Result<RecordBatch, PipelineIoError>>`, are exactly this second case). When a `Box<T>`'s owner goes
 out of scope, the heap memory is freed immediately and deterministically -
 there's no "maybe later, when the collector gets around to it."
 
@@ -466,7 +466,7 @@ either `impl Fn(i32) -> i32` (still one concrete type, just not named) or
 exactly the trait-object mechanism above).
 
 [The typestate pipeline builder](typestate.md) stores its transform step as
-`Box<dyn FnOnce(RecordBatch) -> RecordBatch>` for exactly this reason: the
+`Box<dyn FnOnce(RecordBatch) -> Result<RecordBatch, PipelineIoError>>` for exactly this reason: the
 builder doesn't know, and shouldn't need to know, which concrete closure
 type a caller will hand it.
 
