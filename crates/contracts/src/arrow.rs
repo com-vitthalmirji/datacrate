@@ -1,4 +1,5 @@
-//! Maps declarations to Arrow schemas without inspecting or certifying array values.
+//! Maps declarations to Arrow schemas. The opt-in `arrow-validation` feature
+//! also checks actual batch schemas and nested required values.
 //!
 //! Lists use 32-bit offsets and an `item` field. Maps use unsorted `entries`
 //! structs with non-null `key` and potentially nullable `value` fields.
@@ -177,3 +178,8 @@ fn map_field(
     };
     Ok(Field::new(name, data_type, nullable))
 }
+
+#[cfg(feature = "arrow-validation")]
+mod validation;
+#[cfg(feature = "arrow-validation")]
+pub use validation::{BatchValidationError, BatchValidator};

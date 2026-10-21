@@ -1327,6 +1327,8 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 name = "contracts"
 version = "0.2.0"
 dependencies = [
+ "arrow-array 59.3.0",
+ "arrow-buffer 59.3.0",
  "arrow-schema 59.3.0",
  "const_format",
  "const_panic",
