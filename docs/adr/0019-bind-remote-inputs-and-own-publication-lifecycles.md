@@ -2,7 +2,8 @@
 
 ## Status
 
-Proposed - 20 October 2026. No new snapshot, publication or manifest guarantee is delivered.
+Proposed - 20 October 2026. Unique local staging and explicit local publication
+outcomes are implemented. Remote publication and strict completion reading remain open.
 Refines ADRs 0005.2, 0012, 0014 and 0015. Their historical decisions remain unchanged.
 
 ## Context
