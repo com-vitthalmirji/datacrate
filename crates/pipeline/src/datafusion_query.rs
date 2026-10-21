@@ -792,6 +792,7 @@ pub struct OrdersMemoryTableProvider {
 }
 
 impl OrdersMemoryTableProvider {
+    /// Wraps `batches` in a provider using the fixed `orders_schema()`.
     pub fn new(batches: Vec<RecordBatch>) -> Self {
         Self {
             schema: orders_schema(),
@@ -849,6 +850,8 @@ pub struct OrdersMemoryExec {
 }
 
 impl OrdersMemoryExec {
+    /// Builds the leaf plan node from the already-projected `schema` and
+    /// the `projection` that produced it.
     pub fn new(
         batches: Vec<RecordBatch>,
         schema: SchemaRef,
@@ -951,6 +954,7 @@ pub struct AmountRangeUdf {
 }
 
 impl AmountRangeUdf {
+    /// Builds the UDF with its `Decimal128(10, 2)` argument signature.
     pub fn new() -> Self {
         Self {
             signature: datafusion::logical_expr::Signature::exact(
@@ -1090,6 +1094,7 @@ pub struct PercentOfTotalUdf {
 }
 
 impl PercentOfTotalUdf {
+    /// Builds the window UDF with its `Decimal128(10, 2)` argument signature.
     pub fn new() -> Self {
         Self {
             signature: datafusion::logical_expr::Signature::exact(
@@ -1191,6 +1196,7 @@ pub struct RegionMultiplierUdf {
 }
 
 impl RegionMultiplierUdf {
+    /// Builds the async UDF with its `Int64` argument signature.
     pub fn new() -> Self {
         Self {
             signature: datafusion::logical_expr::Signature::exact(
@@ -1277,6 +1283,7 @@ pub struct MaxRowsGuardrail {
 }
 
 impl MaxRowsGuardrail {
+    /// Builds the rule, rejecting a negative `max_rows` cap.
     pub fn new(max_rows: i64) -> Result<Self, DataFusionError> {
         if max_rows < 0 {
             return Err(DataFusionError::Configuration(
