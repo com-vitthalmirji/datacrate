@@ -1,0 +1,16 @@
+error[E0277]: the trait bound `Duration: Contract` is not satisfied
+ --> tests/compile_fail/unsupported_field.rs:3:32
+  |
+3 | struct Unsupported { duration: std::time::Duration }
+  |                                ^^^^^^^^^^^^^^^^^^^ the trait `Contract` is not implemented for `Duration`
+  |
+  = help: the following other types implement trait `Contract`:
+            &T
+            &mut T
+            BTreeMap<K, V>
+            HashMap<K, V, S>
+            Option<T>
+            String
+            Unsupported
+            Vec<T>
+          and $N others

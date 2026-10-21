@@ -1,5 +1,17 @@
-error: Contract map key must be an atomic type (bool, String, or an integer type); found `f64` — matching compile-time-data-contracts' `isAtomicKey` restriction, which rejects non-atomic map keys at derive time
- --> tests/compile_fail/non_atomic_map_key.rs:6:21
+error[E0277]: the trait bound `f64: contracts::resolved::AtomicKey` is not satisfied
+ --> tests/compile_fail/non_atomic_map_key.rs:6:13
   |
 6 |     scores: HashMap<f64, i64>,
-  |                     ^^^
+  |             ^^^^^^^^^^^^^^^^^ the trait `contracts::resolved::AtomicKey` is not implemented for `f64`
+  |
+  = help: the following other types implement trait `contracts::resolved::AtomicKey`:
+            i128
+            i16
+            i32
+            i64
+            i8
+            isize
+            u128
+            u16
+          and $N others
+  = note: required for `HashMap<f64, i64>` to implement `Contract`

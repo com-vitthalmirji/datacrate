@@ -109,8 +109,8 @@ without weakening every other policy's guarantees.
 ## No engine dependency
 
 `contracts` uses `contracts-derive` and const diagnostic helpers; the derive
-uses `syn`/`quote`/`proc-macro2`. Neither crate depends on Arrow, DataFusion
-or another execution engine. `TypeShape` comes straight from a struct's own
+uses `syn`/`quote`/`proc-macro2`. The default build has no Arrow or execution
+engine dependency. The optional `arrow` feature adds only `arrow-schema`. `TypeShape` comes straight from a struct's own
 field types, so the same contract check works regardless of what (if
 anything) later reads that struct's data.
 
@@ -133,10 +133,10 @@ local type that happened to share a name with one of those stdlib containers
 a generic argument that didn't exist, panicking the proc macro instead of
 producing an ordinary compile error at the field. A proc macro sees syntax,
 not resolved types, so token inspection alone cannot disambiguate a shadowed
-name from the real container. It can still refuse to panic: arity-checked detection now
-falls through to `<FieldType as Contract>::SHAPE` when the argument count
-does not match. An unsupported type therefore needs a `Contract` implementation
-rather than silently becoming an opaque primitive.
+name from the real container. Arity checks first removed that panic. The derive
+now delegates every field to `<FieldType as Contract>::SHAPE`, so the compiler
+resolves its actual type. An unsupported type needs an explicit `Contract`
+implementation rather than silently becoming an opaque primitive.
 
 ## Try it
 
@@ -146,7 +146,7 @@ cargo test -p contracts -p contracts-derive
 
 Includes `trybuild` cases proving an `Exact`-policy mismatch is a genuine
 compile error, and a case proving `#[derive(Contract)]` itself is rejected
-on generic structs (a bare type parameter has no shape the macro can see).
+on generic structs (the derive intentionally accepts concrete declarations only).
 
 ## Verdicts, metadata and enforcement
 
@@ -177,33 +177,74 @@ code is not checked this way. Keep item-level `const _: () = ...::CHECK` for
 concrete checks that must be evaluated independently of a generic call. Neither
 form validates external files or actual Arrow batches.
 
-## Resolved types and Arrow schemas need separate decisions
+## Resolved types and physical Arrow schemas
 
-Earlier, arity checks removed proc-macro panics for shadowed names. They did not
-make syntax recognition equivalent to compiler type resolution: a custom generic
-`Option<T>` with matching arity can still be mistaken for the standard container.
-Aliases and qualified primitive paths also expose the spelling-based boundary.
-This remains a production limitation; use explicit supported declarations and
-check the resulting shape rather than assuming arbitrary aliases are resolved.
+Earlier, the derive guessed containers and primitives from their spelling.
+Arity checks prevented panics but still misclassified a custom generic `Option<T>`.
+The derive now emits `<FieldType as Contract>::SHAPE` for every field. Standard
+scalar, Option, Vec and map implementations supply shapes. Aliases, qualified
+paths and shadowed names follow compiler resolution. Generic derives remain
+intentionally unsupported. Map keys use a private atomic-type whitelist; aliases
+of supported keys work, while structured and floating-point keys fail compilation.
 
-A stable-Rust experiment made derive delegate each field to
-`<FieldType as Contract>::SHAPE`, with primitive and container implementations.
-Aliases, qualified paths, nesting, shadowed containers and aliased map keys then
-followed the actual types. A sealed supported-key boundary rejected non-atomic
-keys. However, blanket reference implementations conflicted with a legal downstream
-manual `Contract for &Local`. That is a public compatibility choice, not a harmless
-macro refactor, so the experiment has not replaced the production derive.
+References, including aliases of references, inherit their referent's shape.
+This is a breaking change in `contracts` and `contracts-derive` 0.2, rather
+than a compatible 0.1 update. A downstream manual `Contract for &Local` or
+`Contract for &mut Local` conflicts with the blanket implementation, even when
+its shape equals Local's shape. Remove redundant reference implementations.
+If the reference previously carried a distinct declaration, retain that distinction
+with a newtype instead of moving its shape onto Local:
 
-A general Arrow adapter has another boundary. Rust `String` and `str` declarations
-can map to the same Arrow Utf8 field despite distinct declaration shapes. Nested
-`Option<Option<T>>` needs a chosen representation beyond a single nullable bit;
-map keys, nested validity, decimal precision and timestamp units require explicit
-rules. A bounded schema probe accepted selected scalar/list mappings and refused
-unsupported mappings. It did not certify arbitrary arrays or business rules.
+```rust,ignore
+struct BorrowedContract<'a>(&'a Local);
+impl contracts::Contract for BorrowedContract<'_> {
+    const SHAPE: contracts::TypeShape = contracts::TypeShape::Primitive("reference");
+}
+```
 
-The production pipeline therefore retains its fixed-ingest validator and private
-checked-batch evidence. It checks actual callback output before writing and hashing.
-A future general adapter must have a real consumer, explicit unsupported cases and
-runtime validation; a schema conversion or `PhantomData<C>` tag alone supplies no
-such evidence. Declaration compatibility, physical representation and runtime values
-remain separate guarantees.
+Use `BorrowedContract` in fields and contract checks that previously selected the
+separate reference shape. Local keeps its own declaration. Manual implementations
+can be generic over lifetimes; the concrete-only restriction applies to derive.
+The downstream build fixture verifies this migration, shared/mutable aliases,
+repeated references and optional borrowed fields. The old reference override is
+retained as a compile-fail fixture. Name-based policy and diagnostic limits are
+unchanged; resolved aliases and shadowed names can now expose previously hidden
+mismatches, so rebuild consumers rather than assuming old verdicts are preserved.
+
+Before merging the 0.2 change, review downstream manual reference implementations
+and struct fields that depended on spelling-based classification. Repository fixtures
+exercise these patterns but cannot establish compatibility for external consumers.
+Both crates remain unpublished; this version boundary does not publish a release.
+
+Enable `contracts`' `arrow` feature to construct physical schemas:
+
+```rust,ignore
+let schema = contracts::arrow::schema::<MyContract>()?;
+```
+
+`cargo run -p contracts --features arrow --example contract_schema` generates the
+fixed ingest declaration's schema for configuring Arrow builders or writers.
+`arrow::field(name, shape)` also maps individual fields. Both functions are pure
+and return typed `MappingError` values with field paths.
+
+Fixed-width 8/16/32/64-bit integers, booleans, floats and UTF-8 strings map directly.
+Struct field order is preserved. Optionality sets the current field's nullable
+bit, independently of list items, struct children and map values. Lists use
+32-bit offsets with an `item` field. Maps use unsorted `entries` structs with
+non-null `key` and independently nullable `value` fields. Their supported key
+kinds follow the declaration whitelist. `#[contract(default)]` does not make a
+required physical field nullable or supply a value.
+
+Adjacent `Option<Option<T>>` layers return an error because one validity bit
+cannot preserve both absent states. Unsupported labels, platform-sized integers,
+128-bit integers and chars are refused. Timestamp units/timezones and decimal
+precision/scale cannot be inferred from the current declaration tree, so these
+require a separate representation decision. Duplicate field names and shapes
+exceeding 128 recursive levels are also refused, including cyclic manual shapes.
+
+Arrow schema equality is not declaration identity: `String` and `str` both map
+to Utf8. Schema construction neither examines arrays nor certifies nested values,
+map-key uniqueness, offset capacity, external data or business rules. The production
+pipeline retains its fixed-ingest validator and private checked-batch evidence,
+which check actual callback output before writing and hashing. The adapter supplies
+physical schemas; it does not replace those runtime checks.
