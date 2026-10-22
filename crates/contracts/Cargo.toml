@@ -19,6 +19,12 @@ arrow-array = { version = "59", optional = true }
 const_format = "0.2"
 const_panic = "0.2.17"
 contracts-derive = { version = "0.2.0", path = "../contracts-derive" }
+# Generates SchemaConforms::CHECK's per-diff-slot concat_panic! argument block
+# once, parameterized by slot index, instead of hand-duplicating it MAX_DIFFS
+# times. Already present in this workspace's dependency graph transitively
+# (arrow pulls it in), so this adds no new crate to the build, only an
+# explicit edge to one already being compiled.
+seq-macro = "0.3"
 
 [dev-dependencies]
 arrow-buffer = "59"

@@ -31,10 +31,10 @@
 //! Future language capabilities may allow richer diagnostics without changing
 //! the policy relation.
 
-// `SchemaConforms::CHECK`'s hand-unrolled `concat_panic!` call has ~90
-// arguments (8 diff slots x ~11 pieces each) — well past `concat_panic!`'s
-// default recursion budget.
-#![recursion_limit = "512"]
+// `SchemaConforms::CHECK`'s `seq_macro`-generated `concat_panic!` call has
+// ~3072 arguments (128 diff slots x 24 pieces each) — well past
+// `concat_panic!`'s default recursion budget.
+#![recursion_limit = "4096"]
 #![warn(missing_docs)]
 
 // Lets `#[derive(Contract)]`-generated code refer to this crate as
@@ -228,19 +228,29 @@ pub const fn conforms(producer: TypeShape, contract: TypeShape, policy: SchemaPo
 }
 
 /// How many `.`-separated segments a mismatch path can hold (e.g.
-/// `["shipTo", "zip", "", "", "", ""]`). A mismatch nested deeper than this
-/// still fails to conform — it just reports only its outermost
+/// `["shipTo", "zip", "", "", "", "", "", ""]`). A mismatch nested deeper
+/// than this still fails to conform — it just reports only its outermost
 /// `MAX_PATH_DEPTH` segments instead of the full path.
-const MAX_PATH_DEPTH: usize = 6;
+///
+/// Raising this requires also extending the fixed, hand-written sequence of
+/// `diff_seg_sep`/`diff_seg` calls inside [`SchemaConforms::CHECK`]'s
+/// `seq_macro::seq!` body — that list is written once (not once per diff
+/// slot, see `MAX_DIFFS`), so extending it is a one-time, proportional edit,
+/// not a multiplicative one.
+const MAX_PATH_DEPTH: usize = 8;
 
 /// How many diffs a single comparison can accumulate before later ones stop
 /// being individually named. `const fn`/CTFE has no `Vec`, so this mirrors
-/// `MAX_PATH_DEPTH`'s bounded-array approach; [`SchemaConforms::CHECK`]'s
-/// rendering has to hand-unroll one block of `concat_panic!` arguments per
-/// slot, so this is a genuine ceiling on the macro's size, not just the
-/// diff count — a mismatch beyond this bound still fails the check, it just
-/// isn't named in the message.
-const MAX_DIFFS: usize = 8;
+/// `MAX_PATH_DEPTH`'s bounded-array approach. [`SchemaConforms::CHECK`]
+/// generates one `concat_panic!` argument block per slot via
+/// `seq_macro::seq!(I in 0..MAX_DIFFS { ... })` rather than hand-unrolling
+/// each slot, so raising this bound is the one-line constant change here
+/// plus matching the `seq!` range literal at the call site (`seq!` expands
+/// via raw token substitution, so its range must be a literal, not a
+/// reference to this const) — not a multiplicative amount of new source. A
+/// mismatch beyond this bound still fails the check, it just isn't named in
+/// the message.
+const MAX_DIFFS: usize = 128;
 
 /// One field-level discrepancy found while comparing a producer's shape
 /// against a contract's shape.
@@ -974,136 +984,53 @@ where
     /// it's given, so each diff's fixed-size path segments are passed as
     /// individual arguments (with per-slot separators) rather than
     /// pre-joined into a string — no string-building dependency needed for
-    /// a fixed number of slots. Hand-unrolled per `MAX_DIFFS` slot, the
-    /// same acceptable tradeoff already used for `MAX_PATH_DEPTH`.
+    /// a fixed number of slots.
+    ///
+    /// The per-diff-slot argument block (one `#(...)*` group below) is
+    /// generated once via `seq_macro::seq!(I in 0..128 { ... })` instead of
+    /// being hand-unrolled `MAX_DIFFS` times — raising `MAX_DIFFS` is now
+    /// this doc comment's range literal plus the constant itself (`seq!`
+    /// expands via raw token substitution, so its range must be written as
+    /// a literal, not a reference to the `MAX_DIFFS` const). The inner
+    /// path-segment list (`diff_seg`/`diff_seg_sep` pairs, one per
+    /// `MAX_PATH_DEPTH` slot) is still written out once by hand inside that
+    /// group rather than mechanized by a second, nested counter — a
+    /// two-dimensional `seq!`/`seq!` or `seq!`/`macro_rules!` nesting was
+    /// considered and rejected: a macro invocation sitting at a single
+    /// `concat_panic!` argument position must expand to exactly one
+    /// expression, so it cannot splice several sibling comma-separated
+    /// arguments into the surrounding list. Raising `MAX_PATH_DEPTH`
+    /// therefore still requires manually extending this one list — a
+    /// proportional, one-time edit, not a multiplicative one.
     pub const CHECK: () = {
         let comparison = compare(Producer::SHAPE, ContractT::SHAPE, Policy::POLICY);
         let diffs = comparison.diffs;
         if comparison.rejected {
-            const_panic::concat_panic!(
-                const_panic::FmtArg::DISPLAY;
-                "producer schema does not conform to the contract: ",
-                diff_lead_sep(&diffs, 0),
-                diff_kind_label(&diffs, 0),
-                diff_seg(&diffs, 0, 0),
-                diff_seg_sep(&diffs, 0, 1), diff_seg(&diffs, 0, 1),
-                diff_seg_sep(&diffs, 0, 2), diff_seg(&diffs, 0, 2),
-                diff_seg_sep(&diffs, 0, 3), diff_seg(&diffs, 0, 3),
-                diff_seg_sep(&diffs, 0, 4), diff_seg(&diffs, 0, 4),
-                diff_seg_sep(&diffs, 0, 5), diff_seg(&diffs, 0, 5),
-                diff_close(&diffs, 0),
-                diff_annotation(&diffs, 0),
-                expected_open(&diffs, 0),
-                diff_expected(&diffs, 0),
-                expected_mid(&diffs, 0),
-                diff_found(&diffs, 0),
-                expected_close(&diffs, 0),
-                diff_lead_sep(&diffs, 1),
-                diff_kind_label(&diffs, 1),
-                diff_seg(&diffs, 1, 0),
-                diff_seg_sep(&diffs, 1, 1), diff_seg(&diffs, 1, 1),
-                diff_seg_sep(&diffs, 1, 2), diff_seg(&diffs, 1, 2),
-                diff_seg_sep(&diffs, 1, 3), diff_seg(&diffs, 1, 3),
-                diff_seg_sep(&diffs, 1, 4), diff_seg(&diffs, 1, 4),
-                diff_seg_sep(&diffs, 1, 5), diff_seg(&diffs, 1, 5),
-                diff_close(&diffs, 1),
-                diff_annotation(&diffs, 1),
-                expected_open(&diffs, 1),
-                diff_expected(&diffs, 1),
-                expected_mid(&diffs, 1),
-                diff_found(&diffs, 1),
-                expected_close(&diffs, 1),
-                diff_lead_sep(&diffs, 2),
-                diff_kind_label(&diffs, 2),
-                diff_seg(&diffs, 2, 0),
-                diff_seg_sep(&diffs, 2, 1), diff_seg(&diffs, 2, 1),
-                diff_seg_sep(&diffs, 2, 2), diff_seg(&diffs, 2, 2),
-                diff_seg_sep(&diffs, 2, 3), diff_seg(&diffs, 2, 3),
-                diff_seg_sep(&diffs, 2, 4), diff_seg(&diffs, 2, 4),
-                diff_seg_sep(&diffs, 2, 5), diff_seg(&diffs, 2, 5),
-                diff_close(&diffs, 2),
-                diff_annotation(&diffs, 2),
-                expected_open(&diffs, 2),
-                diff_expected(&diffs, 2),
-                expected_mid(&diffs, 2),
-                diff_found(&diffs, 2),
-                expected_close(&diffs, 2),
-                diff_lead_sep(&diffs, 3),
-                diff_kind_label(&diffs, 3),
-                diff_seg(&diffs, 3, 0),
-                diff_seg_sep(&diffs, 3, 1), diff_seg(&diffs, 3, 1),
-                diff_seg_sep(&diffs, 3, 2), diff_seg(&diffs, 3, 2),
-                diff_seg_sep(&diffs, 3, 3), diff_seg(&diffs, 3, 3),
-                diff_seg_sep(&diffs, 3, 4), diff_seg(&diffs, 3, 4),
-                diff_seg_sep(&diffs, 3, 5), diff_seg(&diffs, 3, 5),
-                diff_close(&diffs, 3),
-                diff_annotation(&diffs, 3),
-                expected_open(&diffs, 3),
-                diff_expected(&diffs, 3),
-                expected_mid(&diffs, 3),
-                diff_found(&diffs, 3),
-                expected_close(&diffs, 3),
-                diff_lead_sep(&diffs, 4),
-                diff_kind_label(&diffs, 4),
-                diff_seg(&diffs, 4, 0),
-                diff_seg_sep(&diffs, 4, 1), diff_seg(&diffs, 4, 1),
-                diff_seg_sep(&diffs, 4, 2), diff_seg(&diffs, 4, 2),
-                diff_seg_sep(&diffs, 4, 3), diff_seg(&diffs, 4, 3),
-                diff_seg_sep(&diffs, 4, 4), diff_seg(&diffs, 4, 4),
-                diff_seg_sep(&diffs, 4, 5), diff_seg(&diffs, 4, 5),
-                diff_close(&diffs, 4),
-                diff_annotation(&diffs, 4),
-                expected_open(&diffs, 4),
-                diff_expected(&diffs, 4),
-                expected_mid(&diffs, 4),
-                diff_found(&diffs, 4),
-                expected_close(&diffs, 4),
-                diff_lead_sep(&diffs, 5),
-                diff_kind_label(&diffs, 5),
-                diff_seg(&diffs, 5, 0),
-                diff_seg_sep(&diffs, 5, 1), diff_seg(&diffs, 5, 1),
-                diff_seg_sep(&diffs, 5, 2), diff_seg(&diffs, 5, 2),
-                diff_seg_sep(&diffs, 5, 3), diff_seg(&diffs, 5, 3),
-                diff_seg_sep(&diffs, 5, 4), diff_seg(&diffs, 5, 4),
-                diff_seg_sep(&diffs, 5, 5), diff_seg(&diffs, 5, 5),
-                diff_close(&diffs, 5),
-                diff_annotation(&diffs, 5),
-                expected_open(&diffs, 5),
-                diff_expected(&diffs, 5),
-                expected_mid(&diffs, 5),
-                diff_found(&diffs, 5),
-                expected_close(&diffs, 5),
-                diff_lead_sep(&diffs, 6),
-                diff_kind_label(&diffs, 6),
-                diff_seg(&diffs, 6, 0),
-                diff_seg_sep(&diffs, 6, 1), diff_seg(&diffs, 6, 1),
-                diff_seg_sep(&diffs, 6, 2), diff_seg(&diffs, 6, 2),
-                diff_seg_sep(&diffs, 6, 3), diff_seg(&diffs, 6, 3),
-                diff_seg_sep(&diffs, 6, 4), diff_seg(&diffs, 6, 4),
-                diff_seg_sep(&diffs, 6, 5), diff_seg(&diffs, 6, 5),
-                diff_close(&diffs, 6),
-                diff_annotation(&diffs, 6),
-                expected_open(&diffs, 6),
-                diff_expected(&diffs, 6),
-                expected_mid(&diffs, 6),
-                diff_found(&diffs, 6),
-                expected_close(&diffs, 6),
-                diff_lead_sep(&diffs, 7),
-                diff_kind_label(&diffs, 7),
-                diff_seg(&diffs, 7, 0),
-                diff_seg_sep(&diffs, 7, 1), diff_seg(&diffs, 7, 1),
-                diff_seg_sep(&diffs, 7, 2), diff_seg(&diffs, 7, 2),
-                diff_seg_sep(&diffs, 7, 3), diff_seg(&diffs, 7, 3),
-                diff_seg_sep(&diffs, 7, 4), diff_seg(&diffs, 7, 4),
-                diff_seg_sep(&diffs, 7, 5), diff_seg(&diffs, 7, 5),
-                diff_close(&diffs, 7),
-                diff_annotation(&diffs, 7),
-                expected_open(&diffs, 7),
-                diff_expected(&diffs, 7),
-                expected_mid(&diffs, 7),
-                diff_found(&diffs, 7),
-                expected_close(&diffs, 7)
-            );
+            seq_macro::seq!(I in 0..128 {
+                const_panic::concat_panic!(
+                    const_panic::FmtArg::DISPLAY;
+                    "producer schema does not conform to the contract: ",
+                    #(
+                        diff_lead_sep(&diffs, I),
+                        diff_kind_label(&diffs, I),
+                        diff_seg(&diffs, I, 0),
+                        diff_seg_sep(&diffs, I, 1), diff_seg(&diffs, I, 1),
+                        diff_seg_sep(&diffs, I, 2), diff_seg(&diffs, I, 2),
+                        diff_seg_sep(&diffs, I, 3), diff_seg(&diffs, I, 3),
+                        diff_seg_sep(&diffs, I, 4), diff_seg(&diffs, I, 4),
+                        diff_seg_sep(&diffs, I, 5), diff_seg(&diffs, I, 5),
+                        diff_seg_sep(&diffs, I, 6), diff_seg(&diffs, I, 6),
+                        diff_seg_sep(&diffs, I, 7), diff_seg(&diffs, I, 7),
+                        diff_close(&diffs, I),
+                        diff_annotation(&diffs, I),
+                        expected_open(&diffs, I),
+                        diff_expected(&diffs, I),
+                        expected_mid(&diffs, I),
+                        diff_found(&diffs, I),
+                        expected_close(&diffs, I),
+                    )*
+                );
+            });
         }
     };
 }
@@ -1527,6 +1454,373 @@ mod tests {
         }
         let diffs = compare(Producer::SHAPE, ContractT::SHAPE, SchemaPolicy::Exact).diffs;
         assert_eq!(diffs.len, 2);
+    }
+
+    #[test]
+    fn diff_count_between_old_and_new_max_diffs_is_fully_captured() {
+        const PRODUCER: TypeShape = TypeShape::Struct(&[]);
+        const TARGET: TypeShape = TypeShape::Struct(&[
+            FieldShape {
+                name: "a",
+                shape: TypeShape::Primitive("i64"),
+                has_default: false,
+            },
+            FieldShape {
+                name: "b",
+                shape: TypeShape::Primitive("i64"),
+                has_default: false,
+            },
+            FieldShape {
+                name: "c",
+                shape: TypeShape::Primitive("i64"),
+                has_default: false,
+            },
+            FieldShape {
+                name: "d",
+                shape: TypeShape::Primitive("i64"),
+                has_default: false,
+            },
+            FieldShape {
+                name: "e",
+                shape: TypeShape::Primitive("i64"),
+                has_default: false,
+            },
+            FieldShape {
+                name: "f",
+                shape: TypeShape::Primitive("i64"),
+                has_default: false,
+            },
+            FieldShape {
+                name: "g",
+                shape: TypeShape::Primitive("i64"),
+                has_default: false,
+            },
+            FieldShape {
+                name: "h",
+                shape: TypeShape::Primitive("i64"),
+                has_default: false,
+            },
+            FieldShape {
+                name: "i",
+                shape: TypeShape::Primitive("i64"),
+                has_default: false,
+            },
+            FieldShape {
+                name: "j",
+                shape: TypeShape::Primitive("i64"),
+                has_default: false,
+            },
+            FieldShape {
+                name: "k",
+                shape: TypeShape::Primitive("i64"),
+                has_default: false,
+            },
+            FieldShape {
+                name: "l",
+                shape: TypeShape::Primitive("i64"),
+                has_default: false,
+            },
+        ]);
+        // 12 missing fields: beyond the old MAX_DIFFS = 8, within the raised
+        // MAX_DIFFS = 16 — proves the cap increase actually took effect, not
+        // just that `seq_macro` produced equivalent code for the old bound.
+        let diffs = compare(PRODUCER, TARGET, SchemaPolicy::Exact).diffs;
+        assert_eq!(diffs.len, 12);
+    }
+
+    /// Records `diff` in `diffs` iff `policy` rejects it — the `Vec`-backed
+    /// counterpart to `Comparison::push`.
+    fn push_if_rejected(diffs: &mut Vec<Diff>, diff: Diff, policy: SchemaPolicy) {
+        if rejects(diff, policy) {
+            diffs.push(diff);
+        }
+    }
+
+    /// Test-only, genuinely unbounded counterpart to `compare`: every pure
+    /// helper below the sink layer (`append_segment`, `shape_eq`,
+    /// `find_field_mode`, ...) is reused unchanged, since those are plain
+    /// calculations with no `Diffs`/`Comparison` coupling. Only the thin
+    /// "where does this diff go" layer below is duplicated against a
+    /// `Vec<Diff>` instead of `compare`'s fixed `[Option<Diff>; MAX_DIFFS]`.
+    /// This can't be unified with `compare` behind a generic sink: a
+    /// `const fn` must typecheck as const-valid on every reachable branch,
+    /// so a function that can call `Vec::push` can never be `const fn` —
+    /// not even behind a branch skipped at const-eval time. `compare`
+    /// itself stays the one path `SchemaConforms::CHECK` relies on; this
+    /// exists only so a test can see every mismatch a pathological schema
+    /// produces, not just the first `MAX_DIFFS`.
+    fn compare_unbounded(
+        producer: TypeShape,
+        contract: TypeShape,
+        policy: SchemaPolicy,
+    ) -> Vec<Diff> {
+        let mode = policy_mode(policy);
+        let mut diffs = Vec::new();
+        match (&producer, &contract) {
+            (TypeShape::Struct(producer_fields), TypeShape::Struct(contract_fields)) => {
+                compare_fields_unbounded(
+                    producer_fields,
+                    contract_fields,
+                    [""; MAX_PATH_DEPTH],
+                    0,
+                    mode,
+                    policy,
+                    &mut diffs,
+                );
+            }
+            (producer, contract) => {
+                if !shape_eq(producer, contract) {
+                    push_if_rejected(
+                        &mut diffs,
+                        mismatch_diff_labeled(
+                            single_segment("<root>"),
+                            shape_label(contract),
+                            shape_label(producer),
+                        ),
+                        policy,
+                    );
+                }
+            }
+        }
+        diffs
+    }
+
+    fn compare_fields_unbounded(
+        producer: &[FieldShape],
+        contract: &[FieldShape],
+        path: [&'static str; MAX_PATH_DEPTH],
+        depth: usize,
+        mode: Mode,
+        policy: SchemaPolicy,
+        diffs: &mut Vec<Diff>,
+    ) {
+        if mode.by_pos {
+            compare_by_position_unbounded(producer, contract, path, depth, mode, policy, diffs);
+        } else if mode.ordered {
+            compare_ordered_unbounded(producer, contract, path, depth, mode, policy, diffs);
+        } else {
+            compare_by_name_unbounded(producer, contract, path, depth, mode, policy, diffs);
+        }
+    }
+
+    fn compare_by_name_unbounded(
+        producer: &[FieldShape],
+        contract: &[FieldShape],
+        path: [&'static str; MAX_PATH_DEPTH],
+        depth: usize,
+        mode: Mode,
+        policy: SchemaPolicy,
+        diffs: &mut Vec<Diff>,
+    ) {
+        if let Some(name) = duplicate_field_name(producer, mode.ci) {
+            let (field_path, _) = append_segment(path, depth, name);
+            push_if_rejected(
+                diffs,
+                mismatch_diff_labeled(field_path, "unique field name", name),
+                policy,
+            );
+            return;
+        }
+        if let Some(name) = duplicate_field_name(contract, mode.ci) {
+            let (field_path, _) = append_segment(path, depth, name);
+            push_if_rejected(
+                diffs,
+                mismatch_diff_labeled(field_path, "unique field name", name),
+                policy,
+            );
+            return;
+        }
+        for c in contract {
+            match find_field_mode(producer, c.name, mode.ci) {
+                Some(p) => {
+                    let (field_path, field_depth) = append_segment(path, depth, c.name);
+                    compare_shapes_unbounded(
+                        &p.shape,
+                        &c.shape,
+                        field_path,
+                        field_depth,
+                        mode,
+                        policy,
+                        diffs,
+                    );
+                }
+                None => {
+                    let (field_path, _) = append_segment(path, depth, c.name);
+                    push_if_rejected(
+                        diffs,
+                        missing_diff(field_path, is_optional(&c.shape), c.has_default),
+                        policy,
+                    );
+                }
+            }
+        }
+        for p in producer {
+            if find_field_mode(contract, p.name, mode.ci).is_none() {
+                let (field_path, _) = append_segment(path, depth, p.name);
+                push_if_rejected(diffs, extra_diff(field_path), policy);
+            }
+        }
+    }
+
+    fn compare_ordered_unbounded(
+        producer: &[FieldShape],
+        contract: &[FieldShape],
+        path: [&'static str; MAX_PATH_DEPTH],
+        depth: usize,
+        mode: Mode,
+        policy: SchemaPolicy,
+        diffs: &mut Vec<Diff>,
+    ) {
+        let shared = min_len(producer.len(), contract.len());
+        for i in 0..shared {
+            let p = &producer[i];
+            let c = &contract[i];
+            let names_match = if mode.ci {
+                str_eq_ci(p.name, c.name)
+            } else {
+                str_eq(p.name, c.name)
+            };
+            let (field_path, field_depth) = append_segment(path, depth, c.name);
+            if !names_match {
+                let (name_path, _) = append_segment(field_path, field_depth, "(name)");
+                push_if_rejected(
+                    diffs,
+                    mismatch_diff_labeled(name_path, c.name, p.name),
+                    policy,
+                );
+            }
+            compare_shapes_unbounded(
+                &p.shape,
+                &c.shape,
+                field_path,
+                field_depth,
+                mode,
+                policy,
+                diffs,
+            );
+        }
+        for c in &contract[shared..] {
+            let (field_path, _) = append_segment(path, depth, c.name);
+            push_if_rejected(
+                diffs,
+                missing_diff(field_path, is_optional(&c.shape), c.has_default),
+                policy,
+            );
+        }
+        for p in &producer[shared..] {
+            let (field_path, _) = append_segment(path, depth, p.name);
+            push_if_rejected(diffs, extra_diff(field_path), policy);
+        }
+    }
+
+    fn compare_by_position_unbounded(
+        producer: &[FieldShape],
+        contract: &[FieldShape],
+        path: [&'static str; MAX_PATH_DEPTH],
+        depth: usize,
+        mode: Mode,
+        policy: SchemaPolicy,
+        diffs: &mut Vec<Diff>,
+    ) {
+        let shared = min_len(producer.len(), contract.len());
+        for i in 0..shared {
+            let p = &producer[i];
+            let c = &contract[i];
+            let (field_path, field_depth) = append_segment(path, depth, p.name);
+            compare_shapes_unbounded(
+                &p.shape,
+                &c.shape,
+                field_path,
+                field_depth,
+                mode,
+                policy,
+                diffs,
+            );
+        }
+        for c in &contract[shared..] {
+            let (field_path, _) = append_segment(path, depth, c.name);
+            push_if_rejected(
+                diffs,
+                missing_diff(field_path, is_optional(&c.shape), c.has_default),
+                policy,
+            );
+        }
+        for p in &producer[shared..] {
+            let (field_path, _) = append_segment(path, depth, p.name);
+            push_if_rejected(diffs, extra_diff(field_path), policy);
+        }
+    }
+
+    fn compare_shapes_unbounded(
+        producer: &TypeShape,
+        contract: &TypeShape,
+        path: [&'static str; MAX_PATH_DEPTH],
+        depth: usize,
+        mode: Mode,
+        policy: SchemaPolicy,
+        diffs: &mut Vec<Diff>,
+    ) {
+        match (producer, contract) {
+            (TypeShape::Primitive(p), TypeShape::Primitive(c)) => {
+                if !str_eq(p, c) {
+                    push_if_rejected(diffs, mismatch_diff_labeled(path, c, p), policy);
+                }
+            }
+            (TypeShape::Optional(p), TypeShape::Optional(c)) => {
+                compare_shapes_unbounded(p, c, path, depth, mode, policy, diffs);
+            }
+            (TypeShape::Sequence(p), TypeShape::Sequence(c)) => {
+                let (seq_path, seq_depth) = append_segment(path, depth, "[]");
+                compare_shapes_unbounded(p, c, seq_path, seq_depth, mode, policy, diffs);
+            }
+            (TypeShape::Map(pk, pv), TypeShape::Map(ck, cv)) => {
+                let (key_path, key_depth) = append_segment(path, depth, "<key>");
+                compare_shapes_unbounded(pk, ck, key_path, key_depth, mode, policy, diffs);
+                let (value_path, value_depth) = append_segment(path, depth, "<value>");
+                compare_shapes_unbounded(pv, cv, value_path, value_depth, mode, policy, diffs);
+            }
+            (TypeShape::Struct(pf), TypeShape::Struct(cf)) => {
+                compare_fields_unbounded(pf, cf, path, depth, mode, policy, diffs);
+            }
+            _ => {
+                if !shape_eq(producer, contract) {
+                    push_if_rejected(
+                        diffs,
+                        mismatch_diff_labeled(path, shape_label(contract), shape_label(producer)),
+                        policy,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unbounded_diff_report_names_every_mismatch_past_max_diffs() {
+        seq_macro::seq!(I in 0..200 {
+            const MANY_FIELDS: TypeShape = TypeShape::Struct(&[
+                #(
+                    FieldShape {
+                        name: concat!("f", I),
+                        shape: TypeShape::Primitive("i64"),
+                        has_default: false,
+                    },
+                )*
+            ]);
+        });
+
+        let diffs = compare_unbounded(TypeShape::Struct(&[]), MANY_FIELDS, SchemaPolicy::Exact);
+
+        // 200 missing fields: past MAX_DIFFS (128), proving the Vec-backed
+        // path names every one of them instead of truncating like `compare`.
+        assert_eq!(diffs.len(), 200);
+        assert!(diffs.len() > MAX_DIFFS);
+
+        let report: String = diffs
+            .iter()
+            .map(|diff| format!("missing `{}`", diff.path[0]))
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert_eq!(report.matches("missing `").count(), 200);
     }
 
     const LATE_CONTRACT: TypeShape = TypeShape::Struct(&[
