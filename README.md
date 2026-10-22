@@ -66,6 +66,52 @@ Run the CSV column-selection CLI directly:
 cargo run -p csv-select-cli --bin csv-select -- fixtures/m1/headers.csv --column 1
 ```
 
+## Demo: a drifted schema fails the build
+
+`schema-gate-example` wires the whole chain together: a Parquet file, a dbt
+`schema.yml`, and an Erwin XML export are each parsed by `schema-codegen`
+into a struct, and every struct is checked against the pipeline's declared
+input model at compile time. Build it once with everything matching:
+
+```sh
+cargo build -p schema-gate-example
+```
+
+This passes. Now break the dbt schema on purpose - open
+`fixtures/schema-gate-example/orders_dbt_schema.yml` and mark
+`customer_name` as not null, when the pipeline's input model still declares
+it optional:
+
+```yaml
+      - name: customer_name
+        data_type: varchar(100)
+        tests:
+          - not_null
+```
+
+Build again:
+
+```sh
+touch crates/schema-gate-example/build.rs
+cargo build -p schema-gate-example
+```
+
+The build fails before any pipeline code runs:
+
+```
+error[E0080]: evaluation panicked: producer schema does not conform to the contract: mismatch `customer_name` (expected `Optional`, found `String`)
+```
+
+Revert the fixture to put it back the way it was:
+
+```sh
+git checkout fixtures/schema-gate-example/orders_dbt_schema.yml
+```
+
+The same gate runs independently against the Parquet and Erwin sources too -
+see [`crates/schema-gate-example/src/lib.rs`](crates/schema-gate-example/src/lib.rs)
+and [`crates/schema-gate-example/build.rs`](crates/schema-gate-example/build.rs).
+
 ## Development
 
 | Command        | What it does                                               |
