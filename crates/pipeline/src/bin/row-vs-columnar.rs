@@ -61,7 +61,7 @@ fn generate_amount_column(rows: &[OrderRow]) -> Float64Array {
 
 /// Row-oriented filtered sum: a scalar loop over `Vec<OrderRow>`, touching
 /// each row's full stride (`id`/`placed_at`/`note` included) to read the one
-/// field the query needs — the cache-locality cost Jordan's talk attributes
+/// field the query needs — the cache-locality cost commonly attributed
 /// to row-oriented JVM execution.
 fn sum_amount_over_threshold_rows(rows: &[OrderRow], threshold: f64) -> f64 {
     let mut total = 0.0_f64;

@@ -1,12 +1,12 @@
-//! Isolates the mechanism behind the dramatic number in Jordan Epstein's own
-//! Comet benchmark (`docs/internals/datafusion-comet-story-2.md`, the
+//! Isolates the mechanism behind the dramatic number in a public Comet
+//! benchmark (`docs/internals/datafusion-comet-story-2.md`, the
 //! three-way read/write-Parquet comparison near the end): Comet
 //! read-only-acceleration still transposes Arrow batches to Spark's internal
 //! row format before the write, because the write path demands rows; Comet
-//! read+write never transposes at all. He measures a 3.6x gap at 100 columns
-//! that shrinks to a small-but-real gap at 1 column — the gap tracks column
-//! count because a transpose touches every column per row, so a wider row
-//! costs more to build and tear down.
+//! read+write never transposes at all. That benchmark measures a 3.6x gap at
+//! 100 columns that shrinks to a small-but-real gap at 1 column — the gap
+//! tracks column count because a transpose touches every column per row, so
+//! a wider row costs more to build and tear down.
 //!
 //! This binary reproduces that shape without Parquet I/O (file I/O would
 //! dominate wall time at this row count and hide the transpose signal the
