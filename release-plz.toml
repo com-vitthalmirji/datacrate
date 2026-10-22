@@ -27,3 +27,13 @@ publish = false
 name = "contracts-derive"
 release = false
 publish = false
+
+[[package]]
+name = "scaffold-cli"
+release = false
+publish = false
+
+[[package]]
+name = "schema-codegen"
+release = false
+publish = false
