@@ -250,6 +250,58 @@ pipeline retains its fixed-ingest validator and private checked-batch evidence,
 which check actual callback output before writing and hashing. The adapter supplies
 physical schemas; it does not replace those runtime checks.
 
+## From a contract to a DataFusion table: `#[derive(Connector)]`
+
+A contract fixes a struct's shape. The next question anyone wiring that
+struct into a real query asks is "how do I get this into DataFusion?" -
+and before this derive existed, that step was hand-written three separate
+times (a memory table, a Parquet-backed table, a CSV-backed table), each
+building its own schema. `crates/connectors-derive`'s `#[derive(Connector)]`
+factors the registration step itself, reusing the same `TypeShape` the
+`Contract` derive already built:
+
+```rust,ignore
+#[derive(Contract, Connector)]
+struct Order {
+    id: i64,
+    amount: f64,
+}
+
+Order::register_memory(&ctx, "orders", batches)?;
+```
+
+It started as a single method, `register()`, wrapping a `Vec<RecordBatch>`
+in a DataFusion `MemTable`. A later pass added `register_parquet()` and
+`register_csv()` for file-backed tables, and renamed `register()` to
+`register_memory()` so the three sibling methods read as one family rather
+than one original plus two afterthoughts.
+
+The file-backed methods make one deliberate choice: they don't let
+DataFusion infer the schema from the file. `ListingTableConfig::with_schema`
+is set explicitly from `Self::connector_schema()`, so the *contract* is
+authoritative over whatever the file happens to contain. DataFusion defaults
+to schema-on-read; this flips registration to schema-on-write, trading a
+little rigidity for an earlier, clearer failure - a file that drifted from
+the contract errors at scan time against the declared schema, instead of
+silently being read under whatever types the file inference guessed.
+
+Each named field also gets a `col_<field>()` accessor returning
+`datafusion::logical_expr::col("<field>")`:
+
+```rust,ignore
+ctx.table("orders").await?
+    .filter(Order::col_amount().gt(lit(50.0)))?
+```
+
+Rename the `amount` field and `col_amount()` disappears with it - a stale
+call site is a compile error, not a query that silently returns zero rows
+because the column it filtered on no longer exists.
+
+No sink method is generated here, on purpose: a sink acts on a query's
+*output* `DataFrame`, not on `Self`, so there's nothing struct-specific left
+for the derive to produce - `pipeline::write_parquet` already owns that
+responsibility.
+
 ## Validating actual Arrow batches
 
 Earlier, the optional `arrow` feature stopped after constructing a schema. Enable
@@ -272,3 +324,52 @@ required-null arrays before validation can inspect them.
 `BatchValidator` does not check domain rules, uniqueness of map keys or
 transactional behavior. The typed pipeline uses this same validator at every
 source and transform output boundary; legacy fixed-ingest checks remain separate.
+
+## Proving the gate against three schema-of-truth formats, not just Parquet
+
+Everything above proves `SchemaConforms` against hand-written structs and one
+real-world source: a Parquet file's own embedded schema, read in
+`schema-gate-example` via `schema_codegen::read_parquet_schema`. Two more
+formats a data platform actually gets schemas from - a dbt `schema.yml` and
+an Erwin entity-relationship export - already had their own parsers
+(`crates/schema-codegen`'s `parse_dbt_schema_yml` and `parse_erwin_xml`) and
+their own unit tests, but neither parser's output had ever been run through
+the compile-time gate itself. Parsing a dbt file correctly and *gating a
+build on what it says* are different claims; only the second one is what
+this chapter is actually about.
+
+`schema-gate-example`'s `build.rs` now reads all three reference files -
+Parquet, a committed `orders_dbt_schema.yml`, a committed `orders_erwin.xml`
+- on every build, parses each independently, and emits one struct per format
+(`SourceOfTruth`, `DbtSourceOfTruth`, `ErwinSourceOfTruth`). `src/lib.rs`
+runs the same `SchemaConforms` check against all three, independently, under
+the same `ExactOrdered` policy the Parquet check already used:
+
+```rust,ignore
+const _: () = SchemaConforms::<SourceOfTruth, StewardInputModel, ExactOrdered>::CHECK;
+const _: () = SchemaConforms::<DbtSourceOfTruth, StewardInputModel, ExactOrdered>::CHECK;
+const _: () = SchemaConforms::<ErwinSourceOfTruth, StewardInputModel, ExactOrdered>::CHECK;
+```
+
+None of this needed a new mechanism. `SchemaConforms` never knew or cared
+that its producer type used to come from a Parquet file - a `TypeShape`
+carries no memory of where it was derived from. Wiring in two more formats
+was purely a `build.rs` change: read the file, hand it to the matching
+parser, hand the result to the same `struct_source` function the Parquet
+path already called. The dbt and Erwin parsers each live behind their own
+Cargo feature (`dbt`, `erwin`) in `schema-codegen`, so a consumer that only
+ever reads Parquet still never pulls in a YAML or XML parser it doesn't use;
+`schema-gate-example` turns both features on, since proving the gate against
+every format is this crate's entire purpose.
+
+A schema steward's dbt model or Erwin export can now drift out from under a
+pipeline's expectations and fail `cargo build`, the same way a drifted
+Parquet file already did - not just "the dbt parser has test coverage," but
+"a wrong dbt schema breaks the build before any pipeline runs against it."
+
+```sh
+cargo test -p schema-gate-example
+```
+
+Runs the same `trybuild` proof this chapter opened with - a compile-fail case
+and a pass case - now sitting downstream of all three parsers, not just one.
