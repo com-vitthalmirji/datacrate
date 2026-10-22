@@ -99,7 +99,7 @@ obvious connection to `object_store_io.rs`.
 $ cargo test -p pipeline block_on_from_inside_a_running_runtime_panics_immediately -- --nocapture
 ```
 
-The test (`object_store_io.rs:212`) is itself an `#[tokio::test]` - already
+The test (`object_store_io.rs:575`) is itself an `#[tokio::test]` - already
 running inside a runtime - and calls `download_to_temp` from within it,
 asserting the resulting panic message contains `"async-blocking-async
 sandwich"`. The `assert!` at the top of `block_on` (`object_store_io.rs:34`)
@@ -125,9 +125,9 @@ it.
 const CHUNK_BYTES: usize = 8 * 1024 * 1024;
 ```
 
-(`object_store_io.rs:31`)
+(`object_store_io.rs:29`)
 
-`download_to_temp` (`object_store_io.rs:77`) doesn't call `store.get(key)`
+`download_to_temp` (`object_store_io.rs:118`) doesn't call `store.get(key)`
 and write the whole object to disk in one shot. Earlier it captured a size
 and issued unconditional range reads. Now it captures one `ObjectMeta`,
 selects its version when available or its ETag otherwise, and binds every
@@ -190,7 +190,7 @@ condition never becomes an unconditioned retry.
 $ cargo test -p pipeline download_of_a_missing_key_reports_download_object_not_a_panic -- --nocapture
 ```
 
-The test (`object_store_io.rs:200`) asserts a missing key produces
+The test (`object_store_io.rs:562`) asserts a missing key produces
 `Err(PipelineIoError::DownloadObject { .. })`, not a panic - the boring but
 load-bearing guarantee that a network/store failure is just data flowing
 through `Result`, indistinguishable in kind from any other error this crate
@@ -207,7 +207,7 @@ metadata; the object-store and file calls remain the action boundary.
 $ cargo test -p pipeline round_trips_bytes_through_the_store_and_a_local_temp_file -- --nocapture
 ```
 
-(`object_store_io.rs:173`)
+(`object_store_io.rs:534`)
 
 The test seeds an `object_store::memory::InMemory` store, downloads through
 `download_to_temp`, re-uploads through `upload_from_temp`, and asserts the
@@ -229,7 +229,7 @@ let store = AmazonS3Builder::from_env()
     .map_err(|source| CliError::BuildStore { source })?;
 ```
 
-(`run-s3-pipeline.rs:84`)
+(`run-s3-pipeline.rs:89`)
 
 `run-s3-pipeline` is deliberately thin. `AmazonS3Builder::from_env()` reads
 the standard AWS environment variables - `AWS_ACCESS_KEY_ID`,
@@ -252,8 +252,8 @@ $ cargo run --bin run-s3-pipeline -- \
 wrote N batch(es), M row(s) to s3://demo/output.parquet
 ```
 
-The CLI's only real job (`run-s3-pipeline.rs:95`) is calling
-`run_bounded_pipeline_s3` (`bounded.rs:323`) and translating its
+The CLI's only real job (`run-s3-pipeline.rs:101`) is calling
+`run_bounded_pipeline_s3` (`bounded.rs:487`) and translating its
 `Result` into an exit code - everything about chunked streaming, the
 sync/async boundary, and error translation already happened inside
 `object_store_io.rs`, not here.
@@ -344,9 +344,9 @@ the per-row hashes are combined with wrapping `u64` addition, not XOR.
 XOR was the obvious first choice and the wrong one: `x ^ x == 0`, so a run
 that silently dropped one of two duplicate rows would XOR-hash identically
 to the correct run. Wrapping addition doesn't cancel like that
-(`accumulate_batch_digest`, `manifest.rs:57`, and the
+(`accumulate_batch_digest`, `manifest.rs:67`, and the
 `duplicate_rows_do_not_cancel_out` test that pins this down,
-`manifest.rs:188`). The whole computation runs one row at a time, so the
+`manifest.rs:461`). The whole computation runs one row at a time, so the
 digest never buffers more than a single row's hash regardless of how large
 the output is - it doesn't reopen the memory-envelope question the bounded
 pipeline already answered for the rest of this path.
