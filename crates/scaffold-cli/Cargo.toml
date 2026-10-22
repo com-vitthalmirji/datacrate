@@ -1,0 +1,15 @@
+[package]
+name = "scaffold-cli"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+description = "Generates a #[derive(Contract, Connector)] struct and a ContractPipeline skeleton from an existing Parquet file's schema"
+license = "MIT"
+repository = "https://github.com/com-vitthalmirji/datacrate"
+
+[lints]
+workspace = true
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+schema-codegen = { version = "0.1.0", path = "../schema-codegen" }

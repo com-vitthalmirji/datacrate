@@ -1,0 +1,23 @@
+[package]
+name = "schema-gate-example"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+contracts = { version = "0.2.0", path = "../contracts", features = ["arrow"] }
+connectors-derive = { path = "../connectors-derive" }
+datafusion = "55.1.0"
+
+[build-dependencies]
+# dbt/erwin: this crate's whole purpose is proving the compile-time gate
+# against every schema-codegen source format, so both parsers are always
+# on here, unlike schema-codegen's own default (Parquet-only) build.
+schema-codegen = { version = "0.1.0", path = "../schema-codegen", features = ["dbt", "erwin"] }
+
+[dev-dependencies]
+trybuild = "1"

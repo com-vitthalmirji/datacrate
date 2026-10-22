@@ -1,0 +1,27 @@
+[package]
+name = "schema-codegen"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+# Each steward-input format is its own feature so the default build (just
+# the Parquet-reading half used by scaffold-cli and build.rs gates) never
+# pulls in a YAML or XML parser it doesn't need.
+dbt = ["dep:serde", "dep:serde_yaml"]
+erwin = ["dep:roxmltree"]
+
+[dependencies]
+arrow-schema = "59"
+parquet = { version = "59.3.0", default-features = false, features = ["arrow"] }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_yaml = { version = "0.9", optional = true }
+roxmltree = { version = "0.20", optional = true }
+
+[dev-dependencies]
+arrow-array = "59"
+tempfile = "3.27.0"

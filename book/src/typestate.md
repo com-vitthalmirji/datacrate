@@ -41,6 +41,35 @@ with `cargo run -p typestate --example contract_pipeline`. The
 connections to fail; `contract_pipeline` tests cover runtime validation and
 failure behavior.
 
+## SQL-stage transforms: `sql_transform`
+
+`.transform()` takes a Rust closure. Anyone coming from Spark/Scala will
+often reach for SQL instead of a closure for the same step - a `WHERE`, a
+`GROUP BY`, a join - and `sql_transform` lets a stage do exactly that while
+keeping the same compile-time check `.transform()` already runs:
+
+```rust,ignore
+let pipeline = ContractPipeline::source::<Raw, _>(read_batches)
+    .sql_transform::<Filtered>(&ctx, "SELECT id, amount FROM batch WHERE amount > 50.00")
+    .sink::<Filtered>(write_batch)
+    .build()?;
+```
+
+Mechanically, each input batch is (re)registered on `ctx` as a table named
+`batch` - the SQL string must query that name - then the query's result is
+collected and concatenated back into the single batch `Filtered` is checked
+against, the same `ExactOrdered` check a closure-based `.transform()` would
+run on its own return value. A SQL stage isn't a weaker-checked escape
+hatch; it's a different way to *produce* the batch, not a different way to
+validate it.
+
+One consequence of `ContractPipeline` staying synchronous end to end:
+`sql_transform` drives DataFusion's `async` query API through a fresh
+current-thread Tokio runtime built on every call, rather than a pooled or
+reused one. That's the minimum viable bridge, not a performance choice -
+making `ContractPipeline` itself `async` would ripple its signature into
+every other stage, for one SQL-driven stage's benefit.
+
 ## Existing local and remote builders
 
 `crates/typestate` builds a pipeline (source → transform → sink) where an

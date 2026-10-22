@@ -14,9 +14,10 @@
 `datacrate` is an end-to-end data-engineering platform in Rust, under active
 development. One Cargo workspace brings together streaming CSV/Arrow ingestion,
 compile-time schema contracts, typestate pipeline builders, Parquet storage,
-DataFusion SQL and DataFrame queries, and cloud object-store I/O. Ballista examples
-extend query execution across scheduler and executor processes; Comet examples
-explore native acceleration inside Spark.
+DataFusion SQL and DataFrame queries, and cloud object-store I/O. Ballista
+composes a scheduler and executor into one typed app, extending query
+execution across processes; a separate sbt/Scala project explores native
+Comet acceleration inside Spark.
 
 The engineering focus is on explicit pipeline boundaries: compiler-resolved type
 shapes and const-evaluated compatibility checks, fallible callbacks with checked
@@ -65,6 +66,77 @@ Run the CSV column-selection CLI directly:
 cargo run -p csv-select-cli --bin csv-select -- fixtures/m1/headers.csv --column 1
 ```
 
+## Demo: a drifted schema fails the build
+
+`schema-gate-example` wires the whole chain together: a Parquet file, a dbt
+`schema.yml`, and an Erwin XML export are each parsed by `schema-codegen`
+into a struct, and every struct is checked against the pipeline's declared
+input model at compile time. Build it once with everything matching:
+
+```sh
+cargo build -p schema-gate-example
+```
+
+This passes. Now break the dbt schema on purpose - open
+`fixtures/schema-gate-example/orders_dbt_schema.yml` and mark
+`customer_name` as not null, when the pipeline's input model still declares
+it optional:
+
+```yaml
+      - name: customer_name
+        data_type: varchar(100)
+        tests:
+          - not_null
+```
+
+Build again:
+
+```sh
+touch crates/schema-gate-example/build.rs
+cargo build -p schema-gate-example
+```
+
+The build fails before any pipeline code runs:
+
+```
+error[E0080]: evaluation panicked: producer schema does not conform to the contract: mismatch `customer_name` (expected `Optional`, found `String`)
+```
+
+Revert the fixture to put it back the way it was:
+
+```sh
+git checkout fixtures/schema-gate-example/orders_dbt_schema.yml
+```
+
+The same gate runs independently against the Parquet and Erwin sources too -
+see [`crates/schema-gate-example/src/lib.rs`](crates/schema-gate-example/src/lib.rs)
+and [`crates/schema-gate-example/build.rs`](crates/schema-gate-example/build.rs).
+
+## Why this matters: a small story from a big data project
+
+In a large company, nobody owns the whole pipeline alone. A few roles matter here:
+
+The data steward or data modeler owns the model of truth. They write it down in dbt
+`schema.yml` files and Erwin ER diagrams, and they decide which columns can be empty
+and which cannot. Their job is governance, not code. They rarely open the pipeline
+repository.
+
+The data engineer owns the pipeline code. They read the steward's model once, write
+it into their pipeline as a Rust struct, and build on top of it. They trust that the
+model they copied down still matches what the steward has on file.
+
+Time passes. The steward's team tightens a rule, maybe `customer_name` must now
+always be filled in, and updates `schema.yml`. Nobody tells the engineer. In most
+companies this gap is invisible until a scheduled job fails at 3am, or worse, loads
+bad rows silently.
+
+This repo closes that gap at build time instead of at 3am. The engineer's struct and
+the steward's file are both inputs to the same compile step. The moment they drift
+apart, `cargo build` fails on the engineer's machine, in CI, before a single row of
+data moves, with the exact column and the exact mismatch named in the error. The
+steward keeps owning the model. The engineer keeps owning the pipeline. The compiler
+is what keeps the two sides honest without a meeting, a ticket, or a 3am page.
+
 ## Development
 
 | Command        | What it does                                               |
@@ -89,16 +161,29 @@ git config core.hooksPath .githooks
 
 ```
 crates/
-├── dtl-core/          lib   - ownership/borrowing/slices fundamentals, zero-copy CSV batching
-├── csv-cli/           bin   - streaming CSV column-selection CLI (csv-select)
-├── pipeline/          lib   - Arrow/Parquet/DataFusion pipeline, object-store I/O,
-│                              Ballista distribution, Comet acceleration
-├── typestate/         lib   - typestate pipeline builder (source/transform/sink)
-├── contracts/         lib   - compile-time schema-conformance checking
-├── contracts-derive/  lib   - `#[derive(Contract)]` proc macro backing `contracts`
-└── rusty-ready/       lib   - general Rust practice and playground, isolated from the other crates
-│                              (exercises/ subdir: workshop compiler-error drills)
+├── dtl-core/              lib   - ownership/borrowing/slices fundamentals, zero-copy CSV batching
+├── csv-cli/               bin   - streaming CSV column-selection CLI (csv-select)
+├── pipeline/              lib   - Arrow/Parquet/DataFusion pipeline, object-store I/O,
+│                                  Ballista distribution (BallistaApp), Comet acceleration
+├── typestate/             lib   - typestate pipeline builder (source/transform/sink)
+├── contracts/             lib   - compile-time schema-conformance checking
+├── contracts-derive/      lib   - `#[derive(Contract)]` proc macro backing `contracts`
+├── connectors-derive/     lib   - `#[derive(Connector)]`: registers a contract struct's batches
+│                                  with DataFusion (memory/Parquet/CSV) and emits typed column
+│                                  accessors for filter/sort expressions
+├── schema-codegen/        lib   - parses a Parquet file, dbt `schema.yml`, or Erwin XML export
+│                                  into a matching `#[derive(Contract, Connector)]` struct
+├── scaffold-cli/          bin   - one-shot CLI wrapping `schema-codegen` to seed a pipeline's
+│                                  starting data model from an existing Parquet file
+├── schema-gate-example/   lib   - end-to-end proof that a drifted dbt/Erwin/Parquet schema
+│                                  fails `cargo build`, not just a unit test
+└── rusty-ready/           lib   - general Rust practice and playground, isolated from the other crates
+                                   (exercises/ subdir: workshop compiler-error drills)
 fixtures/         deterministic test data, committed
+scala/
+└── comet-interop/  separate sbt/Scala project (not part of the Cargo workspace) - scaffolds
+                     Spark Comet operator-replacement rules from `derives CometOperator`
+                     declarations; see scala/comet-interop/README.md
 ```
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for commit message conventions,
@@ -114,10 +199,10 @@ branching, and the pull request process.
 
 For the precise boundaries and migration steps, see:
 
-- [Contract checks, Arrow mapping and the 0.2 reference migration](book/src/contracts.md)
-- [Typed stage contracts, callback errors and fixed-ingest validation](book/src/typestate.md)
-- [Memory, cancellation and local publication](book/src/datafusion.md)
-- [Captured object reads and remote publication](book/src/object-store.md)
+- [Contract checks, Arrow mapping and the 0.2 reference migration](https://com-vitthalmirji.github.io/datacrate/contracts.html)
+- [Typed stage contracts, callback errors and fixed-ingest validation](https://com-vitthalmirji.github.io/datacrate/typestate.html)
+- [Memory, cancellation and local publication](https://com-vitthalmirji.github.io/datacrate/datafusion.html)
+- [Captured object reads and remote publication](https://com-vitthalmirji.github.io/datacrate/object-store.html)
 - [Dependency audit policy and recorded exceptions](docs/adr/0009-supply-chain-policy-gate.md)
 
 A green dependency audit reflects the advisory database and configured exceptions

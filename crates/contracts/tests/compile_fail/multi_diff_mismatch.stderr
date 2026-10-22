@@ -6,14 +6,14 @@ error[E0080]: evaluation panicked: producer schema does not conform to the contr
   |
  ::: src/lib.rs
   |
-  | /             const_panic::concat_panic!(
-  | |                 const_panic::FmtArg::DISPLAY;
-  | |                 "producer schema does not conform to the contract: ",
-  | |                 diff_lead_sep(&diffs, 0),
+  | /                 const_panic::concat_panic!(
+  | |                     const_panic::FmtArg::DISPLAY;
+  | |                     "producer schema does not conform to the contract: ",
+  | |                     #(
 ... |
-  | |                 expected_close(&diffs, 7)
-  | |             );
-  | |_____________- in this macro invocation
+  | |                     )*
+  | |                 );
+  | |_________________- in this macro invocation
   |
   = note: this error originates in the macro `const_panic::concat_panic` (in Nightly builds, run with -Z macro-backtrace for more info)
 
