@@ -88,6 +88,15 @@ with column count (3.4x → 14.2x) through 50 columns, then plateaus/dips slight
 eliminating the row↔columnar conversion at a pipeline boundary, and that cost scales with
 how wide the row is.
 
+**Type-safety follow-up**: the two layouts measured above (`cols` vs. the flat row-major
+buffer) are now `ColumnarBatch`/`RowBatch` in `crates/pipeline/src/layout.rs` — two plain
+structs, not interchangeable. Crossing between them only happens through a named call
+(`to_row_major`/`to_columnar`), so a caller can no longer pass a row-major buffer where a
+columnar one is required without `rustc` rejecting it. `tests/compile_fail/layout_type_mismatch.rs`
+proves this: it asserts the real compiler error (`E0308: mismatched types ... expected
+'&ColumnarBatch', found '&RowBatch'`) for exactly that mistake. This is a compile-time
+guarantee claim, not a new performance number - the timing table above is unchanged.
+
 ## Deferred: full-scale (91GB/140GB) `m3.6`/`m3.8` reruns
 
 Not run this session. `benchmark/m3.6` (91G) and `benchmark/m3.8` (140G) exist on disk from an earlier

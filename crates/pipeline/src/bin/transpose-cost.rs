@@ -18,12 +18,19 @@
 //! owes the write path rows, laid out the way Spark's `UnsafeRow` is: one
 //! contiguous buffer, not nested per-row allocations). Both paths must
 //! produce identical output; this is checked before exit.
+//!
+//! The round trip itself goes through [`pipeline::layout::ColumnarBatch`] and
+//! [`pipeline::layout::RowBatch`], not a private copy of the transpose: that
+//! module exists so this exact operation is a named, visible call at every
+//! site that performs it, instead of something a benchmark or an operator
+//! can reimplement silently inside its own body.
 
 use std::process::ExitCode;
 use std::time::Instant;
 
 use arrow::array::Float64Array;
 use clap::Parser;
+use pipeline::layout::ColumnarBatch;
 
 #[derive(Parser)]
 #[command(
@@ -58,35 +65,6 @@ fn transform_columnar(columns: &[Float64Array]) -> Vec<Float64Array> {
         .collect()
 }
 
-/// Arrow columns -> one flat row-major buffer (row `r`, column `c` at
-/// `r * cols + c`) — a single contiguous allocation, the same shape as
-/// Spark's `UnsafeRow`. A `Vec<Vec<f64>>` was tried first and discarded: it
-/// forces one heap allocation per row regardless of column count, which
-/// swamps the signal this binary is trying to isolate (see `docs/internals`
-/// for the discarded numbers). The gather itself still touches `cols`
-/// separate source arrays per row, which is the real transpose cost.
-fn to_row_major(columns: &[Float64Array], rows: usize, cols: usize) -> Vec<f64> {
-    let mut buf = vec![0.0_f64; rows * cols];
-    for r in 0..rows {
-        for c in 0..cols {
-            buf[r * cols + c] = columns[c].value(r);
-        }
-    }
-    buf
-}
-
-fn transform_rows(buf: &[f64]) -> Vec<f64> {
-    buf.iter().map(|v| v + 1.0).collect()
-}
-
-/// Flat row-major buffer -> Arrow columns, the transpose back before the
-/// result can be used as columns again.
-fn to_columnar(buf: &[f64], rows: usize, cols: usize) -> Vec<Float64Array> {
-    (0..cols)
-        .map(|c| Float64Array::from_iter_values((0..rows).map(|r| buf[r * cols + c])))
-        .collect()
-}
-
 fn sum_all(columns: &[Float64Array]) -> f64 {
     columns.iter().map(|c| c.values().iter().sum::<f64>()).sum()
 }
@@ -112,13 +90,19 @@ fn main() -> ExitCode {
     let columnar_sum = time_runs("columnar (no transpose)", args.runs, || {
         transform_columnar(&columns)
     });
+    let batch = ColumnarBatch::try_new(columns, args.rows)
+        .expect("generate_columns always produces columns of length rows");
     let row_trip_sum = time_runs(
         "row round trip (transpose, transform, transpose back)",
         args.runs,
         || {
-            let rows = to_row_major(&columns, args.rows, args.cols);
-            let transformed = transform_rows(&rows);
-            to_columnar(&transformed, args.rows, args.cols)
+            let row_major = batch.to_row_major();
+            let transformed: Vec<f64> = row_major.buffer().iter().map(|v| v + 1.0).collect();
+            pipeline::layout::RowBatch::try_new(transformed, args.rows, args.cols)
+                .expect("transformed buffer keeps the same rows*cols length")
+                .to_columnar()
+                .columns()
+                .to_vec()
         },
     );
 

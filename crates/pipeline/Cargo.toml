@@ -49,6 +49,7 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 clap = { version = "4", features = ["derive"] }
 csv = "1"
 datafusion = "55.1.0"
+deltalake = { version = "1.1.2", features = ["datafusion"] }
 # "bundled" compiles libduckdb from source instead of requiring a system
 # install — the same "works with just `cargo build`" bar the other optional
 # benchmark engines (ballista, polars) already clear. Real C++/CMake compile
@@ -118,3 +119,4 @@ testcontainers = { version = "0.28", features = ["blocking"] }
 # cycle; Cargo supports that for test builds.
 connectors-derive = { path = "../connectors-derive" }
 contracts = { path = "../contracts", features = ["arrow"] }
+trybuild = "1"
