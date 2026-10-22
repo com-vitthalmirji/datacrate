@@ -68,37 +68,87 @@ cargo run -p csv-select-cli --bin csv-select -- fixtures/m1/headers.csv --column
 
 ## Why Rust/Arrow, mechanistically
 
-Three things stack together, each with a proof point in this repo rather
-than an architecture slogan:
+Two mechanisms explain almost everything below. Neither is a slogan - both
+have a proof point in this repo.
 
-- **No GC, no boxed rows.** A `Float64Array` is one contiguous buffer, not N
-  heap objects with headers. LLVM autovectorizes a loop over it -
-  `crates/pipeline/src/bin/heavily-nested-transpose-cost.rs`'s `leaf_values()`
-  compiles to NEON `fadd.2d` on this hardware, a SIMD instruction that has no
-  structural equivalent over a JVM object graph of boxed `Double`s.
-- **Ownership makes zero-copy sharing safe without a runtime proving it.**
-  Arrow's `Buffer`/`ArrayData` are `Arc`-refcounted; cloning an `ArrayData`
-  across pipeline stages is a refcount bump, not a copy, because the borrow
-  checker - not a GC or a wire format - is what lets the compiler accept that
-  as safe. This is also why a cross-process Spark shuffle needs serialization
-  and a same-process Arrow handoff doesn't.
-- **Columnar layout turns "touch every row" into "touch one buffer," and the
-  gap grows with nesting depth.** Measured, checksum-verified, reproducible
-  locally (`benchmark/REPORT.md`):
+**Mechanism 1: a flat column is one buffer, not many separate objects.**
+A JVM `List[Order]` or a Python list of objects is a list of pointers, each
+pointing to a separately-allocated object scattered across the heap wherever
+the allocator and garbage collector put it. Reading every `order.amount`
+means following a different pointer each time - slow mainly because each
+jump risks a cache miss, not because addition is slow. Arrow's
+`Float64Array` is the opposite: every number sits edge-to-edge in one
+contiguous buffer, the same shape as a C `double[]` array. That shape is
+what lets the CPU use a SIMD instruction - one instruction that adds several
+numbers at once, instead of one instruction per number - because the
+compiler can only do that when it can prove the next few numbers sit at a
+fixed, predictable distance apart in memory. This isn't assumed: compiling
+`crates/pipeline/src/bin/heavily-nested-transpose-cost.rs`'s `leaf_values()`
+and reading the generated machine code shows a `fadd.2d` instruction on ARM
+NEON - "add two 64-bit floats at once" - sitting where a one-at-a-time loop
+would otherwise be. No boxed object graph can offer the compiler that same
+proof, no matter how hot the loop runs.
 
-  | Benchmark | Columnar (no materialization) | Row round trip | Ratio |
-  |---|---|---|---|
-  | `transpose-cost`, 100 flat columns, 500K rows | 32.19ms | 388.36ms | 12.1x |
-  | `nested-transpose-cost`, `List<Float64>` | 0.18ms | 11.58ms | 64.6x |
-  | `heavily-nested-transpose-cost`, 5-level nesting | 57.33µs | 7.31ms | 127.5x |
+```mermaid
+flowchart TB
+    subgraph Boxed["Boxed rows - JVM List, Python list of objects"]
+        P1["pointer"] -.-> O1["object\nheader + fields"]
+        P2["pointer"] -.-> O2["object\nheader + fields"]
+        P3["pointer"] -.-> O3["object\nheader + fields"]
+    end
+    subgraph Columnar["Columnar - Arrow Float64Array"]
+        BUF["one contiguous buffer: 12.5, 7.0, 30.25, ...\nno header, no pointer, per value"]
+    end
+    Boxed -->|"sum this column:\na pointer-chase per value"| Slow["scalar loop,\nunpredictable memory latency"]
+    Columnar -->|"sum this column:\nsequential, fixed stride"| Fast["LLVM autovectorizes:\none SIMD add handles several values"]
+```
 
-  Same algorithm, same language, same safety guarantees - the only variable
-  is memory-access pattern. `crates/pipeline/src/layout.rs`'s `ColumnarBatch`/
-  `RowBatch` types make "don't accidentally transpose" a compile error
-  (`tests/compile_fail/layout_type_mismatch.rs`), not a benchmark hoping it
-  holds; `zero-transpose-end-to-end` (`benchmark/REPORT.md`) reads Parquet,
-  filters, and writes Parquet entirely through `&RecordBatch` with
-  `write_parquet` never calling a row-conversion path.
+**Mechanism 2: ownership lets two pipeline stages share a buffer instead of
+copying it.** Arrow's underlying buffer is wrapped in an `Arc` (atomic
+reference count): cloning it doesn't copy the bytes, it bumps a counter and
+hands out a second pointer to the *same* memory. Rust trusts a cloned `Arc`
+to be safe to read from multiple places, with no garbage collector
+double-checking at runtime, because the borrow checker already proved at
+compile time that nothing holding a read reference is also mutating the
+same data. A Spark shuffle can't use that trick - executors are separate
+processes, sometimes separate machines, so a shared pointer is meaningless
+once the two sides aren't in the same address space. A `RecordBatch`
+crossing that boundary has to be serialized to bytes, sent over the network
+or to disk, and deserialized on the other side, even when nobody plans to
+change a single value.
+
+```mermaid
+flowchart LR
+    subgraph SameProcess["Same process: Arrow stage-to-stage handoff"]
+        A1["stage A holds the buffer\nrefcount=1"] -->|"clone(): bump refcount,\nno bytes copied"| A2["stage B holds\nthe same buffer"]
+    end
+    subgraph CrossProcess["Cross-process: Spark executor shuffle"]
+        B1["executor 1's batch"] -->|"serialize"| B2["network / disk"]
+        B2 -->|"deserialize"| B3["executor 2's batch\n(a real copy)"]
+    end
+```
+
+**Both mechanisms together turn "touch every row" into "touch one buffer,"
+and the gap grows with nesting depth.** Measured, checksum-verified,
+reproducible locally (`benchmark/REPORT.md`):
+
+| Benchmark | Columnar (no materialization) | Row round trip | Ratio |
+|---|---|---|---|
+| `transpose-cost`, 100 flat columns, 500K rows | 32.19ms | 388.36ms | 12.1x |
+| `nested-transpose-cost`, `List<Float64>` | 0.18ms | 11.58ms | 64.6x |
+| `heavily-nested-transpose-cost`, 5-level nesting | 57.33µs | 7.31ms | 127.5x |
+
+Same algorithm, same language, same safety guarantees - the only variable
+is memory-access pattern. `crates/pipeline/src/layout.rs`'s `ColumnarBatch`/
+`RowBatch` types make "don't accidentally transpose" a compile error
+(`tests/compile_fail/layout_type_mismatch.rs`), not a benchmark hoping it
+holds; `zero-transpose-end-to-end` (`benchmark/REPORT.md`) reads Parquet,
+filters, and writes Parquet entirely through `&RecordBatch` with
+`write_parquet` never calling a row-conversion path.
+
+A deeper walkthrough of both mechanisms - more diagrams, the full nested-type
+case - lives in
+[the book's scale-and-parity chapter](https://com-vitthalmirji.github.io/datacrate/scale-and-parity.html#why-columnar-layout-wins-no-boxes-no-garbage-collector-one-instruction-for-many-rows).
 
 These numbers are same-process, same-host, checksum-verified comparisons -
 not a claim about Spark, Comet, or any other engine's absolute speed. Where

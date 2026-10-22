@@ -470,6 +470,118 @@ speedups or a production retention decision. File sizes, physical boundaries and
 correctness checks retain their stated meanings. Performance acceptance awaits a
 quiet or isolated rerun. Snappy remains the existing production default.
 
+## Why columnar layout wins: no boxes, no garbage collector, one instruction for many rows
+
+The tables in the next three sections all measure the same gap: reading a
+column straight versus rebuilding it row by row first. Before the numbers,
+it's worth seeing *why* that gap exists at the hardware level - not as a
+rule to memorize, but as two mechanisms that fall out of how Rust represents
+data and who owns it.
+
+**Mechanism 1: a flat column is one buffer, not N objects.** On the JVM,
+`List[Order]` (Scala) or a Pandas `DataFrame` with Python objects in a
+column is, underneath, a list of pointers to separately-allocated objects,
+each with its own header, scattered across the heap wherever the allocator
+and the garbage collector happened to put them. Reading every `order.amount`
+means following N pointers to N different addresses - "pointer chasing,"
+slow mainly because each jump is a fresh, likely cache-miss, memory access,
+not because addition itself is slow. Arrow's `Float64Array` is the opposite
+shape: every value is a `f64` sitting edge-to-edge in one contiguous buffer,
+the same shape as a C `double[]` array - a mental model most engineers who
+once wrote C (even if that was years ago, before Java or Python became the
+daily language) will recognize faster than either JVM object graphs or
+Python's own per-object boxing.
+
+```mermaid
+flowchart TB
+    subgraph Boxed["Boxed rows - JVM List[Order], Python list of objects"]
+        H["heap, scattered by the allocator/GC"]
+        P1["ptr"] -.-> O1["Order object\nheader + fields"]
+        P2["ptr"] -.-> O2["Order object\nheader + fields"]
+        P3["ptr"] -.-> O3["Order object\nheader + fields"]
+        H --- P1
+        H --- P2
+        H --- P3
+    end
+    subgraph Columnar["Columnar - Arrow Float64Array"]
+        BUF["one contiguous buffer: [12.5][7.0][30.25][...]\nno header per value, no pointer per value"]
+    end
+    Boxed -->|"sum this column:\nN pointer-chases, N cache misses"| SlowLoop["scalar loop,\nunpredictable memory latency"]
+    Columnar -->|"sum this column:\nsequential read, known stride"| FastLoop["LLVM autovectorizes:\none SIMD add\nhandles several values at once"]
+```
+
+That last arrow is the part worth being precise about: a CPU core doesn't
+have an "add two numbers" instruction and a separate "add eight numbers"
+instruction that someone has to choose between by hand. It has registers
+wide enough to hold several `f64`s side by side, and SIMD ("single
+instruction, multiple data") instructions that operate on a whole register
+at once. The compiler can only reach for one of those instructions when it
+can *prove*, at compile time, that the next several elements it's about to
+add live at a fixed, predictable distance from each other in memory - true
+for a flat array stride, never true for "follow this pointer, then follow
+that one." This isn't an architectural guess in this codebase: compiling
+`crates/pipeline/src/bin/heavily-nested-transpose-cost.rs`'s leaf-value loop
+and reading the actual generated machine code shows a `fadd.2d` instruction
+on ARM NEON - "add two 64-bit floats at once" - sitting where a naive
+mental model would expect a one-at-a-time scalar loop. The benchmark tables
+below are that same proof restated as wall-clock time instead of
+disassembly.
+
+**Mechanism 2: ownership lets two pipeline stages share a buffer instead of
+copying it.** The first mechanism explains why one pass over a column is
+fast; this one explains why Arrow's pipelines don't pay to re-create that
+buffer at every stage boundary. Arrow's underlying `Buffer` is wrapped in an
+`Arc` (atomic reference count) - cloning it doesn't copy the bytes, it bumps
+a counter and hands out a second pointer to the *same* memory, freed only
+once every clone has been dropped. The reason Rust is willing to let a
+cloned `Arc` be trusted as safe to read from multiple places, with no
+garbage collector double-checking at runtime, is the borrow checker: it
+already proved, at compile time, that nothing holding a read reference can
+also be mutating the same data at the same time. A GC-backed language (JVM,
+Python) could technically do the same refcount trick - but crossing a
+process boundary (a separate JVM running Spark's shuffle, a separate Python
+worker) breaks the one assumption that makes a shared pointer meaningful:
+both sides have to be the same address space. That's exactly the situation
+Spark's shuffle is in - executors are separate OS processes, sometimes on
+separate machines - so a `RecordBatch` crossing that boundary has no choice
+but to be serialized into bytes, sent over a socket or to disk, and
+deserialized back into objects on the other side, even when the receiving
+code has no plan to change a single value.
+
+```mermaid
+flowchart LR
+    subgraph SameProcess["Same process: Arrow stage-to-stage handoff"]
+        A1["stage A holds\nArc&lt;Buffer&gt;, refcount=1"] -->|".clone(): bump refcount to 2,\nno bytes copied"| A2["stage B holds\nsame Arc&lt;Buffer&gt;"]
+    end
+    subgraph CrossProcess["Cross-process: Spark executor shuffle"]
+        B1["executor 1's RecordBatch"] -->|"serialize to bytes"| B2["network / disk"]
+        B2 -->|"deserialize"| B3["executor 2's RecordBatch\n(a real copy, new allocation)"]
+    end
+```
+
+**Scala bridge**: the JVM gives you precisely zero control over either
+mechanism. `case class` fields are always behind a reference, so the JIT's
+escape analysis - not you - decides whether a hot loop ever gets to see a
+flat layout worth vectorizing, and that decision can silently change between
+runs depending on profiling. Sharing an immutable value between two actors
+or Spark tasks *in the same JVM* is already an `Arc`-style free share (the
+JVM GC tracks the refcount for you); the moment that sharing has to cross a
+process boundary - which a Spark shuffle always does - serialization is
+mandatory regardless of language, because no refcount scheme survives a
+process boundary. Rust's version of this story isn't "faster at arithmetic"
+in either case; it's that the same-process case stays genuinely free
+(compile-time-proven, not JIT-maybe) and the cross-process case is exactly
+as expensive as it is on the JVM - no worse, no magically better.
+
+The caveats that have to travel with every number below: these are
+same-process, same-host, checksum-verified comparisons against this
+codebase's own two code paths, not a claim about Spark's, Comet's, or any
+other engine's absolute speed. Comet was measured *slower* than vanilla
+Spark on this repo's own 5M-row aggregate and join benchmarks elsewhere in
+this chapter - the win columnar layout buys is real but bounded, and never
+assumed to transfer to a different engine's own internals without its own
+measurement.
+
 ## Row-vs-columnar: measuring the transpose cost, then type-checking it
 
 A public Comet benchmark reports a dramatic number for Comet's read-only
