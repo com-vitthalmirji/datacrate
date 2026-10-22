@@ -13,3 +13,4 @@ benchmark/parity/*.parquet
 benchmark/join-shuffle/*.parquet
 benchmark/spark-comet/*.parquet
 benchmark/reports/
+crates/typestate/tests/contract_pass/generated_pipeline_*.rs

@@ -11,5 +11,6 @@ repository = "https://github.com/com-vitthalmirji/datacrate"
 workspace = true
 
 [dependencies]
+arrow-schema = "59"
 clap = { version = "4", features = ["derive"] }
-schema-codegen = { version = "0.1.0", path = "../schema-codegen" }
+schema-codegen = { version = "0.1.0", path = "../schema-codegen", features = ["dbt", "erwin", "delta"] }

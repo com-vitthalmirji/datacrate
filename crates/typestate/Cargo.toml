@@ -14,12 +14,26 @@ arrow = "59"
 # Matches pipeline's and connectors-derive's pin, so a SessionContext built
 # by either crate's register_* helpers can be passed into sql_transform.
 datafusion = "55.1.0"
-object_store = "0.13.2"
+# "aws": generated pipelines (crates/typestate/examples/) register an S3
+# object store when a source/sink location is an `s3://` URL, matching
+# crates/pipeline/src/bin/run-s3-pipeline.rs's AmazonS3Builder::from_env()
+# pattern. MinIO and real AWS S3 are the same code path here, distinguished
+# only by which AWS_* env vars are set at run time.
+object_store = { version = "0.13.2", features = ["aws"] }
 pipeline = { path = "../pipeline" }
 # "rt" (not "rt-multi-thread"): sql_transform builds one current-thread
 # runtime per call to drive ctx.sql(...).collect(), since the surrounding
 # pipeline stays synchronous end-to-end.
 tokio = { version = "1", default-features = false, features = ["rt"] }
+# Matches pipeline's pin; a generated pipeline's s3:// registration parses
+# a store URL via url::Url::parse.
+url = "2"
 
 [dev-dependencies]
+connectors-derive = { version = "0.1.0", path = "../connectors-derive" }
+parquet = { version = "59.3.0", default-features = false, features = ["snap"] }
+schema-codegen = { version = "0.1.0", path = "../schema-codegen" }
+# A generated pipeline's s3:// sink writes to a local temp file first (via
+# the existing write_parquet), then uploads those bytes.
+tempfile = "3.27.0"
 trybuild = "1"

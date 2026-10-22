@@ -1,0 +1,25 @@
+models:
+  - name: orders
+    columns:
+      - name: id
+        data_type: bigint
+        tests:
+          - not_null
+      - name: region
+        data_type: string
+        tests:
+          - not_null
+      - name: quantity
+        data_type: int
+        tests:
+          - not_null
+      - name: customer
+        data_type: "struct<name:string,address:struct<city:string,zip:string>>"
+  - name: orders_totals
+    columns:
+      - name: region
+        data_type: string
+        tests:
+          - not_null
+      - name: total_quantity
+        data_type: bigint

@@ -112,6 +112,66 @@ execution is a novel idea" - it's "DataFusion's plan and execution engine
 can run under that same distributed shape without becoming a different
 engine to reason about."
 
+## From local processes to a measured real-cluster run
+
+Every Ballista number earlier in this chapter, and every Spark number in the
+[scale-and-parity chapter](scale-and-parity.md)'s join section, ran on one
+physical host: DataFusion forced its shuffle through an in-process exchange
+operator, and Spark ran in its default local mode inside a single container.
+Neither crossed a real process/network boundary for the shuffle - a
+single-process "cluster" still shares one heap, one scheduler thread, one
+network loopback. The join-plus-shuffle query (`orders JOIN shipments ...`,
+the same query and the same known-correct `500000` / `37500000.00` result
+the scale chapter already proves) was rerun against a genuine multi-process
+setup for each engine, still on one laptop, to see whether the local-process
+numbers were hiding or flattering anything.
+
+**Spark**: a second Compose file, alongside the existing single-container
+setup used for the Comet benchmark, stands up an actual standalone cluster -
+one `Master` container and two separate `Worker` containers, each registering
+with the master over the Compose network instead of all running inside one
+JVM:
+
+```mermaid
+flowchart TB
+    M["spark-master container"]
+    W1["spark-worker-1 container"]
+    W2["spark-worker-2 container"]
+    W1 -->|registers| M
+    W2 -->|registers| M
+```
+
+Five runs against the master's URL; the first two were discarded as
+cold-start/driver-registration outliers (consistent with every other
+cold-start exclusion already made elsewhere in this book), leaving three
+clean runs at roughly 7.2-7.3 seconds each - slower than the single-process
+Spark number from the scale chapter's join section. That's expected, not a
+regression: real network shuffle between two separate worker containers
+costs more than an in-process local shuffle. This run establishes a more
+honest floor, not an improvement.
+
+**Ballista**: the same scheduler-plus-executors topology this chapter's
+earlier Ballista section already describes, but actually exercised as a real
+cluster for the first time - `ballista-scheduler` and two separate
+`ballista-executor` OS processes, confirmed registered with the scheduler via
+its own logs before the query runs, connecting over
+`SessionContext::remote_with_state("df://localhost:50050", ...)`. Three runs
+landed around 20-27 milliseconds - close to, and in this run slightly faster
+than, the single-process DataFusion number from the same join. The most
+likely reason: each of the two real executors only scans one of the join's
+two split partition files, where a single process has to scan and shuffle
+the whole dataset itself. This is a genuine distributed run, not a
+reproduction of the single-process number, so it isn't a controlled
+apples-to-apples comparison the way the single-process DataFusion-vs-Spark
+numbers are - only the pairing within each cluster setup (Spark-cluster vs.
+its own single-process baseline, Ballista-cluster vs. its own) is.
+
+**What this still doesn't prove**: both clusters ran on one physical host.
+Real network latency, a real scheduler choosing between machines, and
+cross-host data skew are still untested. "Genuine multi-process, multi-port,
+multi-container" is a materially stronger claim than "single process
+pretending to be distributed" - it is not yet "multi-machine."
+
 ## Comet: DataFusion's engine, running inside Spark itself
 
 Ballista replaces Spark. Comet does the opposite: it leaves an existing

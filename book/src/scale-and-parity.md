@@ -470,6 +470,177 @@ speedups or a production retention decision. File sizes, physical boundaries and
 correctness checks retain their stated meanings. Performance acceptance awaits a
 quiet or isolated rerun. Snappy remains the existing production default.
 
+## Row-vs-columnar: measuring the transpose cost, then type-checking it
+
+A public Comet benchmark reports a dramatic number for Comet's read-only
+acceleration mode: a 3.6x gap at 100 columns that shrinks to a small-but-real
+gap at 1 column, because Comet read-only still has to transpose Arrow's
+columnar batches into Spark's row format before the write, while Comet
+read+write never transposes at all. `transpose-cost.rs` isolates *why* that
+gap tracks column count, without any Parquet I/O or Spark/JVM in the loop -
+file I/O at this row count would dominate wall time and hide the transpose
+signal entirely, the same way it stayed hidden in `row-vs-columnar`'s
+filtered-sum case above, which never transposed anything.
+
+The method: generate `cols` Arrow columns, then time the same elementwise
+transform two ways - directly on the columns (no transpose, modeling Comet
+read+write), and via a round trip through one flat row-major buffer laid out
+the way Spark's own `UnsafeRow` is, one contiguous buffer rather than nested
+per-row allocations (modeling Comet read-only, which still owes the write
+path rows). A `Vec<Vec<f64>>` row layout was tried first and discarded: it
+forces one heap allocation per row regardless of column count, which swamped
+the transpose signal being measured. Average of 5 runs, each its own process:
+
+| Columns | Columnar (no transpose) | Row round trip | Ratio |
+|---|---|---|---|
+| 1 | 0.370ms | 1.250ms | 3.4x |
+| 10 | 3.20ms | 17.19ms | 5.4x |
+| 50 | 15.30ms | 217.98ms | 14.2x |
+| 100 | 32.19ms | 388.36ms | 12.1x |
+
+All four column counts agree on the result checksum across every run. The
+gap climbs with column count through 50 columns, then plateaus/dips slightly
+at 100 - within this sample size, not yet distinguishable from noise. Same
+direction as the Comet benchmark's own 3.6x-at-100-columns number: the win
+isn't "Rust is faster at arithmetic," it's eliminating the row<->columnar
+conversion at a pipeline boundary, and that cost scales with how wide the
+row is.
+
+```sh
+cargo run --release -p pipeline --bin transpose-cost -- --cols 50 --rows 500000
+```
+
+**Type-safety follow-up**: the two layouts measured above are now
+`ColumnarBatch` and `RowBatch` - two plain, nominally distinct structs, not
+interchangeable. The [typestate chapter](typestate.md) covers the full
+design story (why no phantom types were needed, why the conversions borrow
+instead of consume); the point to carry here is that this is a compile-time
+guarantee claim, proven by a dedicated `trybuild` test, layered on top of
+the timing table above rather than replacing it. The table says how much a
+transpose costs; the type split says a caller can no longer trigger one by
+accident without the compiler objecting.
+
+### Nested columns are the harder case: `List<Float64>`
+
+A flat `Float64Array` column never needs a per-row allocation - every row is
+the same fixed width. A `List<Float64>` column can't make that promise: each
+row has a different length, so materializing one row's values always means
+building an owned `Vec`. `nested-transpose-cost` measures exactly that
+allocation, the one a flat column designs away and a nested one cannot: one
+pass over the list's flat values buffer with no per-row materialization,
+versus walking each row, collecting its variable-length slice into its own
+`Vec<f64>`, transforming, and rebuilding. 200,000 rows, elementwise `+1.0`,
+median of 3 runs:
+
+| Max elements/row | Columnar (no materialization) | Row round trip (per-row `Vec`) | Ratio |
+|---|---|---|---|
+| 5 | 0.18ms | 11.58ms | 64.6x |
+| 20 | 0.50ms | 11.39ms | 22.9x |
+| 50 | 1.01ms | 17.12ms | 17.0x |
+
+All three row lengths agree on the result checksum. Notice the direction is
+*opposite* the flat-column table above: there the gap grows with column
+count, here it shrinks as rows get longer. The row-trip leg pays a fixed
+per-row cost (one `Vec` allocation plus the list builder's own bookkeeping)
+regardless of how much data lands in that row, so the shortest rows (5
+elements) show the largest gap - bigger than anything measured for flat
+columns in this chapter. This turns "native accelerators like Comet, Velox,
+and Gluten commonly fall back to JVM/row execution for nested-type
+operators" from an assumed architectural fact into a measured one: even a
+small variable-length column pays a cost a flat column never has to.
+
+```sh
+cargo run --release -p pipeline --bin nested-transpose-cost -- --rows 200000 --max-len 5
+```
+
+### Five levels deep: `List<Struct<List<Struct<List<Float64>>>>>`
+
+Real nested data - JSON-derived Parquet, nested Avro or Protobuf - rarely
+looks like a single `List<Float64>`. `heavily-nested-transpose-cost` goes to
+five levels of nesting (the same `List<Struct<List<Struct>>>` shape Arrow's
+own `StructBuilder` documentation uses as its canonical hard case, with one
+more `List<Float64>` leaf added), to check whether the single-level result
+above was an artifact of testing the easy end of the nested-type spectrum.
+Same two paths, now rebuilding four wrapping levels from their own existing
+offsets and nulls on one side, versus walking outer rows, then wrapper
+structs, then item structs, then leaf values on the other. 20,000 outer
+rows, median of 3 runs, varying the fan-out at every level:
+
+| Wrappers/row, items/wrapper, values/item (max) | Columnar (no materialization) | Row round trip (per-leaf `Vec`) | Ratio |
+|---|---|---|---|
+| 2, 2, 3 | 57.33µs | 7.31ms | 127.5x |
+| 3, 3, 4 | 156µs | 11.07ms | 70.9x |
+| 5, 5, 6 | 437.8µs | 18.45ms | 42.1x |
+
+Same direction as the single-level result: the gap is largest at the
+smallest fan-out and shrinks as more elements get packed into each row. But
+the magnitudes are larger across the board (127.5x here vs. 64.6x at the
+single level's smallest case) - consistent with the allocation cost
+compounding with nesting *depth*, not just shrinking with row length. This
+is a stronger version of the same claim the single-level benchmark made:
+each additional nesting level is another place a row-oriented engine has to
+pay a per-row allocation that a columnar one never does.
+
+```sh
+cargo run --release -p pipeline --bin heavily-nested-transpose-cost -- --rows 20000 --max-wrappers 2 --max-items 2 --max-len 3
+```
+
+## Delta tables: isolating the transaction log's cost, not yet measured
+
+Delta Lake adds a transaction log on top of plain Parquet files - useful for
+ACID writes and time travel, but a layer with its own read-time cost that's
+easy to hand-wave about without a number behind it. Two binaries exist to
+measure it honestly, reusing the exact same `orders.parquet` bytes the
+Comet/DataFusion/Spark three-way comparison already uses rather than
+generating a second, subtly different dataset:
+
+- `delta-dataset` converts that fixture into a Delta table using the native
+  Rust `delta-rs` writer - no Spark, no JVM, involved in writing it.
+- `delta-aggregate-datafusion` opens that table and runs the identical
+  aggregation query DataFusion already runs directly against raw Parquet
+  elsewhere in this book.
+
+The difference between the two numbers, once both are run, isolates the
+transaction log's cost on top of an Arrow-native, zero-transpose read - a
+narrower question than "is Delta slow," and explicitly not a Spark/JVM
+comparison, which the Comet chapter already covers on its own terms. As of
+this writing these binaries exist and run, but no comparative timing has
+been recorded yet - following this book's own evidence rule, that number
+stays unclaimed until it's actually measured:
+
+```sh
+cargo run --release -p pipeline --bin delta-dataset -- \
+    --input benchmark/spark-comet/orders.parquet --output benchmark/delta/orders
+cargo run --release -p pipeline --bin delta-aggregate-datafusion -- \
+    --table benchmark/delta/orders
+```
+
+## Zero-transpose end-to-end, and the benchmark leg that got cut
+
+`zero-transpose-end-to-end` proves a narrower, structural claim: a pure
+DataFusion pipeline - read Parquet, filter, write Parquet - never leaves
+Arrow's columnar layout, because the write function takes `&RecordBatch`
+directly. Against the real 5,000,000-row `orders.parquet` fixture, three
+runs writing the same filtered 2,500,000 rows landed at roughly 178-205
+milliseconds - reported here as a sanity check that the path runs
+end-to-end on real data, not as a number to compare against anything else.
+
+An earlier version of this same binary tried to go further and *quantify*
+the transpose tax avoided, by adding a second, forced-row-round-trip leg on
+one extracted column. That leg was cut rather than kept: it skipped disk I/O
+entirely and touched one column where the real write path touches four, so
+its timing wasn't comparable to the real leg's - keeping it would have
+risked presenting two numbers side by side that looked like a measured
+comparison but weren't one. The tax this leg was trying to quantify is
+already measured correctly, with controlled column counts and no I/O
+confound, by `transpose-cost` above - this binary's job narrowed back down
+to proving the structural claim it can actually support.
+
+```sh
+cargo run --release --package pipeline --bin zero-transpose-end-to-end -- \
+    --input benchmark/spark-comet/orders.parquet --output /tmp/orders-filtered.parquet
+```
+
 ## Try it yourself
 
 Every command above assumes `benchmark/m3.6/orders` and `benchmark/m3.8/`
