@@ -70,8 +70,9 @@ async fn main() -> ExitCode {
 async fn run() -> Result<(), CliError> {
     let args = Args::parse();
     let table_path = args.table.canonicalize().map_err(CliError::TableUrl)?;
-    let table_url = Url::from_directory_path(&table_path)
-        .map_err(|()| CliError::TableUrl(std::io::Error::other("not an absolute directory path")))?;
+    let table_url = Url::from_directory_path(&table_path).map_err(|()| {
+        CliError::TableUrl(std::io::Error::other("not an absolute directory path"))
+    })?;
 
     let table = deltalake::open_table(table_url)
         .await

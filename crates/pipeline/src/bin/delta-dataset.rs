@@ -83,7 +83,10 @@ async fn run() -> Result<usize, CliError> {
         .collect()
         .await
         .map_err(CliError::Collect)?;
-    let row_count = batches.iter().map(datafusion::arrow::array::RecordBatch::num_rows).sum();
+    let row_count = batches
+        .iter()
+        .map(datafusion::arrow::array::RecordBatch::num_rows)
+        .sum();
 
     std::fs::create_dir_all(&args.output).map_err(|source| {
         CliError::OpenTable(deltalake::errors::DeltaTableError::generic(format!(
@@ -91,16 +94,12 @@ async fn run() -> Result<usize, CliError> {
             args.output.display()
         )))
     })?;
-    let table_url = Url::from_directory_path(
-        args.output
-            .canonicalize()
-            .map_err(|source| {
-                CliError::OpenTable(deltalake::errors::DeltaTableError::generic(format!(
-                    "resolving {}: {source}",
-                    args.output.display()
-                )))
-            })?,
-    )
+    let table_url = Url::from_directory_path(args.output.canonicalize().map_err(|source| {
+        CliError::OpenTable(deltalake::errors::DeltaTableError::generic(format!(
+            "resolving {}: {source}",
+            args.output.display()
+        )))
+    })?)
     .map_err(|()| CliError::TableUrl(url::ParseError::RelativeUrlWithoutBase))?;
 
     let table = DeltaTable::try_from_url(table_url)
