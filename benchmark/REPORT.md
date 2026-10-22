@@ -88,6 +88,32 @@ with column count (3.4x → 14.2x) through 50 columns, then plateaus/dips slight
 eliminating the row↔columnar conversion at a pipeline boundary, and that cost scales with
 how wide the row is.
 
+### `nested-transpose-cost` — `List<Float64>` column, with vs. without per-row materialization
+
+A harder case than `transpose-cost`'s flat columns: a `List<Float64>` field, where each
+row has a different length, so a row can only be materialized as its own owned `Vec<f64>`
+— the per-row allocation a flat column can design away (see `transpose-cost.rs`'s own doc
+comment on why it dropped a `Vec<Vec<f64>>` layout). Here: 200,000 rows, elementwise `+1.0`,
+one pass over the flat values buffer (no per-row materialization) vs. walking each row,
+collecting it into a `Vec<f64>`, transforming, rebuilding. Median of 3 runs (each its own
+process):
+
+| Max elements/row | Columnar (no materialization) | Row round trip (per-row `Vec`) | Ratio |
+|---|---|---|---|
+| 5 | 0.18ms | 11.58ms | 64.6x |
+| 20 | 0.50ms | 11.39ms | 22.9x |
+| 50 | 1.01ms | 17.12ms | 17.0x |
+
+All three row lengths agree on the result checksum across every run. Unlike
+`transpose-cost`'s flat-column gap (which climbed with column count), this gap *shrinks*
+as rows get longer — the row-trip leg's per-row fixed overhead (one `Vec` allocation plus
+the `ListBuilder`'s own per-row bookkeeping) dominates at short row lengths, so the
+smallest case tested (5 elements/row) shows the largest gap, bigger than anything measured
+for flat columns in this report. This supports, with a real measurement rather than just
+citing the architecture, why native accelerators (Comet, Velox, Gluten alike) commonly
+fall back to JVM/row execution specifically for nested-type operators: even a small
+variable-length column pays a cost flat columns never have to.
+
 **Type-safety follow-up**: the two layouts measured above (`cols` vs. the flat row-major
 buffer) are now `ColumnarBatch`/`RowBatch` in `crates/pipeline/src/layout.rs` — two plain
 structs, not interchangeable. Crossing between them only happens through a named call
@@ -96,6 +122,30 @@ columnar one is required without `rustc` rejecting it. `tests/compile_fail/layou
 proves this: it asserts the real compiler error (`E0308: mismatched types ... expected
 '&ColumnarBatch', found '&RowBatch'`) for exactly that mistake. This is a compile-time
 guarantee claim, not a new performance number - the timing table above is unchanged.
+
+## Zero-transpose end-to-end — 2026-10-22
+
+Hardware: Apple M2 Max, 12 CPUs, 64GB RAM (macOS 26.6.2). Toolchain: rustc 1.97.1.
+`zero-transpose-end-to-end` against the Comet benchmark's real 5,000,000-row
+`benchmark/spark-comet/orders.parquet`: `SELECT * FROM orders WHERE amount > 50.00`,
+concatenated, written to Parquet via `pipeline::write_parquet(&RecordBatch, ...)`.
+
+3 runs (each its own process invocation): 204.54ms, 177.53ms, 180.20ms. All three
+write the same 2,500,000 rows — matching the Comet aggregate benchmark's known
+filtered row count above.
+
+This is a structural claim, not a cost-quantification one: `write_parquet` takes
+`&RecordBatch` (Arrow's own columnar type) directly, so nothing in this read →
+filter → write path ever calls `to_row_major` — confirmed by reading the call chain,
+not by this timing. The elapsed time here is a sanity check that the path actually
+runs end-to-end on real data, not a benchmark result to compare against anything.
+An earlier version of this binary also tried to quantify the transpose tax avoided
+by running a second, forced-row-round-trip leg on one extracted column — that leg
+skipped disk I/O and touched one column instead of four, so its timing wasn't
+comparable to this leg's, and it was dropped rather than risk recording a misleading
+number. The quantified tax (3.4x–14.2x) is already measured correctly, with
+controlled column counts and no I/O confound, by the `transpose-cost` benchmark
+above.
 
 ## Deferred: full-scale (91GB/140GB) `m3.6`/`m3.8` reruns
 
