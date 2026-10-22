@@ -123,6 +123,34 @@ proves this: it asserts the real compiler error (`E0308: mismatched types ... ex
 '&ColumnarBatch', found '&RowBatch'`) for exactly that mistake. This is a compile-time
 guarantee claim, not a new performance number - the timing table above is unchanged.
 
+### `heavily-nested-transpose-cost` — `List<Struct<List<Struct<List<Float64>>>>>`, with vs. without per-row materialization
+
+`nested-transpose-cost` above only measured one level of nesting (`List<Float64>`). This
+benchmark goes to five levels — `List<Struct<List<Struct<List<Float64>>>>>` — the same
+`List<Struct<List<Struct>>>` shape Arrow's own `StructBuilder` docs use as their canonical
+hard case, with one more `List<Float64>` leaf added. 20,000 outer rows, elementwise `+1.0`
+on the leaf values, one pass over the innermost flat buffer with all four wrapping levels
+rebuilt from their existing offsets/nulls (no materialization anywhere) vs. walking outer
+rows → wrapper structs → item structs → leaf values, collecting each leaf into its own
+`Vec<f64>`. Median of 3 runs (each its own process), varying the fan-out at every level:
+
+| Wrappers/row, items/wrapper, values/item (max) | Columnar (no materialization) | Row round trip (per-leaf `Vec`) | Ratio |
+|---|---|---|---|
+| 2, 2, 3 | 57.33µs | 7.31ms | 127.5x |
+| 3, 3, 4 | 156µs | 11.07ms | 70.9x |
+| 5, 5, 6 | 437.8µs | 18.45ms | 42.1x |
+
+All three configurations agree on the result checksum across every run. Same direction as
+`nested-transpose-cost`'s single-level result: the gap is largest at the smallest fan-out
+(127.5x) and shrinks as more elements get packed into each row (42.1x) — the row-trip leg's
+per-element fixed overhead (one `Vec` allocation plus builder bookkeeping, now paid at three
+separate nesting levels instead of one) dominates when there's little data per element to
+amortize it against. The ratios here are larger than anything measured for the single-level
+case (max 64.6x there vs. 127.5x here), consistent with the cost compounding with nesting
+depth, not just with row count — a stronger version of the same claim `nested-transpose-cost`
+made about why native accelerators commonly fall back to JVM/row execution for nested-type
+operators.
+
 ## Zero-transpose end-to-end — 2026-10-22
 
 Hardware: Apple M2 Max, 12 CPUs, 64GB RAM (macOS 26.6.2). Toolchain: rustc 1.97.1.
@@ -146,6 +174,54 @@ comparable to this leg's, and it was dropped rather than risk recording a mislea
 number. The quantified tax (3.4x–14.2x) is already measured correctly, with
 controlled column counts and no I/O confound, by the `transpose-cost` benchmark
 above.
+
+## Join + shuffle, real distributed clusters — 2026-10-22
+
+The "Join + shuffle" section above ran both engines single-process: DataFusion forced an
+in-process exchange operator, and Spark ran `spark-sql` in default local mode inside one
+container — neither crossed a real process/network boundary for the shuffle. This section
+reruns the same query (`500000` shipped orders, `37500000.00` total — same known-correct
+result) against a genuine multi-process cluster for each engine, on the same physical host
+(Apple M2 Max). This is a materially stronger claim than the single-process numbers — real
+network-based shuffle between separate OS processes/containers — but still short of literal
+multi-physical-machine distribution; that caveat is intentional, not an oversight.
+
+**Spark**: `docker-compose.spark-cluster.yml`, a standalone cluster — one `Master` container
+plus two `Worker` containers, each a separate container registering with the master over the
+Docker Compose network, as opposed to the existing single-container `docker-compose.spark-
+comet.yml`'s local-mode setup. 5 runs via `spark-sql` against the master's URL; the first two
+(28.353s, 14.778s) were discarded as cold-start/driver-registration outliers, consistent with
+this report's existing cold-start-exclusion convention:
+
+| Leg | Run 3 | Run 4 | Run 5 |
+|---|---|---|---|
+| Spark standalone cluster (2 workers) | 7.221s | 7.311s | ~7.3s |
+
+Slower than the single-process Spark number above (6.2–6.6s) — real network shuffle between
+two worker containers costs more than an in-process local shuffle, as expected; it's a
+realistic floor, not an improvement.
+
+**Ballista**: a real multi-process cluster — `ballista-scheduler` plus two separate
+`ballista-executor` OS processes (`just ballista-scheduler`, `just ballista-executor-1`,
+`just ballista-executor-2`), each on its own port, executors confirmed registered with the
+scheduler via its logs before querying. `join-shuffle-ballista` (already in the codebase,
+previously unrun) splits each fixture into two Parquet partition files so the join actually
+shuffles across the two executors, then connects via `SessionContext::remote_with_state("df://
+localhost:50050", ...)`. 3 runs:
+
+| Leg | Run 1 | Run 2 | Run 3 |
+|---|---|---|---|
+| Ballista cluster (2 executors) | 27.47ms | 20.24ms | 20.72ms |
+
+Close to the single-process DataFusion number above (61–69ms) — actually faster here, most
+likely because the real cluster's two executors each only scan one of the two split partition
+files rather than one process scanning and shuffling the whole dataset in memory. This is a
+genuine distributed run, not a reproduction of the single-process number, so the two aren't a
+controlled apples-to-apples comparison the way the single-process DataFusion-vs-Spark numbers
+are — only the engine-to-engine pairing within each cluster setup is.
+
+Both clusters were run and torn down (`docker compose -f docker-compose.spark-cluster.yml
+down`; scheduler/executor processes killed) after capturing these numbers.
 
 ## Deferred: full-scale (91GB/140GB) `m3.6`/`m3.8` reruns
 
