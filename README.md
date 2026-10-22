@@ -199,10 +199,10 @@ branching, and the pull request process.
 
 For the precise boundaries and migration steps, see:
 
-- [Contract checks, Arrow mapping and the 0.2 reference migration](book/src/contracts.md)
-- [Typed stage contracts, callback errors and fixed-ingest validation](book/src/typestate.md)
-- [Memory, cancellation and local publication](book/src/datafusion.md)
-- [Captured object reads and remote publication](book/src/object-store.md)
+- [Contract checks, Arrow mapping and the 0.2 reference migration](https://com-vitthalmirji.github.io/datacrate/contracts.html)
+- [Typed stage contracts, callback errors and fixed-ingest validation](https://com-vitthalmirji.github.io/datacrate/typestate.html)
+- [Memory, cancellation and local publication](https://com-vitthalmirji.github.io/datacrate/datafusion.html)
+- [Captured object reads and remote publication](https://com-vitthalmirji.github.io/datacrate/object-store.html)
 - [Dependency audit policy and recorded exceptions](docs/adr/0009-supply-chain-policy-gate.md)
 
 A green dependency audit reflects the advisory database and configured exceptions
