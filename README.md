@@ -112,6 +112,31 @@ The same gate runs independently against the Parquet and Erwin sources too -
 see [`crates/schema-gate-example/src/lib.rs`](crates/schema-gate-example/src/lib.rs)
 and [`crates/schema-gate-example/build.rs`](crates/schema-gate-example/build.rs).
 
+## Why this matters: a small story from a big data project
+
+In a large company, nobody owns the whole pipeline alone. A few roles matter here:
+
+The data steward or data modeler owns the model of truth. They write it down in dbt
+`schema.yml` files and Erwin ER diagrams, and they decide which columns can be empty
+and which cannot. Their job is governance, not code. They rarely open the pipeline
+repository.
+
+The data engineer owns the pipeline code. They read the steward's model once, write
+it into their pipeline as a Rust struct, and build on top of it. They trust that the
+model they copied down still matches what the steward has on file.
+
+Time passes. The steward's team tightens a rule, maybe `customer_name` must now
+always be filled in, and updates `schema.yml`. Nobody tells the engineer. In most
+companies this gap is invisible until a scheduled job fails at 3am, or worse, loads
+bad rows silently.
+
+This repo closes that gap at build time instead of at 3am. The engineer's struct and
+the steward's file are both inputs to the same compile step. The moment they drift
+apart, `cargo build` fails on the engineer's machine, in CI, before a single row of
+data moves, with the exact column and the exact mismatch named in the error. The
+steward keeps owning the model. The engineer keeps owning the pipeline. The compiler
+is what keeps the two sides honest without a meeting, a ticket, or a 3am page.
+
 ## Development
 
 | Command        | What it does                                               |
