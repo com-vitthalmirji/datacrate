@@ -106,6 +106,26 @@ contract - `#[contract(default)]` was added as an opt-in field attribute so
 a non-`Optional` contract field can also be declared tolerable-if-missing,
 without weakening every other policy's guarantees.
 
+The five `Exact*` variants are two independent binary choices, not five
+unrelated rules - naming them as a decision tree is what makes "which one
+do I want" answerable without re-reading the table:
+
+```mermaid
+flowchart TD
+    Start["fields must match exactly on both sides"] --> Order{"matched by field name,\nor by position only?"}
+    Order -->|"position only - names ignored"| ExactByPosition["ExactByPosition"]
+    Order -->|"by name"| Pos{"must appear\nin the same order?"}
+    Pos -->|"any order"| Exact["Exact / ExactUnorderedCI\n(case-insensitive is the only option here)"]
+    Pos -->|"same order"| Case{"case-sensitive\nname match?"}
+    Case -->|"yes"| ExactOrdered["ExactOrdered"]
+    Case -->|"no"| ExactOrderedCI["ExactOrderedCI"]
+```
+
+`Backward`, `Forward`, and `Full` sit outside this tree entirely - they
+don't ask "do both sides match exactly," they ask "does one side's
+requirements get satisfied by the other," which is why they tolerate
+extra or missing fields the `Exact*` family never does.
+
 ## No engine dependency
 
 `contracts` uses `contracts-derive` and const diagnostic helpers; the derive
