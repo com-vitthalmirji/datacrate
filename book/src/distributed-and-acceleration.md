@@ -222,3 +222,31 @@ Both proof points are runnable end to end on a single laptop - the cluster
 in the Ballista case and the JVM in the Comet case are real, just scoped
 small enough that "distributed" and "embedded in Spark" remain honest claims
 without needing a real cluster to demonstrate them.
+
+## A second, separate proof: the operator-replacement mechanism itself
+
+The Comet benchmark above answers "does the substitution make a real query
+faster" using the real `comet-spark-spark4.1_2.13-0.16.0.jar`. It does not
+show *how* Comet decides which Spark physical operator a native DataFusion
+operator is allowed to replace, because that decision lives inside Comet's
+own closed-source rule set, not in this repo.
+
+`scala/comet-interop` is a separate sbt/Scala project (not part of the
+Cargo workspace, not wired into the Comet benchmark above) that proves that
+mechanism in isolation: a `derives CometOperator` declaration generates a
+`CometOperatorSpec` describing which Spark operator it replaces and under
+what schema it's safe to do so, and a build-time sbt plugin
+(`CometOpsScannerPlugin`) scans for every such declaration so the mapping is
+checkable without running Spark at all. It uses stand-in `PlanNode`/
+`ColumnarRule` types rather than extending Comet's or Spark's real classes,
+because the real jars in this repo are compiled for Scala 2.13 and this
+scaffold targets Scala 3 - the two are binary-incompatible, so there is no
+real base class to extend even if the goal were to run it inside a live
+Spark job. See `scala/comet-interop/README.md` for the full operator
+coverage table.
+
+In short: the benchmark proves the *substitution works and is fast*, on one
+real query, with the real jar. `scala/comet-interop` proves the *rule that
+decides what can be substituted* is declarable and checkable at build time,
+on a wider set of operator categories, without needing Spark running at
+all. Neither stands in for the other.

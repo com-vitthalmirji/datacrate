@@ -50,36 +50,55 @@ explained in the guide.
 
 ```
 crates/
-├── dtl-core/          lib   - ownership/borrowing/slices fundamentals, zero-copy CSV batching
-├── csv-cli/           bin   - streaming CSV column-selection CLI (csv-select)
-├── pipeline/          lib   - Arrow/Parquet/DataFusion pipeline, object-store I/O,
-│                              Ballista distribution, Comet acceleration
-├── typestate/         lib   - typestate pipeline builder (source/transform/sink)
-├── contracts/         lib   - compile-time schema-conformance checking
-├── contracts-derive/  lib   - `#[derive(Contract)]` proc macro backing `contracts`
-└── rusty-ready/       lib   - general Rust practice and playground, isolated from the other crates
-│                              (exercises/ subdir: workshop compiler-error drills)
+├── dtl-core/              lib   - ownership/borrowing/slices fundamentals, zero-copy CSV batching
+├── csv-cli/               bin   - streaming CSV column-selection CLI (csv-select)
+├── pipeline/              lib   - Arrow/Parquet/DataFusion pipeline, object-store I/O,
+│                                  Ballista distribution, Comet acceleration
+├── typestate/             lib   - typestate pipeline builder (source/transform/sink)
+├── contracts/             lib   - compile-time schema-conformance checking
+├── contracts-derive/      lib   - `#[derive(Contract)]` proc macro backing `contracts`
+├── connectors-derive/     lib   - `#[derive(Connector)]` proc macro: registers a contract's
+│                                  batches on DataFusion (memory/Parquet/CSV) and generates
+│                                  typed `col_<field>()` accessors
+├── schema-codegen/        lib   - parses a Parquet file, dbt `schema.yml`, or Erwin XML
+│                                  export into a matching `#[derive(Contract, Connector)]` struct
+├── scaffold-cli/          bin   - one-shot CLI wrapping `schema-codegen` to seed a pipeline's
+│                                  starting struct from an existing Parquet file
+├── schema-gate-example/   lib   - proves a drifted dbt, Erwin, or Parquet schema fails
+│                                  `cargo build`, across all three formats
+└── rusty-ready/           lib   - general Rust practice and playground, isolated from the other crates
+                                   (exercises/ subdir: workshop compiler-error drills)
 fixtures/         deterministic test data, committed
+scala/
+└── comet-interop/  separate sbt/Scala project (not part of the Cargo workspace) - scaffolds
+                     Spark Comet operator-replacement rules from `derives CometOperator`
+                     declarations; see scala/comet-interop/README.md
 ```
 
 The directory tree above shows where the code lives, not which crates
-actually depend on which. Two workspace crates have path dependencies on
-other workspace crates, across three edges:
+actually depend on which. Path dependencies between workspace crates:
 
 ```mermaid
 flowchart LR
     dtl-core
     csv-cli
-    pipeline
     rusty-ready
+    contracts-derive
+    schema-codegen
+    pipeline -->|path dependency| connectors-derive
+    pipeline -->|path dependency| contracts
     typestate -->|path dependency| pipeline
     typestate -->|path dependency| contracts
     contracts -->|path dependency| contracts-derive
+    scaffold-cli -->|path dependency| schema-codegen
+    schema-gate-example -->|path dependency| contracts
+    schema-gate-example -->|path dependency| connectors-derive
+    schema-gate-example -->|path dependency| schema-codegen
 ```
 
-`dtl-core`, `csv-cli`, `pipeline`, `contracts-derive`, and `rusty-ready` never
-depend on another workspace crate - each is a leaf you can build, test, and
-reason about on its own.
+`dtl-core`, `csv-cli`, `contracts-derive`, `schema-codegen`, and `rusty-ready`
+never depend on another workspace crate - each is a leaf you can build, test,
+and reason about on its own.
 
 Why `dtl-core` and not just `core`: Rust ships its own built-in `core`
 crate (the `#![no_std]`-compatible base of the standard library). Naming a

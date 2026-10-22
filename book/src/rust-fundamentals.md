@@ -76,6 +76,24 @@ That's not a restriction Rust adds for fun; it's what makes "who's
 responsible for this data, and for how long" a question with one obvious
 answer everywhere in the codebase, including in code you didn't write.
 
+```mermaid
+stateDiagram-v2
+    [*] --> Owned: let draft = String::from(...)
+    Owned --> Moved: takes_and_gives_back(draft)
+    Moved --> Owned: value returned to `returned`
+    Owned --> Dropped: scope ends
+    Dropped --> [*]
+    note right of Moved
+        `draft` is not usable here -
+        the compiler rejects any use of it
+    end note
+```
+
+Every arrow above is checked at compile time, not at runtime - there's no
+state here the JVM or CPython track by any mechanism at all (a GC traces
+reachability, not "is this specific binding still permitted to read this
+value"), which is exactly the extra guarantee ownership buys over both.
+
 **JVM bridge**: you already know the *rule* - `val`s should be immutable,
 side-effecting mutation should be visible and controlled. Rust just enforces
 the "who owns this" half of that discipline at compile time instead of by
@@ -300,7 +318,7 @@ looking at the concrete type and the trait bound written right there in the
 function signature - nothing is ever found by rummaging through scope for a
 fit. When you see
 `fn read_csv_rows<T>(...) -> Result<Vec<T>, PipelineIoError>`
-(`crates/pipeline/src/lib.rs:380`), the `<T>` is a generic parameter with no
+(`crates/pipeline/src/lib.rs:382`), the `<T>` is a generic parameter with no
 trait bound at all here - `T` can be anything, because this function never
 inspects `T`, it just collects whatever the caller's parse closure produces.
 Where a bound *is* needed, it's written explicitly: `fn foo<T: Display>(x: T)`
@@ -344,7 +362,7 @@ part of the comparison: a function value handed to another component to call.
   fixed size regardless of what's actually stored inside it.
 - **`Arc<T>`** - an *atomically reference-counted* pointer: multiple owners
   can share the same value, and it's freed once the last owner drops it.
-  `schema()` (`crates/pipeline/src/lib.rs:334`) returns `Arc<Schema>` -
+  `schema()` (`crates/pipeline/src/lib.rs:336`) returns `Arc<Schema>` -
   every query and every batch that shares a schema shares one allocation,
   not a copy each.
 
@@ -372,7 +390,7 @@ without a GIL because the counter itself is what's made thread-safe.
 Rust's `Iterator` trait is lazy, chainable, and idiomatic in exactly the way
 Scala's `List`/`Iterator` API is - `.map`, `.filter`, `.collect` all exist
 and mean what you'd expect. `batch_from_rows`
-(`crates/pipeline/src/lib.rs:402`) is the clearest example in this codebase:
+(`crates/pipeline/src/lib.rs:404`) is the clearest example in this codebase:
 
 ```rust,ignore
 let ids: Int64Array = rows.iter().map(|r| r.id).collect();
@@ -404,7 +422,7 @@ marked otherwise:
 - `pub` - visible outside the crate (`pub fn schema()`, part of the crate's
   public API).
 - `pub(crate)` - visible anywhere inside the crate, nowhere outside it
-  (`pub(crate) fn parse_id`, `crates/pipeline/src/lib.rs:356` - an internal
+  (`pub(crate) fn parse_id`, `crates/pipeline/src/lib.rs:358` - an internal
   helper, not part of the API contract).
 - nothing - private to the module that defines it.
 

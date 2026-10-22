@@ -96,7 +96,7 @@ with a different recovery decision from an error before publication.
 instead of copying it - the reason the pipeline can stream large inputs
 without multiplying memory use per stage.
 
-**Code**: `crates/pipeline/src/lib.rs:541`,
+**Code**: `crates/pipeline/src/lib.rs:731`,
 `slicing_shares_the_underlying_buffer_instead_of_copying`:
 
 ```rust
@@ -153,7 +153,7 @@ pub fn context_with_memory_limit(
 }
 ```
 
-(`datafusion_query.rs:436`)
+(`datafusion_query.rs:548`)
 
 **Misconception**: that `.with_temp_file_path(spill_dir)` is what *enables*
 spilling - that without it, DataFusion refuses to write temp files and just
@@ -191,7 +191,7 @@ $ cargo test -p pipeline memory_limited_aggregate_spills_and_still_completes -- 
 $ cargo test -p pipeline memory_limited_join_fails_with_resources_exhausted -- --nocapture
 ```
 
-The aggregate test (`datafusion_query.rs:1195`) builds a `GROUP BY note`
+The aggregate test (`datafusion_query.rs:2611`) builds a `GROUP BY note`
 over the 1200-byte-capped context and asserts it **completes**, with all 7
 groups present, and that spill files were actually written:
 
@@ -204,7 +204,7 @@ assert!(
 );
 ```
 
-The join test (`datafusion_query.rs:1226`), under the *identical* 1200-byte
+The join test (`datafusion_query.rs:2642`), under the *identical* 1200-byte
 limit, asserts the query **fails**:
 
 ```rust
@@ -289,7 +289,7 @@ stream.next().await;
 drop(stream);
 ```
 
-(`datafusion_query.rs:1259`, from `dropping_stream_early_cleans_up_spill_files`, test at `:1250`)
+(`datafusion_query.rs:2675`, from `dropping_stream_early_cleans_up_spill_files`, test at `:2666`)
 
 ```console
 $ cargo test -p pipeline dropping_stream_early_cleans_up_spill_files -- --nocapture
@@ -369,5 +369,5 @@ $ cargo test -p pipeline
 ```
 
 `context_with_memory_limit` is `#[tracing::instrument(...)]`
-(`datafusion_query.rs:435`) - with `RUST_LOG=pipeline=debug` and
+(`datafusion_query.rs:548`) - with `RUST_LOG=pipeline=debug` and
 `--nocapture`, the span prints the spill directory actually in use.

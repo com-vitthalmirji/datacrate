@@ -106,6 +106,26 @@ contract - `#[contract(default)]` was added as an opt-in field attribute so
 a non-`Optional` contract field can also be declared tolerable-if-missing,
 without weakening every other policy's guarantees.
 
+The five `Exact*` variants are two independent binary choices, not five
+unrelated rules - naming them as a decision tree is what makes "which one
+do I want" answerable without re-reading the table:
+
+```mermaid
+flowchart TD
+    Start["fields must match exactly on both sides"] --> Order{"matched by field name,\nor by position only?"}
+    Order -->|"position only - names ignored"| ExactByPosition["ExactByPosition"]
+    Order -->|"by name"| Pos{"must appear\nin the same order?"}
+    Pos -->|"any order"| Exact["Exact / ExactUnorderedCI\n(case-insensitive is the only option here)"]
+    Pos -->|"same order"| Case{"case-sensitive\nname match?"}
+    Case -->|"yes"| ExactOrdered["ExactOrdered"]
+    Case -->|"no"| ExactOrderedCI["ExactOrderedCI"]
+```
+
+`Backward`, `Forward`, and `Full` sit outside this tree entirely - they
+don't ask "do both sides match exactly," they ask "does one side's
+requirements get satisfied by the other," which is why they tolerate
+extra or missing fields the `Exact*` family never does.
+
 ## No engine dependency
 
 `contracts` uses `contracts-derive` and const diagnostic helpers; the derive
@@ -373,3 +393,25 @@ cargo test -p schema-gate-example
 
 Runs the same `trybuild` proof this chapter opened with - a compile-fail case
 and a pass case - now sitting downstream of all three parsers, not just one.
+
+## Starting a new struct from an existing file: `scaffold-cli`
+
+`schema-gate-example`'s `build.rs` re-derives its three structs on every
+build, on purpose - that's what makes drift a compile error. A brand-new
+pipeline has the opposite problem: there is no struct yet, and writing the
+first one by hand from a wide Parquet file is exactly the kind of typing
+mistake the gate exists to catch. `scaffold-cli` wraps the same
+`schema_codegen::read_parquet_schema` and `struct_source` functions
+`build.rs` calls, but runs once, by hand, and prints the result instead of
+compiling it in:
+
+```sh
+cargo run -p scaffold-cli -- fixtures/schema-gate-example/orders.parquet --name Order
+```
+
+The two tools stay deliberately separate. `scaffold-cli` is a one-shot
+starting point; it has no opinion about what happens to the struct after it
+is pasted into a pipeline. The ongoing compile-time check against the real
+file on every build is `schema-gate-example`'s `build.rs`, not this CLI -
+scaffolding a struct once and gating a build on it forever are different
+problems, so they stay different tools.

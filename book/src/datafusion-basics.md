@@ -12,7 +12,7 @@ haven't written a DataFusion query before.
 
 ## From CSV to a typed `RecordBatch`
 
-`schema()` (`lib.rs:171`) fixes the shape every batch in this crate shares:
+`schema()` (`lib.rs:336`) fixes the shape every batch in this crate shares:
 `id: Int64` (not null), `name: Utf8` (not null), `note: Utf8` (nullable).
 That nullability isn't decoration - an empty `note` field in the CSV becomes
 a real Arrow null, not an empty string standing in for "missing":
@@ -27,10 +27,10 @@ pub fn schema() -> SchemaRef {
 }
 ```
 
-`fixture_to_record_batch` (`lib.rs:259`) does the actual conversion in two
-steps you can trace directly: `read_csv_rows` (`lib.rs:216`) opens the file
+`fixture_to_record_batch` (`lib.rs:425`) does the actual conversion in two
+steps you can trace directly: `read_csv_rows` (`lib.rs:382`) opens the file
 and turns each CSV record into a typed `Row` via a caller-supplied parse
-function, and `batch_from_rows` (`lib.rs:238`) builds one Arrow array per
+function, and `batch_from_rows` (`lib.rs:404`) builds one Arrow array per
 column by mapping over the parsed rows -
 
 ```rust
@@ -57,13 +57,13 @@ the exact code that walks every row and builds every column, not a planner
 that does it for you behind an API boundary.
 
 If one file is too large for a single batch, `fixture_to_record_batches`
-(`lib.rs:274`) does the same conversion but chunks the parsed rows into
+(`lib.rs:440`) does the same conversion but chunks the parsed rows into
 multiple same-schema batches - the shape every streaming/bounded pipeline in
 this crate (`bounded.rs`, covered in `datafusion.md`) is built from.
 
 ## Writing and reading Parquet
 
-`write_parquet` (`lib.rs:317`) takes a batch, a path, and a `Compression`
+`write_parquet` (`lib.rs:492`) takes a batch, a path, and a `Compression`
 setting, and writes a single-row-group Parquet file:
 
 ```rust
@@ -79,10 +79,10 @@ pub fn write_parquet(
 }
 ```
 
-`read_parquet` (`lib.rs:339`) reverses it - open the file, build a reader,
+`read_parquet` (`lib.rs:514`) reverses it - open the file, build a reader,
 collect every batch the reader yields, and concatenate them back into one
 `RecordBatch` with `arrow::compute::concat_batches`. The round-trip test
-(`lib.rs:496`, `parquet_round_trip_preserves_schema_nulls_and_values`) is the
+(`lib.rs:686`, `parquet_round_trip_preserves_schema_nulls_and_values`) is the
 part worth internalizing: it doesn't just check row counts, it checks that
 every column - including which specific `note` values are null - comes back
 identical:
@@ -102,7 +102,7 @@ trusting the format's spec.
 
 DataFusion doesn't query `RecordBatch` values directly - it queries
 *tables*, which are usually Parquet files registered against a
-`SessionContext`. `register_orders` (`datafusion_query.rs:146`) is the whole
+`SessionContext`. `register_orders` (`datafusion_query.rs:177`) is the whole
 registration step:
 
 ```rust
@@ -116,7 +116,7 @@ pub async fn register_orders(ctx: &SessionContext, path: &Path) -> Result<(), Da
 }
 ```
 
-Once `orders` is registered, `row_query_sql` (`datafusion_query.rs:457`)
+Once `orders` is registered, `row_query_sql` (`datafusion_query.rs:583`)
 runs an ordinary filter/projection/ordering query through the SQL string
 API:
 
@@ -168,10 +168,10 @@ pool; these settings are regression controls, not production recommendations.
 $ cargo test -p pipeline --lib ordered_stream_tests --locked
 ```
 
-`row_query_dataframe` (`datafusion_query.rs:473`) runs the *identical* query
+`row_query_dataframe` (`datafusion_query.rs:593`) runs the *identical* query
 through the DataFrame builder API instead - `.filter(...)`, `.select(...)`,
 `.sort(...)` - and a test
-(`row_query_sql_and_dataframe_paths_agree`, `datafusion_query.rs:714`)
+(`row_query_sql_and_dataframe_paths_agree`, `datafusion_query.rs:1705`)
 asserts both paths produce exactly the same batches. That pairing (one SQL
 function, one DataFrame function, one agreement test) repeats for every
 query in this file - aggregation, joins, windows, grouped aggregation - so
@@ -206,7 +206,7 @@ flowchart LR
 
 ## Aggregation and grouping
 
-`aggregate_query_sql` (`datafusion_query.rs:496`) collapses the filtered
+`aggregate_query_sql` (`datafusion_query.rs:616`) collapses the filtered
 rows to a single `COUNT(*)`/`SUM(amount)` row:
 
 ```rust
@@ -216,7 +216,7 @@ ctx.sql(
 )
 ```
 
-`group_by_bucket_query_sql` (`datafusion_query.rs:567`) does the grouped
+`group_by_bucket_query_sql` (`datafusion_query.rs:687`) does the grouped
 version - `GROUP BY id % 1000`, one row per bucket - and its DataFrame
 counterpart shows how a computed column gets added before aggregating:
 
@@ -239,7 +239,7 @@ same order of operations (compute the grouping key, then reduce).
 Aggregation collapses rows down to one per group. A window function keeps
 every row and adds a value computed *across* a set of rows related to it -
 here, a rank relative to every other order. `window_query_sql`
-(`datafusion_query.rs:285`) ranks every order by `amount`, highest first,
+(`datafusion_query.rs:353`) ranks every order by `amount`, highest first,
 without losing any rows:
 
 ```rust
@@ -249,7 +249,7 @@ ctx.sql(
 )
 ```
 
-`window_query_dataframe` (`datafusion_query.rs:300`) builds the identical
+`window_query_dataframe` (`datafusion_query.rs:368`) builds the identical
 `RANK()` through the DataFrame API - `rank().order_by(...).build()`, added as
 a column via `.window(...)` rather than a `SELECT`-level expression:
 
@@ -279,7 +279,7 @@ rows without collapsing them), same SQL keyword.
 ## Multi-predicate filtering
 
 Real queries rarely filter on one column. `multi_predicate_query_sql`
-(`datafusion_query.rs:615`) combines two conditions with `AND` before
+(`datafusion_query.rs:735`) combines two conditions with `AND` before
 aggregating - orders over 50.00 *and* with a non-null `note`:
 
 ```rust
@@ -289,7 +289,7 @@ ctx.sql(
 )
 ```
 
-`multi_predicate_query_dataframe` (`datafusion_query.rs:633`) chains the same
+`multi_predicate_query_dataframe` (`datafusion_query.rs:753`) chains the same
 two conditions with `.and(...)` on the DataFrame's `.filter(...)`:
 
 ```rust
@@ -339,13 +339,13 @@ collapsing everything into one opaque message.
 
 Two fixtures are involved once joins enter the picture: `orders` (the table
 above) and `shipments`, registered the same way via `register_shipments`
-(`datafusion_query.rs:225`) against `shipments_schema()`
-(`datafusion_query.rs:159`) - `order_id: Int64`, `carrier: Utf8`,
+(`datafusion_query.rs:258`) against `shipments_schema()`
+(`datafusion_query.rs:190`) - `order_id: Int64`, `carrier: Utf8`,
 `shipped_at: Timestamp`. `order_id` is a foreign key into `orders.id`, not a
 primary key: an order can have zero shipments (unshipped) or more than one
 (split shipment).
 
-`join_query_sql` (`datafusion_query.rs:242`) runs a `LEFT JOIN` so unshipped
+`join_query_sql` (`datafusion_query.rs:310`) runs a `LEFT JOIN` so unshipped
 orders survive with `NULL` shipment columns instead of disappearing:
 
 ```rust
@@ -356,10 +356,10 @@ ctx.sql(
 )
 ```
 
-`join_query_dataframe` (`datafusion_query.rs:258`) is the same join via
+`join_query_dataframe` (`datafusion_query.rs:326`) is the same join via
 `.join(shipments, JoinType::Left, &["id"], &["order_id"], None)`. The test
 `join_keeps_unshipped_orders_and_duplicates_multi_shipment_orders`
-(`datafusion_query.rs:842`) is the one to read closely - it names both
+(`datafusion_query.rs:1833`) is the one to read closely - it names both
 effects a LEFT JOIN has that an INNER JOIN wouldn't: unshipped orders (ids
 5, 6, 7) keep a single null row each, and a multi-shipment order (id 3,
 shipped via both DHL and FedEx) appears twice.
@@ -372,13 +372,13 @@ $ cargo test -p pipeline join_keeps_unshipped_orders_and_duplicates_multi_shipme
 - same join key, same semantics for unmatched rows on the preserved side.
 The specific thing to watch for in both engines is the same trap:
 `JOIN`/inner join silently drops unmatched rows, which is exactly why
-`join_aggregate_query_sql` (`datafusion_query.rs:520`) - an *inner* join used
+`join_aggregate_query_sql` (`datafusion_query.rs:640`) - an *inner* join used
 deliberately to compute shipped-orders-only totals - is a different function
 from `join_query_sql`, not a flag on it.
 
 ## Writing your own scalar function
 
-`days_since_epoch_udf` (`datafusion_query.rs:338`) is a one-argument scalar
+`days_since_epoch_udf` (`datafusion_query.rs:401`) is a one-argument scalar
 UDF - `days_since_epoch(placed_at) -> BIGINT` - built with `create_udf`:
 
 ```rust
@@ -419,7 +419,7 @@ $ cargo test -p pipeline days_since_epoch_udf_computes_expected_value_on_real_da
 
 The companion test
 `days_since_epoch_udf_gets_same_constant_folding_as_builtin_equivalent`
-(`datafusion_query.rs:1115`) proves the `Volatility::Immutable` claim by
+(`datafusion_query.rs:2107`) proves the `Volatility::Immutable` claim by
 comparing this UDF's `EXPLAIN` plan against the equivalent built-in
 `CAST(...)/86400000000` expression on the same literal input - both fold to
 the same literal at plan time, so a custom Rust UDF doesn't cost you
@@ -441,9 +441,9 @@ query run through SQL or DataFrame, a join, an aggregation, a custom
 function. That chapter picks up from here and asks what happens when things
 go wrong - cancellation, memory limits, spilling, the specific asymmetry
 between how a hash join and a hash aggregate behave once memory runs out.
-`context_with_filter_pushdown` (`datafusion_query.rs:417`), which turns on
+`context_with_filter_pushdown` (`datafusion_query.rs:514`), which turns on
 row-level Parquet filter pushdown, and `explain_analyze`
-(`datafusion_query.rs:404`), which reads `EXPLAIN ANALYZE` plans for runtime
+(`datafusion_query.rs:497`), which reads `EXPLAIN ANALYZE` plans for runtime
 metrics, both live in that next chapter too.
 
 The earlier amount parser split at the decimal point and parsed both parts as

@@ -12,6 +12,33 @@ independently computed expected value, never against itself.
 Same rule as every other chapter in this book: claim, code, live test,
 then the bridge back to something you already know from Spark/Scala.
 
+The six extension points sit at different stages of the same query
+pipeline every SQL statement already passes through - knowing which
+stage each one plugs into is what makes the rest of this chapter easy to
+place:
+
+```mermaid
+flowchart LR
+    SQL["SQL text"] --> LP["Logical plan"]
+    LP -- "custom OptimizerRule\n(MaxRowsGuardrail)" --> OPT["Optimized logical plan"]
+    OPT --> PP["Physical plan"]
+    PP -- "custom TableProvider\n(OrdersMemoryTableProvider)" --> SCAN["Scan"]
+    PP -- "custom ScalarUDF / AsyncScalarUDF\n(days_since_epoch, region_multiplier)" --> EXPR["Per-row expressions"]
+    PP -- "custom AggregateUDF\n(amount_range)" --> AGG["Aggregate"]
+    PP -- "custom WindowUDF\n(percent_of_total)" --> WIN["Window"]
+    SCAN --> EXEC["Execution"]
+    EXPR --> EXEC
+    AGG --> EXEC
+    WIN --> EXEC
+```
+
+Five of the six extension points slot into the physical plan as a
+specific operator kind (a scan, an expression, an aggregate, a window);
+only `OptimizerRule` runs earlier, rewriting the logical plan before a
+physical plan exists at all - which is why `MaxRowsGuardrail` can inject
+a `LIMIT` node no SQL in the original query asked for, something none of
+the other five extension points are positioned to do.
+
 ## A custom `TableProvider`: your own data source, not just a format
 
 **Claim**: DataFusion doesn't require your data to come from a file format
