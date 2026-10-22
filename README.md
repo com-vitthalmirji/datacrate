@@ -14,9 +14,10 @@
 `datacrate` is an end-to-end data-engineering platform in Rust, under active
 development. One Cargo workspace brings together streaming CSV/Arrow ingestion,
 compile-time schema contracts, typestate pipeline builders, Parquet storage,
-DataFusion SQL and DataFrame queries, and cloud object-store I/O. Ballista examples
-extend query execution across scheduler and executor processes; Comet examples
-explore native acceleration inside Spark.
+DataFusion SQL and DataFrame queries, and cloud object-store I/O. Ballista
+composes a scheduler and executor into one typed app, extending query
+execution across processes; a separate sbt/Scala project explores native
+Comet acceleration inside Spark.
 
 The engineering focus is on explicit pipeline boundaries: compiler-resolved type
 shapes and const-evaluated compatibility checks, fallible callbacks with checked
@@ -89,16 +90,29 @@ git config core.hooksPath .githooks
 
 ```
 crates/
-├── dtl-core/          lib   - ownership/borrowing/slices fundamentals, zero-copy CSV batching
-├── csv-cli/           bin   - streaming CSV column-selection CLI (csv-select)
-├── pipeline/          lib   - Arrow/Parquet/DataFusion pipeline, object-store I/O,
-│                              Ballista distribution, Comet acceleration
-├── typestate/         lib   - typestate pipeline builder (source/transform/sink)
-├── contracts/         lib   - compile-time schema-conformance checking
-├── contracts-derive/  lib   - `#[derive(Contract)]` proc macro backing `contracts`
-└── rusty-ready/       lib   - general Rust practice and playground, isolated from the other crates
-│                              (exercises/ subdir: workshop compiler-error drills)
+├── dtl-core/              lib   - ownership/borrowing/slices fundamentals, zero-copy CSV batching
+├── csv-cli/               bin   - streaming CSV column-selection CLI (csv-select)
+├── pipeline/              lib   - Arrow/Parquet/DataFusion pipeline, object-store I/O,
+│                                  Ballista distribution (BallistaApp), Comet acceleration
+├── typestate/             lib   - typestate pipeline builder (source/transform/sink)
+├── contracts/             lib   - compile-time schema-conformance checking
+├── contracts-derive/      lib   - `#[derive(Contract)]` proc macro backing `contracts`
+├── connectors-derive/     lib   - `#[derive(Connector)]`: registers a contract struct's batches
+│                                  with DataFusion (memory/Parquet/CSV) and emits typed column
+│                                  accessors for filter/sort expressions
+├── schema-codegen/        lib   - parses a Parquet file, dbt `schema.yml`, or Erwin XML export
+│                                  into a matching `#[derive(Contract, Connector)]` struct
+├── scaffold-cli/          bin   - one-shot CLI wrapping `schema-codegen` to seed a pipeline's
+│                                  starting data model from an existing Parquet file
+├── schema-gate-example/   lib   - end-to-end proof that a drifted dbt/Erwin/Parquet schema
+│                                  fails `cargo build`, not just a unit test
+└── rusty-ready/           lib   - general Rust practice and playground, isolated from the other crates
+                                   (exercises/ subdir: workshop compiler-error drills)
 fixtures/         deterministic test data, committed
+scala/
+└── comet-interop/  separate sbt/Scala project (not part of the Cargo workspace) - scaffolds
+                     Spark Comet operator-replacement rules from `derives CometOperator`
+                     declarations; see scala/comet-interop/README.md
 ```
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for commit message conventions,
