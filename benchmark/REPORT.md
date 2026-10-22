@@ -63,14 +63,12 @@ file's "whole invocation" convention) to avoid in-process warm-up bias.
 `filter()` materializes a whole intermediate array before `sum()` runs); Arrow fused
 single-pass scan 6.98ms (~4% faster than row). Conclusion: with no row/columnar
 conversion involved, the layout-only effect on this hardware at this scale is small —
-naive kernel composition can even cost more than it saves. This does not contradict
-Jordan Epstein's claim (`docs/internals/datafusion-comet-story-2.md`); it tests a
+naive kernel composition can even cost more than it saves; it tests a
 narrower mechanism than the one his benchmark below actually measures.
 
 ### `transpose-cost` — elementwise transform, 500,000 rows, with vs. without a row round trip
 
-Reproduces the mechanism behind Jordan Epstein's own 3.6x-at-100-columns benchmark
-(`docs/internals/datafusion-comet-story-2.md`): Comet read-only acceleration still
+Reproduces the mechanism behind own 3.6x-at-100-columns benchmark: Comet read-only acceleration still
 transposes Arrow batches to a row format before the write; Comet read+write never does.
 Here: `cols` Arrow columns, transformed directly (no transpose) vs. via a round trip
 through one flat row-major buffer (`UnsafeRow`'s actual shape — a `Vec<Vec<f64>>` first
@@ -86,8 +84,7 @@ swamped the signal). Average of 5 runs (each its own process):
 
 All four column counts agree on the result checksum across every run. The gap climbs
 with column count (3.4x → 14.2x) through 50 columns, then plateaus/dips slightly at 100
-— within the sample size here, not yet distinguishable from noise. Same direction as
-Jordan's measured 3.6x at 100 columns: the win isn't "Rust is faster at arithmetic," it's
+— within the sample size here, not yet distinguishable from noise. Same direction as measured 3.6x at 100 columns: the win isn't "Rust is faster at arithmetic," it's
 eliminating the row↔columnar conversion at a pipeline boundary, and that cost scales with
 how wide the row is.
 
