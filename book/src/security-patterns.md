@@ -43,8 +43,26 @@ symlink and writes attacker-chosen content to attacker-chosen content to
 an attacker-chosen target - this is CVE-2026-35354, a real bug in GNU
 `mv`. The fix isn't a smarter check - no check run before the create can
 ever close this gap, because the gap is the time between the check and
-the create, however small. The fix is an API that makes "check" and
-"create" the same atomic operation:
+the create, however small.
+
+```mermaid
+sequenceDiagram
+    participant P as create_file_racy
+    participant K as Kernel/Filesystem
+    participant A as Attacker
+    P->>K: exists(path)?
+    K-->>P: false
+    Note over P,A: the gap - anything can happen here
+    A->>K: plant symlink at path
+    P->>K: File::create(path)
+    K-->>P: opens through the planted symlink
+    Note over P: writes land at an attacker-chosen target
+```
+
+No check placed before `File::create` closes this gap - the gap is the
+time between the check and the create, however small, and the attacker
+only needs to win that window once. The fix is an API that makes "check"
+and "create" the same atomic operation:
 
 ```rust
 pub fn create_file_atomically(path: &Path) -> io::Result<File> {

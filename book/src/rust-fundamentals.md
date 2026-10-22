@@ -76,6 +76,24 @@ That's not a restriction Rust adds for fun; it's what makes "who's
 responsible for this data, and for how long" a question with one obvious
 answer everywhere in the codebase, including in code you didn't write.
 
+```mermaid
+stateDiagram-v2
+    [*] --> Owned: let draft = String::from(...)
+    Owned --> Moved: takes_and_gives_back(draft)
+    Moved --> Owned: value returned to `returned`
+    Owned --> Dropped: scope ends
+    Dropped --> [*]
+    note right of Moved
+        `draft` is not usable here -
+        the compiler rejects any use of it
+    end note
+```
+
+Every arrow above is checked at compile time, not at runtime - there's no
+state here the JVM or CPython track by any mechanism at all (a GC traces
+reachability, not "is this specific binding still permitted to read this
+value"), which is exactly the extra guarantee ownership buys over both.
+
 **JVM bridge**: you already know the *rule* - `val`s should be immutable,
 side-effecting mutation should be visible and controlled. Rust just enforces
 the "who owns this" half of that discipline at compile time instead of by
