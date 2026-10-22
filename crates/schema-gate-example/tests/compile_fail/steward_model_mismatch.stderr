@@ -1,0 +1,24 @@
+error[E0080]: evaluation panicked: producer schema does not conform to the contract: mismatch `customer_name` (expected `String`, found `Optional`)
+ --> $CARGO/const_panic-$VERSION/src/macros.rs
+  |
+  |               (|args| $crate::concat_panic(args))
+  |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `contracts::SchemaConforms::<SourceOfTruth, StewardInputModel, contracts::ExactOrdered>::CHECK` failed here
+  |
+ ::: $WORKSPACE/crates/contracts/src/lib.rs
+  |
+  | /                 const_panic::concat_panic!(
+  | |                     const_panic::FmtArg::DISPLAY;
+  | |                     "producer schema does not conform to the contract: ",
+  | |                     #(
+... |
+  | |                     )*
+  | |                 );
+  | |_________________- in this macro invocation
+  |
+  = note: this error originates in the macro `const_panic::concat_panic` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+note: erroneous constant encountered
+  --> tests/compile_fail/steward_model_mismatch.rs:20:15
+   |
+20 | const _: () = SchemaConforms::<SourceOfTruth, StewardInputModel, ExactOrdered>::CHECK;
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

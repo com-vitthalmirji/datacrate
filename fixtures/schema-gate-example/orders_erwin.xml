@@ -1,0 +1,6 @@
+<Entities>
+  <Entity name="Orders">
+    <Attribute name="id" type="bigint" nullable="false"/>
+    <Attribute name="customer_name" type="varchar(100)" nullable="true"/>
+  </Entity>
+</Entities>

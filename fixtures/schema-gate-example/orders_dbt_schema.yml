@@ -1,0 +1,9 @@
+models:
+  - name: orders
+    columns:
+      - name: id
+        data_type: bigint
+        tests:
+          - not_null
+      - name: customer_name
+        data_type: varchar(100)

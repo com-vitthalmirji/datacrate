@@ -1,5 +1,6 @@
 /target
 /target-linux
+target/
 /.idea
 /book/book
 .DS_Store
