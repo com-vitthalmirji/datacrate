@@ -2,8 +2,8 @@
 //! independent schema source formats: `build.rs` reads a reference
 //! Parquet file, dbt `schema.yml`, and Erwin XML export (three different
 //! real-world ways a data steward's source of truth shows up) and
-//! generates [`SourceOfTruth`], [`DbtSourceOfTruth`], and
-//! [`ErwinSourceOfTruth`] fresh on every build; `StewardInputModel` is the
+//! generates `SourceOfTruth`, `DbtSourceOfTruth`, and
+//! `ErwinSourceOfTruth` fresh on every build; `StewardInputModel` is the
 //! data steward's hand-written declaration of what a pipeline expects to
 //! ingest. Each `const _` check below fails `cargo build` the moment its
 //! source drifts from that declaration, turning a schema mismatch into a
@@ -15,7 +15,7 @@ use contracts::{Contract, ExactOrdered, SchemaConforms};
 include!(concat!(env!("OUT_DIR"), "/generated_schema.rs"));
 
 /// The data steward's declared input schema for this pipeline. Checked
-/// against [`SourceOfTruth`] below, not against the Parquet file directly.
+/// against `SourceOfTruth` below, not against the Parquet file directly.
 #[derive(Contract, Connector)]
 pub struct StewardInputModel {
     id: i64,
