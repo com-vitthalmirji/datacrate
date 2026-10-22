@@ -67,6 +67,108 @@ There is no sink-category operator: Comet accelerates Spark's read and
 compute path, not the write side, so there is nothing for a "sink operator"
 to replace.
 
+## `reflect-check`: compile-time validation of a reflection target (POC)
+
+A separate idea, proven as a standalone proof of concept in `reflect-check/`,
+not wired into `core`/`comet-ops` above. `docs/internals/datafusion-comet-story.md`
+(Jordan Epstein's own account of Comet's Iceberg integration) describes both
+Comet's existing read path and its planned write path reaching into *private*
+fields on Spark/Iceberg Java classes via Scala reflection, because those
+fields have no public API - a field rename on a dependency upgrade breaks
+that `getDeclaredField` call silently at runtime, not at build time.
+
+`ClasspathField.requireFieldOfType` (`reflect-check/src/main/scala/
+cometinterop/reflectcheck/ClasspathField.scala`) is a Scala 3 macro, using
+the same `scala.quoted` mechanism `derives CometOperator` above already
+relies on, that runs the equivalent `Class.forName` + `getDeclaredField`
+lookup while the call site itself is being compiled. `WriteConfigFields.scala`
+calls it against `IcebergWriteConfigStub` - a stand-in for the kind of
+write-config object the transcript describes (target Parquet file size, rows
+per row group, partition path, whether to use Comet for the write at all; not
+a confirmed real Iceberg class or field name) - for all four fields.
+
+**Demonstrated, not just designed** - both directions were run and the output
+captured (**measured**, this repo, 2026-10-22):
+- Positive: `sbt reflectCheck/test` compiles `WriteConfigFields.scala` against
+  the real, compiled `IcebergWriteConfigStub` class and passes 4 tests.
+- Negative: renaming `targetFileSizeBytes` to `targetFileSizeByte` on the stub
+  and running `sbt reflectCheck/clean reflectCheck/compile` fails the build
+  with the real field drift it's meant to catch:
+  ```
+  [error] -- Error: .../WriteConfigFields.scala:18:35
+  [error] 18 |  ClasspathField.requireFieldOfType(className, "targetFileSizeBytes", "long")
+  [error]    |  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  [error]    |compile-time reflection check failed: cometinterop.reflectcheck.stub.IcebergWriteConfigStub
+  [error]    |has no field named 'targetFileSizeBytes' (available: targetFileSizeByte,
+  [error]    |rowsPerRowGroup, partitionPath, useCometForWrite)
+  [error] one error found
+  ```
+  This is the exact failure mode a renamed Iceberg write-config field would
+  hit in production today, surfaced at `sbt compile` instead.
+
+**What this is not**: there is no confirmed, Comet-maintainer-reviewed
+contribution here - the idea targets the write path's reflection surface the
+transcript names as still-future work, using a stand-in class, not the real
+Iceberg jar's actual field names (unverified against it). It is a POC proving
+the mechanism works, not a patch proposed to `apache/datafusion-comet`.
+
+## `reflect-check-iceberg`: the same macro against the real Iceberg class
+
+`reflect-check-iceberg/` points `ClasspathField` at the real target instead of
+a stand-in: `org.apache.iceberg.spark.source.SparkWrite`, the class Comet's
+own `IcebergReflection.scala` (`org.apache.comet.iceberg.IcebergReflection`,
+in `apache/datafusion-comet`) already reflects into via `getSparkWriteField`
+for its planned native write path. That file's own doc comment names five
+fields it reads unconditionally or with a version fallback - `queryId`,
+`targetFileSize`, `outputSpecId`, `writeSchema`, `useFanoutWriter` (with an
+older-version fallback to `partitionedFanoutEnabled`) - and states they are
+"present on `SparkWrite` across the Iceberg 1.5.2 / 1.8.1 / 1.10.0 versions
+Comet supports."
+
+This is kept as its own sbt module, not folded into `reflect-check`, because
+it needs a real dependency on `org.apache.iceberg:iceberg-spark-runtime-3.5_2.13:1.10.0`
+(plus `org.apache.spark:spark-sql_2.13:3.5.9`, which `SparkWrite` needs on the
+classpath because it implements a Spark interface `Class.forName` must also
+resolve) - special-purpose code that targets one real class is kept separate
+from `ClasspathField`, which stays general-purpose and dependency-free.
+1.10.0 was chosen because it is one of the three versions Comet's own comment
+names as confirmed, not because it's the newest available (1.12.0 is).
+
+**Demonstrated, not just designed** - both directions run against the real
+Iceberg 1.10.0 jar and the output captured (**measured**, this repo,
+2026-10-22):
+- Field names and types were read first via `javap -p` on the real
+  `SparkWrite.class` inside the fetched jar, not assumed - this is what
+  determined `queryId: String`, `targetFileSize: long`, `outputSpecId: int`,
+  `writeSchema: org.apache.iceberg.Schema`, `useFanoutWriter: boolean`.
+  `partitionedFanoutEnabled` is not checked: it does not exist as a field on
+  1.10.0's `SparkWrite` at all, so there is nothing on this classpath to check
+  it against - this is named here, not silently skipped.
+- Positive: `sbt reflectCheckIceberg/test` compiles `SparkWriteFields.scala`
+  against the real jar and passes.
+- Negative: renaming `queryId` to `queryIdRenamed` in `SparkWriteFields.scala`
+  and running `sbt reflectCheckIceberg/clean reflectCheckIceberg/compile`
+  fails with:
+  ```
+  [error] -- Error: .../SparkWriteFields.scala:27:35
+  [error] 27 |  ClasspathField.requireFieldOfType(className, "queryIdRenamed", "java.lang.String")
+  [error]    |  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  [error]    |compile-time reflection check failed: org.apache.iceberg.spark.source.SparkWrite
+  [error]    |has no field named 'queryIdRenamed' (available: LOG, sparkContext, writeConf,
+  [error]    |table, queryId, format, applicationId, wapEnabled, wapId, outputSpecId, branch,
+  [error]    |targetFileSize, writeSchema, dsSchema, extraSnapshotMetadata, useFanoutWriter,
+  [error]    |writeRequirements, writeProperties, cleanupOnAbort)
+  [error] one error found
+  ```
+
+**What this still is not**: this is a compile-time guard against a real
+Iceberg field renaming out from under Comet's reflection code, running in
+this standalone repo - it has not been proposed to, reviewed by, or merged
+into `apache/datafusion-comet`, and it only pins Iceberg 1.10.0 (not 1.5.2 or
+1.8.1, which are not available to check against here). It would need to be
+wired into Comet's own build (e.g. a `compile-fail`-style module there) to
+protect that project directly, which has not been done.
+
 ## Testing
 
 `core/src/test/scala/cometinterop/CometOperatorSuite.scala` covers the
