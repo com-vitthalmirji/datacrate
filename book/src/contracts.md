@@ -373,3 +373,25 @@ cargo test -p schema-gate-example
 
 Runs the same `trybuild` proof this chapter opened with - a compile-fail case
 and a pass case - now sitting downstream of all three parsers, not just one.
+
+## Starting a new struct from an existing file: `scaffold-cli`
+
+`schema-gate-example`'s `build.rs` re-derives its three structs on every
+build, on purpose - that's what makes drift a compile error. A brand-new
+pipeline has the opposite problem: there is no struct yet, and writing the
+first one by hand from a wide Parquet file is exactly the kind of typing
+mistake the gate exists to catch. `scaffold-cli` wraps the same
+`schema_codegen::read_parquet_schema` and `struct_source` functions
+`build.rs` calls, but runs once, by hand, and prints the result instead of
+compiling it in:
+
+```sh
+cargo run -p scaffold-cli -- fixtures/schema-gate-example/orders.parquet --name Order
+```
+
+The two tools stay deliberately separate. `scaffold-cli` is a one-shot
+starting point; it has no opinion about what happens to the struct after it
+is pasted into a pipeline. The ongoing compile-time check against the real
+file on every build is `schema-gate-example`'s `build.rs`, not this CLI -
+scaffolding a struct once and gating a build on it forever are different
+problems, so they stay different tools.
