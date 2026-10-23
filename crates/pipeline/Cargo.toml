@@ -57,6 +57,10 @@ deltalake = { version = "1.1.2", features = ["datafusion"] }
 duckdb = { version = "1.10506.1", features = ["bundled", "chrono", "parquet"], optional = true }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 log = "0.4"
+# Phase D (docs/internals/experiment.md section 12): zero-copy mmap-backed
+# IPC reading. Already resolved transitively via polars-io at 0.9.11, so
+# this pins no new version, only a direct dependency edge.
+memmap2 = "0.9"
 # Pinned to match datafusion 55.1.0's exact object_store dependency (also
 # 0.13.2) so an Arc<dyn ObjectStore> built here can be registered directly
 # with DataFusion's RuntimeEnv, instead of two incompatible trait-object

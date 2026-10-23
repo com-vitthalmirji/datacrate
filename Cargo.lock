@@ -4485,6 +4485,7 @@ dependencies = [
  "duckdb",
  "futures-util",
  "log",
+ "memmap2",
  "object_store",
  "parquet",
  "polars",
