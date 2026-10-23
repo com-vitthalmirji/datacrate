@@ -125,7 +125,7 @@ jobs:
             bash -c 'time /opt/spark/bin/spark-submit \
               --class cometbenchmark.OrdersAggregateDriver \
               /spark-comet/comet-benchmark-driver.jar \
-              --output /spark-comet/ci-orders.parquet --rows 2000 \
+              --output /tmp/ci-orders.parquet --rows 2000 \
               --generate-fixture --require-comet false' \
             2>&1 | tee artifacts/scenario-b.log
 
@@ -148,7 +148,7 @@ jobs:
               --conf spark.memory.offHeap.size=2g \
               --conf spark.shuffle.manager=org.apache.spark.sql.comet.execution.shuffle.CometShuffleManager \
               /spark-comet/comet-benchmark-driver.jar \
-              --output /spark-comet/ci-orders.parquet --rows 2000 \
+              --output /tmp/ci-orders.parquet --rows 2000 \
               --require-comet true' \
             2>&1 | tee artifacts/scenario-c.log
 
