@@ -93,6 +93,7 @@ fn unimplemented_stream<T: Send + 'static>(
     )))
 }
 
+#[tonic::async_trait]
 impl FlightService for OrdersFlightService {
     type HandshakeStream = BoxStream<'static, Result<HandshakeResponse, Status>>;
     type ListFlightsStream = BoxStream<'static, Result<FlightInfo, Status>>;
