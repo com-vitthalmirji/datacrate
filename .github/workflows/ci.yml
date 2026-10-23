@@ -85,6 +85,43 @@ jobs:
       # OOM-killed the runner; thin LTO avoids that without serializing jobs.
       - run: cargo build --profile ci-release --locked
 
+      # Phases B/C/D/F/G (docs/internals/experiment.md): `cargo test` above
+      # only compiles these binaries (none has a #[test] wrapper, so no
+      # test harness ever runs their `main()`), and `cargo build` only
+      # links them. Neither proves the binaries' own internal correctness
+      # checks (each returns `ExitCode::FAILURE` on a result mismatch)
+      # ever ran. This step closes that gap: it actually executes each one
+      # and fails the job on a non-zero exit, so "CI-passed" means
+      # executed-and-correct, not compiled-only.
+      - name: Run and verify Phase B/C/D/F/G experiment binaries
+        run: |
+          set -e
+          mkdir -p experiment-output
+          run() {
+            name="$1"
+            shift
+            echo "=== $name ==="
+            if ! "./target/ci-release/$name" "$@" > "experiment-output/$name.log" 2>&1; then
+              echo "FAILED: $name (see experiment-output/$name.log)"
+              cat "experiment-output/$name.log"
+              exit 1
+            fi
+            cat "experiment-output/$name.log"
+          }
+          run materialization-vs-handoff --len 500000 --runs 2
+          run ipc-vs-parquet --rows 500000
+          run mmap-ipc-handoff --len 500000 --runs 2
+          run encodings-and-kernel
+          run flight-orders-handoff
+      - name: Upload experiment binary output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-build-experiment-output
+          path: experiment-output/
+          retention-days: 30
+          if-no-files-found: ignore
+
   # Codegen evidence for crates/pipeline/src/simd_add.rs
   # (docs/internals/experiment.md, Phase A acceptance: "Assembly identifies
   # the vectorized loop"). `checks`/`test` cover correctness; this is the
