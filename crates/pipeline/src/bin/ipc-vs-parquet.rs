@@ -85,9 +85,9 @@ fn schema() -> Arc<Schema> {
 fn generate_batch(rows: usize) -> RecordBatch {
     let ids: Int64Array = (0..rows as i64).collect();
     let amounts: Float64Array = (0..rows).map(|i| (i % 100) as f64 + 0.5).collect();
-    let placed_at: TimestampMicrosecondArray = (0..rows)
-        .map(|i| 1_700_000_000_000_000 + i as i64)
-        .collect();
+    let placed_at = TimestampMicrosecondArray::from_iter_values(
+        (0..rows).map(|i| 1_700_000_000_000_000 + i as i64),
+    );
     let notes = StringArray::from_iter_values((0..rows).map(|i| format!("order-{i}")));
     RecordBatch::try_new(
         schema(),
