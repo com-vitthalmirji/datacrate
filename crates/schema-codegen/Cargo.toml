@@ -23,7 +23,7 @@ arrow-schema = "59"
 parquet = { version = "59.3.0", default-features = false, features = ["arrow"] }
 proc-macro2 = "1"
 quote = "1"
-syn = { version = "2", features = ["full", "parsing", "printing"] }
+syn = { version = "3", features = ["full", "parsing", "printing"] }
 prettyplease = "0.2"
 serde = { version = "1", features = ["derive"], optional = true }
 serde_yaml = { version = "0.9", optional = true }
