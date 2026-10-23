@@ -92,7 +92,7 @@ pub fn wrapping_add_scalar(array: &Int32Array, k: i32) -> Result<Int32Array, Sim
 }
 
 /// Explicit SIMD: dispatches to AVX2 if the running CPU supports it (checked
-/// once per call via `is_x86_feature_detected!`, not assumed from the
+/// once per call via `is_x86_64_feature_detected!`, not assumed from the
 /// compile target), otherwise SSE2 (the x86_64 baseline — every x86_64 CPU
 /// has it, no runtime check needed), otherwise the portable scalar fallback
 /// on non-x86_64 targets.
@@ -107,7 +107,7 @@ pub fn wrapping_add_simd(array: &Int32Array, k: i32) -> Result<Int32Array, SimdA
 
     #[cfg(target_arch = "x86_64")]
     {
-        if std::arch::is_x86_64_feature_detected!("avx2") {
+        if std::is_x86_64_feature_detected!("avx2") {
             // SAFETY: AVX2 support was just confirmed on this CPU via
             // `is_x86_64_feature_detected!`, which is the documented
             // precondition for calling an `avx2`-gated function.
@@ -152,8 +152,11 @@ unsafe fn add_sse2(src: &[i32], dst: &mut [i32], k: i32) {
     let len = src.len();
     let chunks = len / LANES;
 
-    // SAFETY: `k_vec` is a pure register value, no memory access.
-    let k_vec = unsafe { _mm_set1_epi32(k) };
+    // `_mm_set1_epi32` only broadcasts `k` into a register; it touches no
+    // memory, so current stable Rust classifies it as a safe intrinsic to
+    // call directly (unlike `_mm_loadu_si128`/`_mm_storeu_si128` below,
+    // which still require `unsafe` because they dereference a pointer).
+    let k_vec = _mm_set1_epi32(k);
     for i in 0..chunks {
         let offset = i * LANES;
         // SAFETY: `offset + LANES <= len` for every `i < chunks` by
@@ -197,8 +200,9 @@ unsafe fn add_avx2(src: &[i32], dst: &mut [i32], k: i32) {
     let len = src.len();
     let chunks = len / LANES;
 
-    // SAFETY: pure register value, no memory access.
-    let k_vec = unsafe { _mm256_set1_epi32(k) };
+    // See `add_sse2`: `_mm256_set1_epi32` touches no memory, so current
+    // stable Rust classifies it as safe to call directly.
+    let k_vec = _mm256_set1_epi32(k);
     for i in 0..chunks {
         let offset = i * LANES;
         // SAFETY: see `add_sse2` — `offset + LANES <= len` by construction,
@@ -293,7 +297,10 @@ mod tests {
         // kernel could silently misbehave outside the test suite.
         let full = Int32Array::from((0..37).collect::<Vec<i32>>());
         let sliced = full.slice(3, 23);
-        let sliced = sliced.as_any().downcast_ref::<Int32Array>().expect("Int32Array");
+        let sliced = sliced
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .expect("Int32Array");
 
         let reference = wrapping_add_reference(sliced, K).expect("no nulls");
         let simd = wrapping_add_simd(sliced, K).expect("no nulls");
@@ -335,7 +342,7 @@ mod tests {
         unsafe { add_sse2(&values, &mut sse2_out, K) };
         assert_eq!(sse2_out, reference, "sse2 path");
 
-        if std::arch::is_x86_64_feature_detected!("avx2") {
+        if std::is_x86_64_feature_detected!("avx2") {
             let mut avx2_out = vec![0i32; values.len()];
             // SAFETY: AVX2 support confirmed on this CPU above.
             unsafe { add_avx2(&values, &mut avx2_out, K) };

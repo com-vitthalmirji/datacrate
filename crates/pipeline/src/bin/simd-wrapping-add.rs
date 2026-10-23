@@ -40,7 +40,11 @@ const K: i32 = 7;
 /// Not timed: generating the fixture is not part of the kernel being
 /// measured, so it happens once, before any `Instant::now()` call below.
 fn generate_input(len: usize) -> Int32Array {
-    Int32Array::from((0..len as i64).map(|i| (i % 1_000_000) as i32).collect::<Vec<_>>())
+    Int32Array::from(
+        (0..len as i64)
+            .map(|i| (i % 1_000_000) as i32)
+            .collect::<Vec<_>>(),
+    )
 }
 
 /// Runs `f` `runs` times, returning each run's wall time. `black_box` on
@@ -79,12 +83,18 @@ fn main() -> ExitCode {
 
     let array = generate_input(args.len);
 
-    let (_, reference) = time_runs("reference (scalar loop, oracle)", args.runs, &array, |a, k| {
-        wrapping_add_reference(a, k).expect("input is constructed without nulls")
-    });
-    let (_, scalar) = time_runs("optimized scalar (iterator chain)", args.runs, &array, |a, k| {
-        wrapping_add_scalar(a, k).expect("input is constructed without nulls")
-    });
+    let (_, reference) = time_runs(
+        "reference (scalar loop, oracle)",
+        args.runs,
+        &array,
+        |a, k| wrapping_add_reference(a, k).expect("input is constructed without nulls"),
+    );
+    let (_, scalar) = time_runs(
+        "optimized scalar (iterator chain)",
+        args.runs,
+        &array,
+        |a, k| wrapping_add_scalar(a, k).expect("input is constructed without nulls"),
+    );
     let (_, simd) = time_runs("explicit SIMD (std::arch)", args.runs, &array, |a, k| {
         wrapping_add_simd(a, k).expect("input is constructed without nulls")
     });
