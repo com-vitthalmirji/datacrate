@@ -20,8 +20,9 @@ use std::sync::Arc;
 
 use arrow::array::Int32Array;
 use arrow::datatypes::DataType;
+use datafusion::common::ScalarValue;
 use datafusion::error::DataFusionError;
-use datafusion::logical_expr::{ColumnarValue, ScalarValue, Volatility, create_udf};
+use datafusion::logical_expr::{ColumnarValue, Volatility, create_udf};
 
 use crate::simd_add::wrapping_add_simd;
 

@@ -92,7 +92,7 @@ pub fn wrapping_add_scalar(array: &Int32Array, k: i32) -> Result<Int32Array, Sim
 }
 
 /// Explicit SIMD: dispatches to AVX2 if the running CPU supports it (checked
-/// once per call via `is_x86_64_feature_detected!`, not assumed from the
+/// once per call via `is_x86_feature_detected!`, not assumed from the
 /// compile target), otherwise SSE2 (the x86_64 baseline — every x86_64 CPU
 /// has it, no runtime check needed), otherwise the portable scalar fallback
 /// on non-x86_64 targets.
@@ -107,9 +107,9 @@ pub fn wrapping_add_simd(array: &Int32Array, k: i32) -> Result<Int32Array, SimdA
 
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_64_feature_detected!("avx2") {
+        if is_x86_feature_detected!("avx2") {
             // SAFETY: AVX2 support was just confirmed on this CPU via
-            // `is_x86_64_feature_detected!`, which is the documented
+            // `is_x86_feature_detected!`, which is the documented
             // precondition for calling an `avx2`-gated function.
             unsafe { add_avx2(values, &mut out, k) };
         } else {
@@ -330,7 +330,7 @@ mod tests {
         // wrapping_add_simd only exercises whichever path the CPU running
         // the test actually supports. Call both unsafe functions directly
         // so CI (which may or may not have AVX2) still proves both, not
-        // just whichever one is_x86_64_feature_detected! picked today.
+        // just whichever one is_x86_feature_detected! picked today.
         let values: Vec<i32> = (0..19).collect();
         let reference = wrapping_add_reference(&Int32Array::from(values.clone()), K)
             .expect("no nulls")
@@ -342,7 +342,7 @@ mod tests {
         unsafe { add_sse2(&values, &mut sse2_out, K) };
         assert_eq!(sse2_out, reference, "sse2 path");
 
-        if is_x86_64_feature_detected!("avx2") {
+        if is_x86_feature_detected!("avx2") {
             let mut avx2_out = vec![0i32; values.len()];
             // SAFETY: AVX2 support confirmed on this CPU above.
             unsafe { add_avx2(&values, &mut avx2_out, K) };
