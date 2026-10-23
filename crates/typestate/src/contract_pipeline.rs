@@ -9,7 +9,9 @@ use contracts::{
     Contract, ExactOrdered,
     arrow::{BatchValidationError, BatchValidator, MappingError},
 };
+use datafusion::dataframe::DataFrame;
 use datafusion::datasource::MemTable;
+use datafusion::error::DataFusionError;
 use datafusion::prelude::SessionContext;
 use std::sync::Arc;
 use std::{error::Error, marker::PhantomData};
@@ -102,6 +104,39 @@ fn validate(
         .map_err(|e| error(stage, Some(index), Failure::Validation(e)))
 }
 
+/// Shared by `sql_transform` and `dataframe_transform`: both (re)register
+/// `batch` as a `MemTable` on `ctx`, drive a current-thread Tokio runtime to
+/// bridge DataFusion's async API, and collect+concatenate the resulting
+/// `DataFrame` back into one batch. Only how that `DataFrame` is obtained
+/// (`ctx.sql(sql)` vs. a `.select()/.filter()/...` chain) differs between the
+/// two callers, so that ceremony is written once here instead of twice.
+fn run_via_dataframe(
+    ctx: &SessionContext,
+    batch: RecordBatch,
+    get_df: impl AsyncFnOnce(&SessionContext) -> Result<DataFrame, DataFusionError>,
+) -> Result<RecordBatch, CallbackError> {
+    let schema = batch.schema();
+    ctx.deregister_table("batch")
+        .map_err(|e| Box::new(e) as CallbackError)?;
+    let table =
+        MemTable::try_new(schema, vec![vec![batch]]).map_err(|e| Box::new(e) as CallbackError)?;
+    ctx.register_table("batch", Arc::new(table))
+        .map_err(|e| Box::new(e) as CallbackError)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| Box::new(e) as CallbackError)?;
+    let (out_schema, batches) = runtime
+        .block_on(async {
+            let df = get_df(ctx).await?;
+            let out_schema = Arc::new(df.schema().as_arrow().clone());
+            let batches = df.collect().await?;
+            Ok::<_, DataFusionError>((out_schema, batches))
+        })
+        .map_err(|e| Box::new(e) as CallbackError)?;
+    concat_batches(&out_schema, &batches).map_err(|e| Box::new(e) as CallbackError)
+}
+
 struct TransformSpec<'a> {
     callback: Transform<'a>,
     prepare: Prepare,
@@ -179,26 +214,24 @@ impl<'a, C: Contract> ContractPipeline<'a, C> {
         sql: &'a str,
     ) -> ContractPipeline<'a, O> {
         self.transform::<C, O>(move |batch| {
-            let schema = batch.schema();
-            ctx.deregister_table("batch")
-                .map_err(|e| Box::new(e) as CallbackError)?;
-            let table = MemTable::try_new(schema, vec![vec![batch]])
-                .map_err(|e| Box::new(e) as CallbackError)?;
-            ctx.register_table("batch", Arc::new(table))
-                .map_err(|e| Box::new(e) as CallbackError)?;
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| Box::new(e) as CallbackError)?;
-            let (out_schema, batches) = runtime
-                .block_on(async {
-                    let df = ctx.sql(sql).await?;
-                    let out_schema = Arc::new(df.schema().as_arrow().clone());
-                    let batches = df.collect().await?;
-                    Ok::<_, datafusion::error::DataFusionError>((out_schema, batches))
-                })
-                .map_err(|e| Box::new(e) as CallbackError)?;
-            concat_batches(&out_schema, &batches).map_err(|e| Box::new(e) as CallbackError)
+            run_via_dataframe(ctx, batch, async |ctx| ctx.sql(sql).await)
+        })
+    }
+    /// Like `sql_transform`, but builds the next stage from DataFusion's
+    /// `DataFrame` API (`.select()/.filter()/.aggregate()/...`) instead of a
+    /// SQL string. `build` receives the `batch` table as a `DataFrame` and
+    /// returns the chain applied to it; the same compile-time `ExactOrdered`
+    /// check `transform` runs still applies to `O`.
+    pub fn dataframe_transform<O: Contract>(
+        self,
+        ctx: &'a SessionContext,
+        build: impl Fn(DataFrame) -> Result<DataFrame, DataFusionError> + 'a,
+    ) -> ContractPipeline<'a, O> {
+        self.transform::<C, O>(move |batch| {
+            run_via_dataframe(ctx, batch, async |ctx| {
+                let df = ctx.table("batch").await?;
+                build(df)
+            })
         })
     }
     /// Checks the final declared connection and terminates composition.

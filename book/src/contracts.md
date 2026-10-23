@@ -406,12 +406,117 @@ mistake the gate exists to catch. `scaffold-cli` wraps the same
 compiling it in:
 
 ```sh
-cargo run -p scaffold-cli -- fixtures/schema-gate-example/orders.parquet --name Order
+cargo run -p scaffold-cli -- struct fixtures/schema-gate-example/orders.parquet --name Order
 ```
 
-The two tools stay deliberately separate. `scaffold-cli` is a one-shot
+The two tools stay deliberately separate. `scaffold-cli struct` is a one-shot
 starting point; it has no opinion about what happens to the struct after it
 is pasted into a pipeline. The ongoing compile-time check against the real
 file on every build is `schema-gate-example`'s `build.rs`, not this CLI -
 scaffolding a struct once and gating a build on it forever are different
 problems, so they stay different tools.
+
+### Going further: `scaffold-cli pipeline` generates a complete binary
+
+`struct` stops at one struct. A sibling subcommand, `scaffold-cli pipeline`,
+goes the rest of the way: given a source schema (Parquet, dbt, Erwin, or
+Delta), an optional target schema, an optional transform stage, and a
+Parquet sink path, it renders a complete, compiling `ContractPipeline`
+binary - source struct, target struct, registration, transform, and sink all
+generated together, ready to drop into `crates/typestate/examples/`. The
+transform stage is where this subcommand gets interesting: it can emit
+either a `sql_transform` call from a literal SQL string, or a
+`dataframe_transform` call built from a closed set of five named
+`DataFrame`-API operations passed as repeated `--transform-df` flags. See
+[the typestate chapter](typestate.md#the-same-stage-built-from-dataframe-calls-instead-of-a-sql-string-dataframe_transform)
+for what those two paths generate and why the generator itself is built on
+`syn`/`quote!` token trees rather than string concatenation.
+
+### One command, four external systems, zero live connections
+
+Every piece above is proven separately: a dbt schema can gate a build, a
+pipeline can read Parquet from S3, a transform can be a chain of `DataFrame`
+calls. The question a steward actually asks is narrower and harder to fake:
+"if my model has a nested column, can I go from a dbt `schema.yml` straight
+to a running S3-to-S3 pipeline with one command?" `fixtures/dbt/orders_schema.yml`
+exists to answer that with a real file, not a hand-wavy yes:
+
+```yaml
+models:
+  - name: orders
+    columns:
+      - name: id
+        data_type: bigint
+        tests: [not_null]
+      - name: region
+        data_type: string
+        tests: [not_null]
+      - name: quantity
+        data_type: int
+        tests: [not_null]
+      - name: customer
+        data_type: "struct<name:string,address:struct<city:string,zip:string>>"
+  - name: orders_totals
+    columns:
+      - name: region
+        data_type: string
+        tests: [not_null]
+      - name: total_quantity
+        data_type: bigint
+```
+
+`customer` nests two levels deep - a struct field holding another struct.
+Nobody taught `declared_type_to_arrow` a new grammar for this fixture; dbt's
+own `struct<...>` type strings are already Spark/Hive-style and recursive, so
+the existing parser just recurses one level further. The only thing this
+fixture had to prove is that nothing downstream assumed "struct" means "flat."
+
+One command turns that model, plus a business rule ("total quantity shipped
+per region, positive orders only"), into a complete binary reading from one
+S3 bucket and writing to another:
+
+```sh
+cargo run -p scaffold-cli -- pipeline \
+  --source-schema dbt:fixtures/dbt/orders_schema.yml:orders \
+  --target-schema dbt:fixtures/dbt/orders_schema.yml:orders_totals \
+  --source-data s3://datacrate-raw/orders.parquet \
+  --transform-df "filter:quantity,gt,0" \
+  --transform-df "aggregate:group=region;sum(quantity)=total_quantity" \
+  --sink-parquet s3://datacrate-curated/orders_totals.parquet \
+  --name OrdersPipeline \
+  --out crates/typestate/examples/orders_pipeline_demo.rs
+```
+
+The rendered file declares `OrdersPipelineSourceCustomerAddress` and
+`OrdersPipelineSourceCustomer` as their own structs ahead of
+`OrdersPipelineSource`, each inner field `Option`-wrapped because dbt's
+`not_null` test cannot attach to a field nested inside a struct column - the
+same nullability rule this chapter already established for a flat dbt
+column, applied one level deeper without a special case. `total_quantity` on
+`OrdersPipelineTarget` is `Option<i64>` for a related but separate reason:
+`sum()`'s output field is unconditionally nullable in DataFusion, and the
+fixture's `orders_totals` model deliberately carries no `not_null` test on
+that column so the generated type agrees with what `BatchValidator` will
+actually see at runtime.
+
+Both buckets are registered against the same `AmazonS3Builder::from_env()`
+path this chapter's object-store work already established - one registration
+function, called once for the source bucket and once for the sink bucket,
+not two different code paths for "reading from S3" and "writing to S3". The
+sink itself writes to a local temp file first and uploads the bytes, because
+DataFusion's `write_parquet` targets a filesystem path, not an `ObjectStore`
+location directly; the generated `put_object_s3` helper is the same shape
+whether the sink is this orders-totals file or any other.
+
+None of this talks to a real MinIO endpoint or a real dbt project while
+generating the file - consistent with the rest of this chapter, `schema-codegen`
+scaffolds code that *assumes* S3 and dbt exist at the generated pipeline's
+run time, it does not stand either one up itself. The proof lives in
+`crates/schema-codegen/tests/pipeline_template.rs`, which renders this exact
+spec and asserts on the text: both nested structs are declared, both bucket
+names are registered, the filter and aggregate calls reference the right
+columns, and the sink calls `put_object_s3` with the curated bucket and key.
+That is the same rendered-text strategy this chapter already uses for every
+other S3 fixture, for the same reason: `trybuild::TestCases::pass` compiles
+*and executes* its fixtures, and executing a real S3 call has no place in
+this crate's own test suite.

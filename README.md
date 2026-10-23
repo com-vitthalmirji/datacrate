@@ -66,6 +66,109 @@ Run the CSV column-selection CLI directly:
 cargo run -p csv-select-cli --bin csv-select -- fixtures/m1/headers.csv --column 1
 ```
 
+## Why Rust/Arrow, mechanistically
+
+Two mechanisms explain almost everything below. Neither is a slogan - both
+have a proof point in this repo.
+
+**Mechanism 1: a flat column is one buffer, not many separate objects.**
+A JVM `List[Order]` or a Python list of objects is a list of pointers, each
+pointing to a separately-allocated object scattered across the heap wherever
+the allocator and garbage collector put it. Reading every `order.amount`
+means following a different pointer each time - slow mainly because each
+jump risks a cache miss, not because addition is slow. Arrow's
+`Float64Array` is the opposite: every number sits edge-to-edge in one
+contiguous buffer, the same shape as a C `double[]` array. That shape is
+what lets the CPU use a SIMD instruction - one instruction that adds several
+numbers at once, instead of one instruction per number - because the
+compiler can only do that when it can prove the next few numbers sit at a
+fixed, predictable distance apart in memory. This isn't assumed: compiling
+`crates/pipeline/src/bin/heavily-nested-transpose-cost.rs`'s `leaf_values()`
+and reading the generated machine code shows a `fadd.2d` instruction on ARM
+NEON - "add two 64-bit floats at once" - sitting where a one-at-a-time loop
+would otherwise be. No boxed object graph can offer the compiler that same
+proof, no matter how hot the loop runs.
+
+```mermaid
+flowchart TB
+    subgraph Boxed["Boxed rows - JVM List, Python list of objects"]
+        P1["pointer"] -.-> O1["object\nheader + fields"]
+        P2["pointer"] -.-> O2["object\nheader + fields"]
+        P3["pointer"] -.-> O3["object\nheader + fields"]
+    end
+    subgraph Columnar["Columnar - Arrow Float64Array"]
+        BUF["one contiguous buffer: 12.5, 7.0, 30.25, ...\nno header, no pointer, per value"]
+    end
+    Boxed -->|"sum this column:\na pointer-chase per value"| Slow["scalar loop,\nunpredictable memory latency"]
+    Columnar -->|"sum this column:\nsequential, fixed stride"| Fast["LLVM autovectorizes:\none SIMD add handles several values"]
+```
+
+**Mechanism 2: ownership lets two pipeline stages share a buffer instead of
+copying it.** Arrow's underlying buffer is wrapped in an `Arc` (atomic
+reference count): cloning it doesn't copy the bytes, it bumps a counter and
+hands out a second pointer to the *same* memory. Rust trusts a cloned `Arc`
+to be safe to read from multiple places, with no garbage collector
+double-checking at runtime, because the borrow checker already proved at
+compile time that nothing holding a read reference is also mutating the
+same data. A Spark shuffle can't use that trick - executors are separate
+processes, sometimes separate machines, so a shared pointer is meaningless
+once the two sides aren't in the same address space. A `RecordBatch`
+crossing that boundary has to be serialized to bytes, sent over the network
+or to disk, and deserialized on the other side, even when nobody plans to
+change a single value.
+
+```mermaid
+flowchart LR
+    subgraph SameProcess["Same process: Arrow stage-to-stage handoff"]
+        A1["stage A holds the buffer\nrefcount=1"] -->|"clone(): bump refcount,\nno bytes copied"| A2["stage B holds\nthe same buffer"]
+    end
+    subgraph CrossProcess["Cross-process: Spark executor shuffle"]
+        B1["executor 1's batch"] -->|"serialize"| B2["network / disk"]
+        B2 -->|"deserialize"| B3["executor 2's batch\n(a real copy)"]
+    end
+```
+
+**Both mechanisms together turn "touch every row" into "touch one buffer,"
+and the gap grows with nesting depth.** Measured, checksum-verified,
+reproducible locally (`benchmark/REPORT.md`):
+
+| Benchmark | Columnar (no materialization) | Row round trip | Ratio |
+|---|---|---|---|
+| `transpose-cost`, 100 flat columns, 500K rows | 32.19ms | 388.36ms | 12.1x |
+| `nested-transpose-cost`, `List<Float64>` | 0.18ms | 11.58ms | 64.6x |
+| `heavily-nested-transpose-cost`, 5-level nesting | 57.33µs | 7.31ms | 127.5x |
+
+Same algorithm, same language, same safety guarantees - the only variable
+is memory-access pattern. `crates/pipeline/src/layout.rs`'s `ColumnarBatch`/
+`RowBatch` types make "don't accidentally transpose" a compile error
+(`tests/compile_fail/layout_type_mismatch.rs`), not a benchmark hoping it
+holds; `zero-transpose-end-to-end` (`benchmark/REPORT.md`) reads Parquet,
+filters, and writes Parquet entirely through `&RecordBatch` with
+`write_parquet` never calling a row-conversion path.
+
+A deeper walkthrough of both mechanisms - more diagrams, the full nested-type
+case - lives in
+[the book's scale-and-parity chapter](https://com-vitthalmirji.github.io/datacrate/scale-and-parity.html#why-columnar-layout-wins-no-boxes-no-garbage-collector-one-instruction-for-many-rows).
+
+These numbers are same-process, same-host, checksum-verified comparisons -
+not a claim about Spark, Comet, or any other engine's absolute speed. Where
+this repo did measure against Spark/Comet/Ballista (`benchmark/REPORT.md`),
+every number is labeled with hardware, run count, and whether it's measured
+or a projection; none of it implies a general "N times faster than Spark"
+claim, because workload, scale, and harness change the ratio - sometimes
+sharply (Comet was *slower* than vanilla Spark on this repo's own 5M-row
+aggregate and join benchmarks).
+
+### Where this sits in the Rust-on-data ecosystem
+
+`datacrate` doesn't compete to replace Spark's engine - DataFusion, Comet,
+Ballista, Polars, and Sail (LakeSail) already occupy that space, each a
+different answer to "which engine runs the query." `datacrate` runs on
+DataFusion and asks a different question: can a pipeline's stage-to-stage
+schema disagreement fail at `cargo build`, before any data moves, instead of
+hours into a job? That's the compile-time contract gate below - a layer
+*above* the chosen engine, not a new one.
+
 ## Demo: a drifted schema fails the build
 
 `schema-gate-example` wires the whole chain together: a Parquet file, a dbt
@@ -111,6 +214,38 @@ git checkout fixtures/schema-gate-example/orders_dbt_schema.yml
 The same gate runs independently against the Parquet and Erwin sources too -
 see [`crates/schema-gate-example/src/lib.rs`](crates/schema-gate-example/src/lib.rs)
 and [`crates/schema-gate-example/build.rs`](crates/schema-gate-example/build.rs).
+
+## Demo: one command from a dbt schema to a running S3 pipeline
+
+`scaffold-cli pipeline` renders a complete, compiling `ContractPipeline`
+binary from a steward-declared schema - no hand-written struct, no hand-wired
+registration or sink code. This generates a pipeline that reads a dbt model
+with a nested `customer.address` struct column from one S3/MinIO bucket,
+filters and aggregates it, and writes the result to another:
+
+```sh
+cargo run -p scaffold-cli -- pipeline \
+  --source-schema dbt:fixtures/dbt/orders_schema.yml:orders \
+  --target-schema dbt:fixtures/dbt/orders_schema.yml:orders_totals \
+  --source-data s3://datacrate-raw/orders.parquet \
+  --transform-df "filter:quantity,gt,0" \
+  --transform-df "aggregate:group=region;sum(quantity)=total_quantity" \
+  --sink-parquet s3://datacrate-curated/orders_totals.parquet \
+  --name OrdersPipeline \
+  --out crates/typestate/examples/orders_pipeline_demo.rs
+```
+
+This is generation, not execution - `scaffold-cli` never opens a connection
+to dbt or S3/MinIO itself; it scaffolds code that assumes both exist at the
+*generated* pipeline's run time. The source schema can also be `parquet:`,
+`erwin:`, or `delta:`; the transform stage can be either a literal SQL
+string (`--transform-sql`) or, as above, a chain of named `DataFrame`-API
+operations (`select`/`filter`/`aggregate`/`sort`/`limit` via repeated
+`--transform-df` flags) - both paths render through `syn`/`quote!` token
+trees, so a malformed brace or identifier is impossible by construction, not
+just caught by a test. See
+[the contracts chapter](https://com-vitthalmirji.github.io/datacrate/contracts.html#one-command-four-external-systems-zero-live-connections)
+for the full nested-struct walkthrough.
 
 ## Why this matters: a small story from a big data project
 
@@ -173,8 +308,11 @@ crates/
 │                                  accessors for filter/sort expressions
 ├── schema-codegen/        lib   - parses a Parquet file, dbt `schema.yml`, or Erwin XML export
 │                                  into a matching `#[derive(Contract, Connector)]` struct
-├── scaffold-cli/          bin   - one-shot CLI wrapping `schema-codegen` to seed a pipeline's
-│                                  starting data model from an existing Parquet file
+├── scaffold-cli/          bin   - `struct`: seeds one Contract/Connector struct from a Parquet
+│                                  file's schema. `pipeline`: renders a complete, compiling
+│                                  ContractPipeline binary from a Parquet/dbt/Erwin/Delta source
+│                                  (S3/MinIO or local), an optional SQL or DataFrame-API transform,
+│                                  and a Parquet (S3/MinIO or local) sink
 ├── schema-gate-example/   lib   - end-to-end proof that a drifted dbt/Erwin/Parquet schema
 │                                  fails `cargo build`, not just a unit test
 └── rusty-ready/           lib   - general Rust practice and playground, isolated from the other crates

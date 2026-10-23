@@ -70,6 +70,164 @@ reused one. That's the minimum viable bridge, not a performance choice -
 making `ContractPipeline` itself `async` would ripple its signature into
 every other stage, for one SQL-driven stage's benefit.
 
+## The same stage, built from `DataFrame` calls instead of a SQL string: `dataframe_transform`
+
+`sql_transform` above is the SQL-string path. `dataframe_transform` is its
+sibling for callers who would rather chain DataFusion's own `DataFrame`
+methods than build a query string:
+
+```rust,ignore
+let pipeline = ContractPipeline::source::<Raw, _>(read_batches)
+    .dataframe_transform::<Filtered>(&ctx, |df| {
+        df.filter(col("amount").gt(lit(50.0)))?
+            .aggregate(vec![col("region")], vec![sum(col("amount")).alias("total")])
+    })
+    .sink::<Filtered>(write_batch)
+    .build()?;
+```
+
+`build` receives the `batch` table already resolved as a `DataFrame` and
+returns the chain applied to it. Internally this is *not* a second,
+independently-written implementation next to `sql_transform` - both methods
+share one private helper, `run_via_dataframe`, that does the
+register-as-`MemTable` / spin-a-runtime / `collect` / `concat_batches`
+ceremony exactly once. `sql_transform` calls it with `ctx.sql(sql)`;
+`dataframe_transform` calls it with `ctx.table("batch")` followed by the
+caller's closure. Writing that ceremony twice - once per transform flavor -
+would have meant two places that could drift out of sync on exactly the kind
+of operational detail (which table name, how the runtime is built, how the
+result is concatenated back into one batch) that should only ever be decided
+in one place. The same compile-time `ExactOrdered` check `.transform()` and
+`sql_transform` already run still applies to the declared output type - a
+`DataFrame`-built stage gets no weaker a guarantee than a SQL-built one.
+
+**Scala bridge**: this is the same relationship Spark's `Dataset` API has to
+Spark SQL - `df.filter(...).groupBy(...).agg(...)` and
+`spark.sql("SELECT ... WHERE ... GROUP BY ...")` are two surfaces over the
+same Catalyst plan, not two different execution engines. Reach for whichever
+reads more clearly for a given stage; neither one is the "real" path.
+
+### `scaffold-cli pipeline --transform-df`: the same chain, generated
+
+Hand-writing the closure above is one option. `scaffold-cli pipeline` can
+also generate it from a closed set of five named operations - `select`,
+`filter`, `aggregate`, `sort`, `limit` - passed as repeated `--transform-df`
+flags, one operation per flag, in the order they should run:
+
+```bash
+cargo run -p scaffold-cli -- pipeline \
+  --source-schema parquet:fixtures/schema-gate-example/orders.parquet \
+  --transform-df "filter:quantity,gt,0" \
+  --transform-df "aggregate:group=region;sum(quantity)=total" \
+  --sink-parquet /tmp/totals.parquet \
+  --name OrderTotal
+```
+
+Each flag's text (`filter:quantity,gt,0`, `aggregate:group=region;sum(quantity)=total`,
+and so on for `select:col1,col2` / `sort:col,asc;col2,desc` / `limit:N`) is
+parsed exactly once, at the CLI boundary, into a `DfOp` value - nothing
+downstream re-parses a string. `--transform-df` is mutually exclusive with
+the pre-existing `--transform-sql` (passing both is a `CliError`); the
+generated binary calls `dataframe_transform` with a closure built from the
+parsed `DfOp` chain instead of a literal SQL string passed to `sql_transform`.
+
+The five operations are deliberately a closed set, not a general expression
+language. `filter`'s comparison, for instance, only understands
+`eq|ne|gt|lt|ge|le` against one column and one literal - there's no attempt
+to parse `(a AND b) OR c`-style boolean expressions. Anything past what these
+five ops express already has an escape hatch: `--transform-sql` accepts
+arbitrary SQL against the same `batch` table. Building a second, smaller SQL
+parser just for `--transform-df` would duplicate that escape hatch instead of
+earning its own reason to exist.
+
+The generator itself (`schema-codegen`'s `struct_source`/`pipeline_source`,
+and the new `dataframe_ops` renderer) builds the emitted Rust via `syn`'s
+`quote!` macro - constructing a real token tree, then unparsing it with
+`prettyplease` - rather than `format!`/`push_str`-ing text together by hand.
+A malformed brace or identifier becomes impossible by construction instead
+of something only the existing `trybuild` compile-and-run test would catch.
+That compile-and-run test is still the thing actually proving correctness,
+though: `quote!` only guarantees the generated *skeleton* parses as valid
+Rust, not that the embedded column names or SQL make semantic sense - a typo
+in a column name still only surfaces at the schema-on-write validation the
+rest of this chapter already describes, or at `cargo build` if it breaks
+`ExactOrdered`.
+
+## A second guarantee: row-major and columnar batches can't be confused
+
+Everything above uses typestate in the classic sense - a builder whose type
+parameters track which stages are present. `pipeline::layout` proves the same
+underlying idea - let the compiler reject an invalid state instead of checking
+for it at runtime - works without any of that machinery, because Rust's own
+nominal typing is already strict enough on its own.
+
+The motivating gap: `transpose-cost.rs`, the benchmark that measures the cost
+of converting an Arrow columnar batch to row-major layout and back (see
+[the scale chapter](scale-and-parity.md) for the actual numbers), used to do
+that conversion with two private free functions living inside the benchmark
+itself. Nothing stopped a future caller - another benchmark, a real operator
+- from reimplementing that same row<->columnar round trip a second time,
+invisibly, inside its own body. The conversion was correct, but it wasn't
+*named* anywhere a reader could see it happening.
+
+`ColumnarBatch` and `RowBatch` fix that by being two plain structs:
+
+```rust,ignore
+pub struct ColumnarBatch { columns: Vec<Float64Array>, rows: usize }
+pub struct RowBatch { buffer: Vec<f64>, rows: usize, cols: usize }
+```
+
+No phantom types, no generic marker parameter - a `ColumnarBatch` and a
+`RowBatch` are already two unrelated types as far as `rustc` is concerned.
+`ColumnarBatch::to_row_major(&self) -> RowBatch` and
+`RowBatch::to_columnar(&self) -> ColumnarBatch` are the *only* functions
+that cross between them. Try to pass a `&RowBatch` to something that wants
+a `&ColumnarBatch` and the compiler rejects it before the program ever
+runs - the same class of error as calling `.build()` on a builder missing a
+stage, just enforced by two ordinary structs instead of a `Missing`/`Present`
+marker pair. A dedicated `trybuild` test
+(`crates/pipeline/tests/compile_fail/layout_type_mismatch.rs`) proves this is
+real, not just a design claim: it asserts the exact `rustc` error -
+`error[E0308]: mismatched types ... expected '&ColumnarBatch', found
+'&RowBatch'` - for exactly that mistake.
+
+**Scala bridge**: this is the same move Catalyst's SQL analyzer makes when it
+resolves a column reference once, up front, instead of trusting every
+downstream rule to check it again - a check that already exists gets
+surfaced at one call site instead of being something every caller has to
+remember to repeat. Here the "analyzer" is the Rust type checker itself, and
+the surfacing costs nothing beyond naming two structs.
+
+### Why `to_row_major`/`to_columnar` borrow instead of consume
+
+Both conversions take `&self`, not `self`. An earlier design had them consume
+the batch (`into_row_major(self) -> RowBatch`), which reads as the more
+idiomatic Rust shape for a one-way conversion - but it would have forced
+`transpose-cost.rs`'s own timed closure to `.clone()` the source columns on
+every repeated run just to satisfy ownership, since the benchmark calls
+`to_row_major` once per timed iteration and needs the original columns to
+still be there for the next one. Cloning inside the loop being timed would
+corrupt the exact measurement the benchmark exists to produce. Since the
+conversion only reads column values and never needs to own them, borrowing
+costs nothing and sidesteps the problem entirely.
+
+### Construction also rejects a malformed batch up front
+
+`try_new` on both types takes the row count (or row/column counts) as an
+explicit argument rather than inferring it from the data, and checks it
+immediately:
+
+```rust,ignore
+pub fn try_new(columns: Vec<Float64Array>, rows: usize) -> Result<Self, LayoutError>
+```
+
+A column shorter than the declared row count, or a row-major buffer whose
+length isn't `rows * cols`, is a `LayoutError` at construction - never a
+batch that silently disagrees with its own stated shape later. This is the
+same "parse, don't validate" instinct as the typestate builder above:
+catch the invalid state at the one place it's created, not at every place
+it's later read.
+
 ## Existing local and remote builders
 
 `crates/typestate` builds a pipeline (source → transform → sink) where an

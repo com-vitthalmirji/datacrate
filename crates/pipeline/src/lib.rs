@@ -17,6 +17,7 @@ pub use batch_contract::{BatchViolation, validate_ingest_batch};
 pub mod ballista_app;
 pub mod bounded;
 pub mod datafusion_query;
+pub mod layout;
 pub mod manifest;
 #[cfg(test)]
 pub(crate) mod minio_test_support;
