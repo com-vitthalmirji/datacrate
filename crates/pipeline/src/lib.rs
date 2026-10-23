@@ -22,6 +22,7 @@ pub mod manifest;
 #[cfg(test)]
 pub(crate) mod minio_test_support;
 pub mod object_store_io;
+pub mod simd_add;
 
 use std::fs::File;
 use std::path::Path;
