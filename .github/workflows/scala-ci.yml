@@ -165,13 +165,16 @@ jobs:
         if: always()
         run: docker compose -f docker-compose.spark-comet.yml down
 
-  # Phase E1 (docs/internals/experiment.md section 13): the real
-  # Scala-object <-> Arrow <-> Rust-kernel <-> Arrow <-> Scala-object round
-  # trip. Builds the Rust subprocess kernel (arrow-interop-kernel) and runs
-  # the Scala driver against it, reporting packing/export/kernel/
-  # reconstruction/total durations separately. Not the C Data Interface
-  # investigation (that is Phase E2, separately tracked, not started) and
-  # not Spark/Comet (comet-benchmark above) - a third, independent leg.
+  # Phase E1 + E3 (docs/internals/experiment.md section 13): the same
+  # Scala-object <-> Arrow <-> Rust-kernel <-> Arrow <-> Scala-object
+  # driver, run against two Rust kernel binaries that differ only in how
+  # they read the published IPC file - ordinary FileReader (E1) vs. the
+  # zero-copy mmap path from Phase D (E3, the plan's "separate-process
+  # alternative"). Reusing one driver for both legs means any difference
+  # is attributable only to the Rust-side reading mechanism, not
+  # incidental differences between two near-duplicate drivers. Not the C
+  # Data Interface investigation (Phase E2 - blocked, see the ledger) and
+  # not Spark/Comet (comet-benchmark above) - independent legs.
   arrow-interop:
     needs: changes
     runs-on: ubuntu-latest
@@ -189,10 +192,17 @@ jobs:
           java-version: "21"
       - uses: sbt/setup-sbt@v1
 
-      - name: Build the Rust subprocess kernel
-        run: cargo build --profile ci-release --locked -p pipeline --bin arrow-interop-kernel
+      - name: Build the Rust subprocess kernels
+        run: |
+          cargo build --profile ci-release --locked -p pipeline --bin arrow-interop-kernel
+          cargo build --profile ci-release --locked -p pipeline --bin arrow-interop-kernel-mmap
 
-      - name: Run the Scala driver against the built kernel
+      - name: Run the Scala driver (Phase E1, ordinary FileReader kernel)
         working-directory: scala/arrow-interop
         run: |
           sbt -batch "run --rows=500000 --kernel-binary=${{ github.workspace }}/target/ci-release/arrow-interop-kernel"
+
+      - name: Run the Scala driver (Phase E3, mmap kernel)
+        working-directory: scala/arrow-interop
+        run: |
+          sbt -batch "run --rows=500000 --kernel-binary=${{ github.workspace }}/target/ci-release/arrow-interop-kernel-mmap"

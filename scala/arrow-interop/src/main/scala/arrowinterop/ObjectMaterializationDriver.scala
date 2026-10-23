@@ -12,13 +12,22 @@ import org.apache.arrow.vector.types.pojo.{ArrowType, Field, Schema}
 
 import scala.sys.process.*
 
-/** Phase E1 (`docs/internals/experiment.md` section 13): measures the full
-  * Scala-object -> Arrow -> Rust-kernel -> Arrow -> Scala-object round
-  * trip, reporting five phases separately -- object-to-Arrow packing,
-  * boundary export, Rust kernel execution (a subprocess, not JNI -- see
-  * `arrow-interop-kernel`'s own doc comment for why), boundary import +
-  * object reconstruction, and total duration -- per the plan's explicit
-  * requirement that these never be collapsed into one number.
+/** Phase E1 and E3 (`docs/internals/experiment.md` section 13): measures
+  * the full Scala-object -> Arrow -> Rust-kernel -> Arrow -> Scala-object
+  * round trip, reporting five phases separately -- object-to-Arrow
+  * packing, boundary export, Rust kernel execution (a subprocess, not
+  * JNI -- see `arrow-interop-kernel`'s own doc comment for why), boundary
+  * import + object reconstruction, and total duration -- per the plan's
+  * explicit requirement that these never be collapsed into one number.
+  *
+  * This one driver serves both phases: `--kernel-binary` selects which
+  * Rust binary phase 3 invokes. Pointed at `arrow-interop-kernel` (an
+  * ordinary, non-mmap `FileReader`), this is Phase E1. Pointed at
+  * `arrow-interop-kernel-mmap` (Phase D's zero-copy mmap path), this is
+  * Phase E3's "separate-process alternative" shape. Reusing one driver
+  * for both means any difference between the two CI runs is attributable
+  * only to the Rust-side reading mechanism, not incidental differences
+  * between two near-duplicate drivers.
   *
   * Domain type: [[Order]], a four-field case class. Only `value` crosses
   * into Arrow/Rust; `id`/`placedAt`/`note` are carried through this
@@ -127,10 +136,14 @@ object ObjectMaterializationDriver:
     val outputPath = tempDir.resolve("output.arrow")
 
     // `sys.exit` terminates the JVM immediately, bypassing any pending
-    // `finally` -- so `allocator.close()` below must run to completion
-    // first. `failed` records the verdict; `sys.exit` is called exactly
-    // once, after the try/finally has already fully completed.
+    // `finally` -- so cleanup below must run to completion first. `failed`
+    // records the verdict; `sys.exit` is called exactly once, after
+    // everything else has already fully completed.
     var failed = false
+
+    def ms(nanos: Long): Double = nanos / 1e6
+
+    println(s"arrow-interop-e1: rows=$rows, kernel-binary=$kernelBinaryPath")
 
     try
       val totalStart = System.nanoTime()
@@ -140,42 +153,69 @@ object ObjectMaterializationDriver:
       val packStart = System.nanoTime()
       val root = packValueColumn(orders, allocator)
       val packDuration = System.nanoTime() - packStart
+      println(s"  1. object-to-Arrow packing:            ${ms(packDuration)} ms")
 
-      val exportStart = System.nanoTime()
-      writeIpc(root, inputPath)
-      root.close()
-      val exportDuration = System.nanoTime() - exportStart
-
-      val kernelStart = System.nanoTime()
-      runRustKernel(Path.of(kernelBinaryPath), inputPath, outputPath, k)
-      val kernelDuration = System.nanoTime() - kernelStart
-
-      val reconstructStart = System.nanoTime()
-      val reconstructed = readIpcAndReconstruct(outputPath, allocator, orders)
-      val reconstructDuration = System.nanoTime() - reconstructStart
-
-      val totalDuration = System.nanoTime() - totalStart
-
-      // wrapping_add is standard two's-complement wraparound; every
-      // `value` here is in 0 until 1_000_000, so plain Int addition never
-      // wraps and is a correct independent oracle -- it does not call,
-      // import, or reimplement the Rust kernel's own logic.
-      val expected = orders.map(order => order.copy(value = order.value + k))
-
-      if reconstructed != expected then
-        println("arrow-interop-e1: FAIL: reconstructed orders do not match the independent oracle")
-        failed = true
-      else
-        def ms(nanos: Long): Double = nanos / 1e6
-
-        println(s"arrow-interop-e1: rows=$rows")
-        println(s"  1. object-to-Arrow packing:            ${ms(packDuration)} ms")
+      // `root` is closed as soon as this phase's resource is no longer
+      // needed, regardless of what happens afterward -- an earlier
+      // version called `root.close()` as a plain sequential statement
+      // after `writeIpc`, which meant any exception from `writeIpc` left
+      // `root` permanently unclosed. That leak was real, but the actual
+      // exception was invisible: `allocator.close()` in the outer
+      // `finally` below threw its own `IllegalStateException` for the
+      // leaked buffer, and that *replaced* the original exception with no
+      // link back to it (Scala/Java `finally`-throws-over-try semantics),
+      // which is exactly what the first CI run showed -- a leak exception
+      // and no earlier stack trace at all.
+      try
+        val exportStart = System.nanoTime()
+        writeIpc(root, inputPath)
+        val exportDuration = System.nanoTime() - exportStart
         println(s"  2. boundary export (write IPC):        ${ms(exportDuration)} ms")
+
+        val kernelStart = System.nanoTime()
+        runRustKernel(Path.of(kernelBinaryPath), inputPath, outputPath, k)
+        val kernelDuration = System.nanoTime() - kernelStart
         println(s"  3. Rust kernel execution (subprocess):  ${ms(kernelDuration)} ms")
+
+        val reconstructStart = System.nanoTime()
+        val reconstructed = readIpcAndReconstruct(outputPath, allocator, orders)
+        val reconstructDuration = System.nanoTime() - reconstructStart
         println(s"  4. boundary import + reconstruction:    ${ms(reconstructDuration)} ms")
+
+        val totalDuration = System.nanoTime() - totalStart
         println(s"  5. total:                               ${ms(totalDuration)} ms")
-        println("arrow-interop-e1: PASS")
+
+        // wrapping_add is standard two's-complement wraparound; every
+        // `value` here is in 0 until 1_000_000, so plain Int addition
+        // never wraps and is a correct independent oracle -- it does not
+        // call, import, or reimplement the Rust kernel's own logic.
+        val expected = orders.map(order => order.copy(value = order.value + k))
+
+        if reconstructed != expected then
+          println("arrow-interop-e1: FAIL: reconstructed orders do not match the independent oracle")
+          failed = true
+        else
+          println("arrow-interop-e1: PASS")
+      finally
+        root.close()
+    catch
+      // Printed explicitly, before any cleanup below gets a chance to
+      // throw its own exception and mask this one -- see the comment
+      // above `root.close()`'s `finally` for why that masking previously
+      // hid the real failure.
+      case e: Throwable =>
+        System.err.println(s"arrow-interop-e1: FAIL: exception during run: $e")
+        e.printStackTrace()
+        failed = true
     finally
-      allocator.close()
+      try allocator.close()
+      catch
+        case e: Throwable =>
+          // Informational only -- never overrides `failed`, which was
+          // already decided above by the real run, not by allocator
+          // bookkeeping.
+          System.err.println(
+            s"arrow-interop-e1: allocator cleanup reported a problem (not overriding the result above): ${e.getMessage}"
+          )
 
     if failed then sys.exit(1)

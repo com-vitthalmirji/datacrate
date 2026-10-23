@@ -61,19 +61,14 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::ptr::NonNull;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use arrow::array::{Int32Array, RecordBatch};
-use arrow::buffer::Buffer;
 use arrow::datatypes::{DataType, Field, Schema};
-use arrow::ipc::convert::fb_to_schema;
-use arrow::ipc::reader::{FileDecoder, read_footer_length};
-use arrow::ipc::root_as_footer;
 use arrow::ipc::writer::FileWriter as IpcFileWriter;
 use clap::Parser;
-use memmap2::Mmap;
+use pipeline::ipc_mmap::mmap_decode_single_i32_column;
 use pipeline::simd_add::{wrapping_add_reference, wrapping_add_simd};
 use tempfile::tempdir;
 
@@ -149,85 +144,6 @@ fn write_and_publish(batch: &RecordBatch, output: &Path) {
         .expect("sync parent directory after rename");
 }
 
-/// Maps `path` read-only and decodes its single record batch with
-/// `FileDecoder`, mirroring `FileDecoder`'s own documented zero-copy
-/// example. Returns the decoded batch plus whether its one data buffer's
-/// pointer falls inside the mapped region (a real no-copy signal, not
-/// assumed).
-///
-/// # Safety
-///
-/// `memmap2::Mmap::map` requires the caller to guarantee the file is not
-/// concurrently modified for the mapping's lifetime. That guarantee holds
-/// here because this process wrote the file moments earlier and nothing
-/// else references it — see the module-level doc comment.
-fn mmap_decode(path: &Path) -> (RecordBatch, bool) {
-    let file = File::open(path).expect("open published IPC file");
-    let mmap = unsafe { Mmap::map(&file).expect("map published IPC file read-only") };
-    let base_ptr = mmap.as_ptr();
-    let base_len = mmap.len();
-
-    // SAFETY: `owner` (the `Arc<Mmap>` below) is kept alive for at least as
-    // long as any `Buffer` built from it, because every such `Buffer`
-    // stores a clone of that `Arc` as its `Deallocation::Custom` owner.
-    // `base_ptr`/`base_len` describe exactly the memory `mmap` owns.
-    let owner: Arc<dyn arrow::alloc::Allocation> = Arc::new(mmap);
-    let buffer = unsafe {
-        Buffer::from_custom_allocation(
-            NonNull::new(base_ptr as *mut u8).expect("mmap base pointer is non-null"),
-            base_len,
-            owner,
-        )
-    };
-
-    // Mirrors `FileDecoder`'s own doc example exactly (arrow_ipc::reader),
-    // substituting this mmap-backed `Buffer` for its `Buffer::from_vec`.
-    let trailer_start = buffer.len() - 10;
-    let footer_len = read_footer_length(
-        buffer[trailer_start..]
-            .try_into()
-            .expect("IPC file has a 10-byte trailer"),
-    )
-    .expect("valid IPC footer length");
-    let footer = root_as_footer(&buffer[trailer_start - footer_len..trailer_start])
-        .expect("valid IPC footer");
-    let decoded_schema = Arc::new(fb_to_schema(
-        footer.schema().expect("schema present in footer"),
-    ));
-    let mut decoder = FileDecoder::new(decoded_schema, footer.version());
-
-    for block in footer.dictionaries().iter().flatten() {
-        let block_len = block.bodyLength() as usize + block.metaDataLength() as usize;
-        let data = buffer.slice_with_length(block.offset() as _, block_len);
-        decoder
-            .read_dictionary(block, &data)
-            .expect("read dictionary block");
-    }
-
-    let batches = footer
-        .recordBatches()
-        .expect("record batches present in footer");
-    assert_eq!(batches.len(), 1, "exactly one batch was written");
-    let block = batches.get(0);
-    let block_len = block.bodyLength() as usize + block.metaDataLength() as usize;
-    let data = buffer.slice_with_length(block.offset() as _, block_len);
-    let decoded = decoder
-        .read_record_batch(block, &data)
-        .expect("decode record batch")
-        .expect("record batch is present, not a dictionary-only block");
-
-    let values = decoded
-        .column(0)
-        .as_any()
-        .downcast_ref::<Int32Array>()
-        .expect("value column is Int32");
-    let value_ptr = values.values().as_ptr() as usize;
-    let in_mapped_region =
-        value_ptr >= base_ptr as usize && value_ptr < base_ptr as usize + base_len;
-
-    (decoded, in_mapped_region)
-}
-
 fn run_kernel(decoded: &RecordBatch) -> Int32Array {
     let values = decoded
         .column(0)
@@ -264,7 +180,7 @@ fn main() -> ExitCode {
     let mut leg1_in_mapped_region = false;
     for _ in 0..args.runs {
         let start = Instant::now();
-        let (decoded, in_mapped_region) = mmap_decode(&already_published_path);
+        let (decoded, in_mapped_region) = mmap_decode_single_i32_column(&already_published_path);
         let result = run_kernel(&decoded);
         leg1_durations.push(start.elapsed());
         leg1_in_mapped_region = in_mapped_region;
@@ -283,7 +199,7 @@ fn main() -> ExitCode {
             .join(format!("write-through-publication-{run}.arrow"));
         let start = Instant::now();
         write_and_publish(&fixture, &path);
-        let (decoded, in_mapped_region) = mmap_decode(&path);
+        let (decoded, in_mapped_region) = mmap_decode_single_i32_column(&path);
         let result = run_kernel(&decoded);
         leg2_durations.push(start.elapsed());
         leg2_in_mapped_region = in_mapped_region;
