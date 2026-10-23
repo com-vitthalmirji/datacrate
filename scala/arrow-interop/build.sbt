@@ -21,5 +21,16 @@ lazy val root = project
     // the API, not an allocator.
     libraryDependencies += "org.apache.arrow" % "arrow-memory-netty" % "19.0.0",
     libraryDependencies += "org.scalameta" %% "munit" % "1.0.0" % Test,
-    testFrameworks += new TestFramework("munit.Framework")
+    testFrameworks += new TestFramework("munit.Framework"),
+    // arrow-memory-netty accesses java.nio's DirectByteBuffer/sun.misc.Unsafe
+    // internals via reflection; Java 9+'s module system blocks that unless
+    // these packages are explicitly opened. `fork := true` is required too —
+    // without it `run` executes in sbt's own already-started JVM, which
+    // ignores `javaOptions` entirely since the module system can't be
+    // reconfigured after startup.
+    Compile / run / fork := true,
+    Compile / run / javaOptions ++= Seq(
+      "--add-opens=java.base/java.nio=ALL-UNNAMED",
+      "--add-opens=java.base/java.lang=ALL-UNNAMED"
+    )
   )
