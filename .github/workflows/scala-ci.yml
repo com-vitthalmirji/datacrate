@@ -164,3 +164,35 @@ jobs:
       - name: Stop the Spark container
         if: always()
         run: docker compose -f docker-compose.spark-comet.yml down
+
+  # Phase E1 (docs/internals/experiment.md section 13): the real
+  # Scala-object <-> Arrow <-> Rust-kernel <-> Arrow <-> Scala-object round
+  # trip. Builds the Rust subprocess kernel (arrow-interop-kernel) and runs
+  # the Scala driver against it, reporting packing/export/kernel/
+  # reconstruction/total durations separately. Not the C Data Interface
+  # investigation (that is Phase E2, separately tracked, not started) and
+  # not Spark/Comet (comet-benchmark above) - a third, independent leg.
+  arrow-interop:
+    needs: changes
+    runs-on: ubuntu-latest
+    if: "needs.changes.outputs.scala == 'true' && !contains(github.event.head_commit.message, '[skip ci]') && !contains(github.event.head_commit.message, '[skip release]')"
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: sbt/setup-sbt@v1
+
+      - name: Build the Rust subprocess kernel
+        run: cargo build --profile ci-release --locked -p pipeline --bin arrow-interop-kernel
+
+      - name: Run the Scala driver against the built kernel
+        working-directory: scala/arrow-interop
+        run: |
+          sbt -batch "run --rows=500000 --kernel-binary=${{ github.workspace }}/target/ci-release/arrow-interop-kernel"
