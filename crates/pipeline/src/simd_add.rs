@@ -107,7 +107,7 @@ pub fn wrapping_add_simd(array: &Int32Array, k: i32) -> Result<Int32Array, SimdA
 
     #[cfg(target_arch = "x86_64")]
     {
-        if std::is_x86_64_feature_detected!("avx2") {
+        if is_x86_64_feature_detected!("avx2") {
             // SAFETY: AVX2 support was just confirmed on this CPU via
             // `is_x86_64_feature_detected!`, which is the documented
             // precondition for calling an `avx2`-gated function.
@@ -342,7 +342,7 @@ mod tests {
         unsafe { add_sse2(&values, &mut sse2_out, K) };
         assert_eq!(sse2_out, reference, "sse2 path");
 
-        if std::is_x86_64_feature_detected!("avx2") {
+        if is_x86_64_feature_detected!("avx2") {
             let mut avx2_out = vec![0i32; values.len()];
             // SAFETY: AVX2 support confirmed on this CPU above.
             unsafe { add_avx2(&values, &mut avx2_out, K) };
