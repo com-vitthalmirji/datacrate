@@ -106,7 +106,11 @@ mod tests {
     const K: i32 = 7;
 
     fn values_batch(values: Vec<i32>) -> RecordBatch {
-        let schema = Arc::new(Schema::new(vec![Field::new("value", DataType::Int32, false)]));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int32,
+            false,
+        )]));
         RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(values))])
             .expect("one non-null Int32 column")
     }
@@ -115,7 +119,8 @@ mod tests {
         let ctx = SessionContext::new();
         let batch = values_batch(values);
         let table = MemTable::try_new(batch.schema(), vec![vec![batch]]).expect("equal schemas");
-        ctx.register_table("t", Arc::new(table)).expect("register table");
+        ctx.register_table("t", Arc::new(table))
+            .expect("register table");
         ctx.register_udf(wrapping_add_simd_udf());
         ctx
     }
@@ -165,7 +170,9 @@ mod tests {
     async fn the_udf_call_appears_in_the_logical_plan() {
         let ctx = context_with_values(vec![1, 2, 3]).await;
         let explained = ctx
-            .sql(&format!("EXPLAIN SELECT wrapping_add_simd(value, CAST({K} AS INT)) FROM t"))
+            .sql(&format!(
+                "EXPLAIN SELECT wrapping_add_simd(value, CAST({K} AS INT)) FROM t"
+            ))
             .await
             .expect("plan the explain query")
             .collect()
@@ -214,6 +221,9 @@ mod tests {
             Ok(dataframe) => dataframe.collect().await.is_err(),
         };
 
-        assert!(failed, "a scalar first argument must be rejected, not coerced");
+        assert!(
+            failed,
+            "a scalar first argument must be rejected, not coerced"
+        );
     }
 }
