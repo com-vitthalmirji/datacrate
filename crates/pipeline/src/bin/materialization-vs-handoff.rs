@@ -84,9 +84,20 @@ fn generate_arrow_native_source(len: usize) -> Vec<i32> {
 
 /// Explicit materialization: copies `value` out of each row. Always a real
 /// copy — there is no existing contiguous `i32` buffer inside `Vec<SourceRow>`
-/// to reuse.
+/// to reuse. `black_box`-reads `id`/`placed_at`/`note` per row, matching
+/// `row-vs-columnar.rs`'s own convention for the same reason: a real
+/// row-shaped source makes the full stride resident in cache on every
+/// iteration (JVM-row-style locality cost), not just the one field this
+/// path actually needs, and leaving those fields truly unread would (a)
+/// misrepresent that cost and (b) fail `-D dead-code` outright, since
+/// nothing else in this binary reads them.
 fn materialize_value_column(rows: &[SourceRow]) -> Int32Array {
-    Int32Array::from_iter_values(rows.iter().map(|row| row.value))
+    Int32Array::from_iter_values(rows.iter().map(|row| {
+        black_box(row.id);
+        black_box(row.placed_at);
+        black_box(&row.note);
+        row.value
+    }))
 }
 
 /// Arrow-native handoff's conversion step: constructs the column directly
