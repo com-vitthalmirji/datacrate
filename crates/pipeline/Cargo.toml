@@ -27,6 +27,12 @@ duckdb = ["dep:duckdb"]
 # no new crate to the dependency graph.
 ahash = "0.8"
 arrow = "59"
+# Phase G (docs/internals/experiment.md section 15): one Flight producer,
+# one endpoint, one consumer. Already present in Cargo.lock transitively
+# via ballista at the identical 59.3.0 version, so this adds no new
+# version resolution. `default = []` for this crate needs nothing extra
+# for a do_get-only server (no Flight SQL).
+arrow-flight = "59.3.0"
 # Required to implement `datafusion::catalog::TableProvider`: the trait
 # itself is declared `#[async_trait]` by DataFusion, so any impl block needs
 # the same macro. Already resolved transitively via datafusion; this just
@@ -77,7 +83,17 @@ polars = { version = "0.55", default-features = false, features = ["lazy", "parq
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3.27.0"
-tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "net"] }
+# Phase G: wraps a bound `TcpListener` into the `Stream` shape
+# `tonic::transport::Server::serve_with_incoming` requires, so the actual
+# ephemeral port can be read before the server starts serving. Already
+# present in Cargo.lock transitively via tonic at 0.1.19.
+tokio-stream = { version = "0.1", default-features = false, features = ["net"] }
+# Phase G: the gRPC transport Arrow Flight runs over. Already present in
+# Cargo.lock transitively via ballista at 0.14.6, so this adds no new
+# version resolution. Default features (`router`, `transport`, `codegen`)
+# already cover `Server`/`Channel`, nothing extra needed.
+tonic = "0.14"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"

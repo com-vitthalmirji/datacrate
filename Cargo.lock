@@ -4470,6 +4470,7 @@ version = "0.1.0"
 dependencies = [
  "ahash",
  "arrow 59.3.0",
+ "arrow-flight",
  "async-trait",
  "ballista",
  "ballista-core",
@@ -4494,6 +4495,8 @@ dependencies = [
  "tempfile",
  "testcontainers",
  "tokio",
+ "tokio-stream",
+ "tonic",
  "tracing",
  "tracing-subscriber",
  "trybuild",
