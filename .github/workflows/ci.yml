@@ -1,8 +1,16 @@
 name: CI
 
+# pull_request only, deliberately: this used to also run on `push:
+# branches: [main]`, so every merge re-ran the full suite (release-build
+# alone takes over an hour) against a tree already validated by the PR's
+# own run under a different commit SHA (squash-merge mints a new SHA for
+# identical content) — full cost, zero new information. `main` now has
+# branch protection requiring `checks`/`test`/`release-build`/
+# `simd-assembly`/`semver-checks` to pass, with "require branches to be
+# up to date" on, so anything reaching `main` already has a passing run
+# against that exact tree. Direct pushes to `main` are blocked by the
+# same protection, not covered by a push trigger here.
 on:
-  push:
-    branches: [main]
   pull_request:
 
 concurrency:
