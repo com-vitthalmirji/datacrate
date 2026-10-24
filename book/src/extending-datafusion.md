@@ -295,6 +295,80 @@ visible to Catalyst. DataFusion's version makes the sync/async boundary a
 first-class part of the UDF trait hierarchy instead of something you bolt
 on around the side.
 
+## A hardware-dispatching `ScalarUDF`: the kernel itself picks its own instructions
+
+**Claim**: nothing about the `ScalarUDF` contract limits a function's body
+to ordinary scalar or array Rust. The body can genuinely dispatch to a
+different CPU instruction sequence depending on what the running
+processor supports - at runtime, not at compile time - and DataFusion's
+planner and executor never need to know.
+
+**Code**: `wrapping_add_simd_udf()` registers a function that wraps a
+constant onto every element of an `Int32` column, implemented three ways
+in its own module, kept deliberately separate from the DataFusion
+integration above it:
+
+```rust
+pub fn wrapping_add_simd(array: &Int32Array, k: i32) -> Result<Int32Array, SimdAddError> {
+    // dispatches to AVX2 if `is_x86_feature_detected!("avx2")` is true,
+    // otherwise SSE2 (always available on x86_64), with a scalar tail
+    // for the leftover elements that don't fill a whole vector
+}
+```
+
+The DataFusion-facing half (`invoke_wrapping_add_simd`) does nothing but
+check argument shapes and call that function - it has no idea the kernel
+underneath it is choosing between two different instruction sets at
+runtime. That separation is deliberate: the kernel module has no
+DataFusion dependency at all, and the DataFusion module has no
+`std::arch` code in it. A change to one cannot silently break the other's
+own correctness.
+
+**The correctness bar this needs, that a plain scalar UDF doesn't**:
+three implementations of the same operation - a reference scalar loop, an
+ordinary-Rust optimized version, and the explicit-SIMD version - are
+checked against each other, and then the *compiled instructions
+themselves* are checked, not just the output:
+
+```console
+$ cargo test -p pipeline wrapping_add -- --nocapture
+```
+
+Disassembling the release binary confirms both instruction sequences
+actually exist - a 256-bit `vpaddd` (AVX2, 8 lanes at once) and a 128-bit
+`paddd` (SSE2, 4 lanes). Output correctness alone can't tell you whether
+a "SIMD" function actually compiled to SIMD instructions or quietly fell
+back to a scalar loop that happens to produce the same numbers.
+
+**The finding worth keeping, because it cuts against the obvious
+assumption**: the plain, ordinary-Rust implementation - no intrinsics, no
+`unsafe`, just an iterator chain - also compiles down to SSE2 instructions
+on this toolchain, unprompted. LLVM autovectorizes it on its own. Explicit
+SIMD earns its keep here only for reaching a *wider* vector (AVX2, 8 lanes)
+than the compiler chooses by default, not for "being vectorized" at all -
+the honest baseline for "did explicit SIMD help" is already-vectorized
+ordinary Rust, not naive scalar code.
+
+**What this UDF does not claim**: nullable input is rejected outright, not
+handled - this kernel's scope stops at plain `Int32Array`, deliberately,
+rather than quietly guessing at null semantics. And this specific UDF
+never runs through Comet; Comet's own native-function registry only
+accepts its own already-compiled built-in functions by a fixed internal
+name, not an arbitrary new kernel supplied from outside Comet's source.
+What this UDF proves is the DataFusion-UDF integration path for an
+explicit-SIMD kernel - not that the same kernel can be substituted into
+an accelerated Spark job.
+
+**Scala/Spark bridge**: a Spark UDF's body is ordinary JVM bytecode; the
+JIT may or may not vectorize it, and there is no equivalent to
+`#[target_feature(enable = "avx2")]` that lets a UDF author *require* a
+specific instruction set rather than hope the JIT reaches for one. The
+dispatch-at-runtime shape here - check what the CPU supports, branch to
+matching code - has no clean JVM analogue at the bytecode level at all;
+the closest a JVM gets is vendor-specific native libraries called through
+JNI, which is a heavier, more operationally involved mechanism than a
+plain Rust function picking its own instructions inline.
+
 ## A custom `OptimizerRule`: encoding a decision no generic rule could know
 
 **Claim**: DataFusion's logical-plan optimizer isn't a fixed pipeline you

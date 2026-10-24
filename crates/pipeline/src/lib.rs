@@ -17,11 +17,14 @@ pub use batch_contract::{BatchViolation, validate_ingest_batch};
 pub mod ballista_app;
 pub mod bounded;
 pub mod datafusion_query;
+pub mod ipc_mmap;
 pub mod layout;
 pub mod manifest;
 #[cfg(test)]
 pub(crate) mod minio_test_support;
 pub mod object_store_io;
+pub mod simd_add;
+pub mod simd_add_udf;
 
 use std::fs::File;
 use std::path::Path;
