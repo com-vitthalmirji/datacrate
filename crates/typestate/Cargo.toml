@@ -10,7 +10,7 @@ workspace = true
 
 [dependencies]
 contracts = { version = "0.2.0", path = "../contracts", features = ["arrow-validation"] }
-arrow = "59"
+arrow = "60"
 # Matches pipeline's and connectors-derive's pin, so a SessionContext built
 # by either crate's register_* helpers can be passed into sql_transform.
 datafusion = "55.1.0"
