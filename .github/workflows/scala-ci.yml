@@ -1,8 +1,10 @@
 name: Scala CI
 
+# pull_request only — see ci.yml's `on:` comment for why the push:main
+# trigger was removed. Branch protection on `main` requires `scala-build`/
+# `comet-benchmark`/`arrow-interop` to pass, so re-running them on the
+# merge commit would be retesting a tree already proven green.
 on:
-  push:
-    branches: [main]
   pull_request:
 
 concurrency:
@@ -30,7 +32,12 @@ jobs:
               - 'scala/**'
               - '.github/workflows/scala-ci.yml'
 
-  build:
+  # Named `scala-build`, not `build`: `docs.yml` has its own job literally
+  # named `build`, and branch-protection required-status-checks match by
+  # name only, with no way to disambiguate same-named jobs across
+  # workflows — a collision here would let either job's success silently
+  # satisfy the other's requirement.
+  scala-build:
     needs: changes
     runs-on: ubuntu-latest
     if: "needs.changes.outputs.scala == 'true' && !contains(github.event.head_commit.message, '[skip ci]') && !contains(github.event.head_commit.message, '[skip release]')"
