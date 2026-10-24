@@ -40,7 +40,7 @@ use clap::Parser;
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::basic::{Compression, ZstdLevel};
-use pipeline::{read_parquet, write_parquet};
+use pipeline::write_parquet;
 use tempfile::tempdir;
 
 #[derive(Parser)]
@@ -165,9 +165,31 @@ fn write_parquet_variant(batch: &RecordBatch, path: &Path, compression: Compress
     start.elapsed()
 }
 
+/// `pipeline::read_parquet` is *not* a generic Parquet reader — it
+/// validates every batch against this crate's own fixed internal
+/// `schema()` (`id`/`name`/`note`, matching `fixtures/m3/orders.csv`),
+/// which is a different shape than this binary's own four-column
+/// fixture. The first real CI execution of this binary (never run before
+/// — only compiled — until `ee7db0a` added an execution step) caught
+/// this: `read_parquet` panicked with a schema-mismatch error reporting
+/// *its* expected schema, not this file's. Fixed by reading the full
+/// batch directly here, against this binary's own known schema, instead
+/// of reusing a helper that was never actually generic.
+fn read_full_batch(path: &Path) -> RecordBatch {
+    let file = File::open(path).expect("open Parquet file");
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+        .expect("construct Parquet reader builder")
+        .build()
+        .expect("build Parquet reader");
+    let batches: Vec<RecordBatch> = reader
+        .collect::<Result<_, _>>()
+        .expect("decode Parquet batches");
+    arrow::compute::concat_batches(&schema(), &batches).expect("concatenate batches")
+}
+
 fn read_parquet_full_scan(path: &Path) -> (Duration, f64) {
     let start = Instant::now();
-    let batch = read_parquet(path).expect("read Parquet file");
+    let batch = read_full_batch(path);
     let amounts = batch
         .column(AMOUNT_COLUMN_INDEX)
         .as_any()
