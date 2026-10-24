@@ -95,24 +95,32 @@ jobs:
       # executed-and-correct, not compiled-only.
       - name: Run and verify Phase B/C/D/F/G experiment binaries
         run: |
-          set -e
           mkdir -p experiment-output
+          failed=""
           run() {
             name="$1"
             shift
             echo "=== $name ==="
             if ! "./target/ci-release/$name" "$@" > "experiment-output/$name.log" 2>&1; then
               echo "FAILED: $name (see experiment-output/$name.log)"
-              cat "experiment-output/$name.log"
-              exit 1
+              failed="$failed $name"
             fi
             cat "experiment-output/$name.log"
           }
+          # Deliberately not `set -e`: a single CI round trip on this job
+          # already costs tens of minutes (fat/thin-LTO linking across
+          # arrow/datafusion/tonic/ballista) — running every binary and
+          # reporting every failure together is far cheaper than fixing
+          # one, waiting another full build, and finding the next.
           run materialization-vs-handoff --len 500000 --runs 2
           run ipc-vs-parquet --rows 500000
           run mmap-ipc-handoff --len 500000 --runs 2
           run encodings-and-kernel
           run flight-orders-handoff
+          if [ -n "$failed" ]; then
+            echo "FAILED binaries:$failed"
+            exit 1
+          fi
       - name: Upload experiment binary output
         if: always()
         uses: actions/upload-artifact@v4
