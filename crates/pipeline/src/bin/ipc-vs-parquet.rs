@@ -199,26 +199,39 @@ fn read_parquet_full_scan(path: &Path) -> (Duration, f64) {
     (start.elapsed(), result)
 }
 
+/// `write_parquet` writes `batch` as a single *row group*, but
+/// `ParquetRecordBatchReaderBuilder::build()`'s decoder still splits that
+/// one row group back into multiple `RecordBatch`es of its own default
+/// size (independent of how many rows the row group holds) — so a single
+/// `reader.next()` call here silently returned only the first chunk,
+/// undercounting everything after it. The IPC legs' own single
+/// `reader.next()` call happens to be safe for a different reason
+/// (`write_ipc` always round-trips one `write()` call as exactly one
+/// message, with no internal chunking), which is exactly why this bug
+/// surfaced only here and only on real CI execution — `cargo test`/clippy
+/// have no way to catch a result that is merely *numerically* wrong.
+/// Fixed by summing across every batch the reader actually produces.
 fn read_parquet_narrow_projection(path: &Path) -> (Duration, f64) {
     let start = Instant::now();
     let file = File::open(path).expect("open Parquet file");
     let builder =
         ParquetRecordBatchReaderBuilder::try_new(file).expect("construct Parquet reader builder");
     let projection = ProjectionMask::leaves(builder.parquet_schema(), [AMOUNT_COLUMN_INDEX]);
-    let mut reader = builder
+    let reader = builder
         .with_projection(projection)
         .build()
         .expect("build projected Parquet reader");
-    let batch = reader
-        .next()
-        .expect("one row group was written")
-        .expect("decode Parquet batch");
-    let amounts = batch
-        .column(0)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .expect("projected column is Float64");
-    let result = sum_amount_over_threshold(amounts);
+
+    let mut result = 0.0;
+    for batch in reader {
+        let batch = batch.expect("decode Parquet batch");
+        let amounts = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("projected column is Float64");
+        result += sum_amount_over_threshold(amounts);
+    }
     (start.elapsed(), result)
 }
 
