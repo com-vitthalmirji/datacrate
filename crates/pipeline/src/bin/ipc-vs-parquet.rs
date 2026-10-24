@@ -112,6 +112,14 @@ fn sum_amount_over_threshold(amounts: &Float64Array) -> f64 {
     sum(filtered).unwrap_or(0.0)
 }
 
+/// `f64` addition is not associative (rust-skills: never compare floats
+/// with `==`), so two sums over the same logical values can legitimately
+/// differ in the last few bits depending on reduction order. Used both
+/// by `main`'s own cross-format check and by the regression test below.
+fn approx_eq(a: f64, b: f64) -> bool {
+    (a - b).abs() <= a.abs().max(b.abs()).max(1.0) * 1e-9
+}
+
 fn write_ipc(batch: &RecordBatch, path: &Path) -> Duration {
     let start = Instant::now();
     let file = File::create(path).expect("create IPC file");
@@ -312,9 +320,6 @@ fn main() -> ExitCode {
         println!("result ({label}): {value}");
     }
 
-    fn approx_eq(a: f64, b: f64) -> bool {
-        (a - b).abs() <= a.abs().max(b.abs()).max(1.0) * 1e-9
-    }
     let reference = ipc_full_scan.1;
     if results
         .iter()
@@ -364,4 +369,61 @@ fn main() -> ExitCode {
     );
 
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use parquet::arrow::arrow_reader::DEFAULT_BATCH_SIZE;
+
+    /// Regression test for a real bug found only by actually running this
+    /// binary in CI (compiling and linting it caught nothing):
+    /// `read_parquet_narrow_projection` called the projected reader's
+    /// `.next()` exactly once, silently discarding every batch after the
+    /// first. `ParquetRecordBatchReaderBuilder::build()` decodes a row
+    /// group back into multiple `RecordBatch`es of its own default size
+    /// (`DEFAULT_BATCH_SIZE = 1024`) regardless of how many rows the row
+    /// group holds, so any row count past that threshold already exposed
+    /// the bug — this test uses 2,500 rows specifically so the fix is
+    /// checked by a fast unit test instead of only by the slow, full
+    /// binary execution this bug first surfaced in.
+    #[test]
+    fn narrow_projection_sums_every_decoded_batch_not_just_the_first() {
+        let rows = 2_500;
+        let batch = generate_batch(rows);
+        let dir = tempdir().expect("create temp directory");
+        let path = dir.path().join("regression.parquet");
+        write_parquet(&batch, &path, Compression::UNCOMPRESSED).expect("write parquet file");
+
+        // Confirms the fixture actually forces multiple decoded batches —
+        // without this, the test would pass even with the original bug,
+        // since a single-batch file never exercises the discarded-batches
+        // code path at all.
+        let probe_file = File::open(&path).expect("open parquet file for the batch-count probe");
+        let probe_builder = ParquetRecordBatchReaderBuilder::try_new(probe_file)
+            .expect("construct probe reader builder");
+        let probe_reader = probe_builder.build().expect("build probe reader");
+        let decoded_batch_count = probe_reader.count();
+        assert!(
+            decoded_batch_count > 1,
+            "test fixture of {rows} rows must decode into more than one \
+             batch at the default batch size ({DEFAULT_BATCH_SIZE}) for \
+             this regression to mean anything; got {decoded_batch_count}"
+        );
+
+        let (_, narrow_result) = read_parquet_narrow_projection(&path);
+        let amounts = batch
+            .column(AMOUNT_COLUMN_INDEX)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("amount column is Float64");
+        let expected = sum_amount_over_threshold(amounts);
+
+        assert!(
+            approx_eq(narrow_result, expected),
+            "narrow projection summed {narrow_result}, expected {expected} \
+             (within tolerance) — a result this far off means batches \
+             after the first were silently dropped again"
+        );
+    }
 }

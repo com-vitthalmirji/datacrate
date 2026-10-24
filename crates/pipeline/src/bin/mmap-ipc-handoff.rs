@@ -180,7 +180,16 @@ fn main() -> ExitCode {
     let mut leg1_in_mapped_region = false;
     for _ in 0..args.runs {
         let start = Instant::now();
-        let (decoded, in_mapped_region) = mmap_decode_single_i32_column(&already_published_path);
+        // SAFETY: `write_and_publish` completed before this loop started
+        // and nothing in this process (or, for a standalone experiment
+        // binary with no other actors, outside it) writes to
+        // `already_published_path` again afterward. `decoded` — the only
+        // owner of the mapped buffer this call produces — is dropped at
+        // the end of this loop body (its one use, `run_kernel`, allocates
+        // a fresh, independent result array), so no mapped buffer from
+        // one iteration survives into the next.
+        let (decoded, in_mapped_region) =
+            unsafe { mmap_decode_single_i32_column(&already_published_path) };
         let result = run_kernel(&decoded);
         leg1_durations.push(start.elapsed());
         leg1_in_mapped_region = in_mapped_region;
@@ -199,7 +208,12 @@ fn main() -> ExitCode {
             .join(format!("write-through-publication-{run}.arrow"));
         let start = Instant::now();
         write_and_publish(&fixture, &path);
-        let (decoded, in_mapped_region) = mmap_decode_single_i32_column(&path);
+        // SAFETY: `path` is unique to this iteration (`write-through-
+        // publication-{run}.arrow`), its write just completed via
+        // `write_and_publish` above, and nothing writes to it again
+        // before `decoded` (the mapped buffer's only owner) is dropped
+        // at the end of this loop body.
+        let (decoded, in_mapped_region) = unsafe { mmap_decode_single_i32_column(&path) };
         let result = run_kernel(&decoded);
         leg2_durations.push(start.elapsed());
         leg2_in_mapped_region = in_mapped_region;

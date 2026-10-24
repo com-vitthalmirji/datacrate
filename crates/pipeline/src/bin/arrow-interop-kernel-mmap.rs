@@ -54,8 +54,15 @@ struct Args {
 fn main() -> ExitCode {
     let args = Args::parse();
 
+    // SAFETY: `args.input` is written once by the Scala driver
+    // (`ObjectMaterializationDriver.scala`'s `writeIpc`) before this
+    // subprocess is spawned via a blocking call that waits for this
+    // process to exit before doing anything else — the driver does not
+    // touch this file again until after this process has already exited,
+    // so nothing can modify it while `batch` (the sole owner of the
+    // mapped buffer, live for the rest of this function) is alive.
     let (batch, in_mapped_region) =
-        mmap_decode_single_i32_column(std::path::Path::new(&args.input));
+        unsafe { mmap_decode_single_i32_column(std::path::Path::new(&args.input)) };
     eprintln!(
         "arrow-interop-kernel-mmap: decoded value buffer pointer inside the mapped region (no copy occurred): {in_mapped_region}"
     );
