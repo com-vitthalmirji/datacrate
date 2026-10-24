@@ -272,13 +272,44 @@ fn main() -> ExitCode {
     let parquet_zstd_full_scan = read_parquet_full_scan(&parquet_zstd_path);
     let parquet_zstd_narrow = read_parquet_narrow_projection(&parquet_zstd_path);
 
-    if ipc_full_scan.1 != ipc_narrow.1
-        || ipc_full_scan.1 != parquet_uncompressed_full_scan.1
-        || ipc_full_scan.1 != parquet_uncompressed_narrow.1
-        || ipc_full_scan.1 != parquet_zstd_full_scan.1
-        || ipc_full_scan.1 != parquet_zstd_narrow.1
+    // `f64` summation is not associative (rust-skills: never compare floats
+    // with `==`) — full-scan and narrow-projection reads can decode the
+    // same logical values into differently-chunked buffers, so Arrow's
+    // `sum()` kernel's internal SIMD reduction can legitimately add them in
+    // a different order and land on a result that differs in the last few
+    // bits, despite being logically correct. An exact `!=` chain here
+    // genuinely failed on real CI execution (the first time this binary was
+    // ever run) for exactly this reason. Fixed with a relative tolerance,
+    // and every value is printed before the check runs — a silent early
+    // return on mismatch previously meant a failure produced no diagnostic
+    // output at all, costing a second full CI round trip just to see the
+    // numbers.
+    let results = [
+        ("ipc full scan", ipc_full_scan.1),
+        ("ipc narrow", ipc_narrow.1),
+        (
+            "parquet uncompressed full scan",
+            parquet_uncompressed_full_scan.1,
+        ),
+        ("parquet uncompressed narrow", parquet_uncompressed_narrow.1),
+        ("parquet zstd full scan", parquet_zstd_full_scan.1),
+        ("parquet zstd narrow", parquet_zstd_narrow.1),
+    ];
+    for (label, value) in &results {
+        println!("result ({label}): {value}");
+    }
+
+    fn approx_eq(a: f64, b: f64) -> bool {
+        (a - b).abs() <= a.abs().max(b.abs()).max(1.0) * 1e-9
+    }
+    let reference = ipc_full_scan.1;
+    if results
+        .iter()
+        .any(|(_, value)| !approx_eq(*value, reference))
     {
-        eprintln!("ipc-vs-parquet: result mismatch between formats or scan modes");
+        eprintln!(
+            "ipc-vs-parquet: result mismatch between formats or scan modes (see values printed above)"
+        );
         return ExitCode::FAILURE;
     }
 
