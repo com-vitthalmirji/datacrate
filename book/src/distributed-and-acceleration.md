@@ -252,6 +252,75 @@ The plan Spark builds doesn't change; what changes is which engine executes
 the operators underneath it - Comet swaps in, Spark's driver and shuffle
 service never leave the picture.
 
+## From a manual query to a real application CI runs itself
+
+Everything above runs Spark's `spark-sql` command-line tool against a
+query file - useful for a quick comparison, but it's not how a real
+Spark job is built, and until this codebase gained a second piece, no
+CI job anywhere in this repository had ever started the Spark+Comet
+Docker stack at all; the comparison only ever ran on a developer's own
+machine.
+
+`scala/comet-benchmark`'s `OrdersAggregateDriver` closes both gaps with
+one real Scala application - a `SparkSession`, not a SQL text file piped
+into a CLI:
+
+```scala
+val spark = SparkSession.builder().appName("comet-benchmark-orders-aggregate").getOrCreate()
+val df = spark.read.parquet(args.output)
+df.createOrReplaceTempView("orders")
+val result = spark.sql(
+  "SELECT COUNT(*) AS order_count, SUM(amount) AS total_amount FROM orders WHERE amount > 50.00"
+)
+```
+
+The same compiled driver runs the comparison's two legs as two separate
+`spark-submit` invocations against the same generated fixture - one
+plain, one with the Comet jar and its shuffle manager on the classpath -
+so nothing about the comparison depends on config state leaking between
+runs inside one long-lived process. A plain Scala computation (no Spark
+involved at all) checks the result independently, the same discipline
+every other proof point in this book already follows.
+
+A CI workflow now runs this driver's two invocations against a real,
+ephemeral Spark+Comet container on every change to this code - the first
+time any workflow in this repository has provisioned Docker, Spark, or
+Comet, rather than leaving that step to a developer's own laptop.
+
+### Reading the executed plan, not trusting the config flags
+
+The claim earlier in this chapter - "Comet substitutes DataFusion's
+native operators for Spark's JVM ones where it can" - is now backed by
+something stronger than "the Comet jar was on the classpath and nothing
+crashed." The accelerated run's own executed plan is inspected directly:
+
+```text
+CometHashAggregate [count#11L, sum#12, isEmpty#13], [Final], [count(1), sum(amount#1)]
++- CometExchange SinglePartition, ENSURE_REQUIREMENTS, CometNativeShuffle
+   +- CometHashAggregate [amount#1], [Partial], [partial_count(1), partial_sum(amount#1)]
+      +- CometFilter [amount#1], (isnotnull(amount#1) AND (amount#1 > 50.00))
+         +- CometNativeScan parquet [amount#1] ...
+```
+
+Every operator in that plan - scan, filter, partial aggregate, the
+exchange stage between partial and final aggregate, and the final
+aggregate - carries a `Comet`-prefixed name. There is no row-conversion
+operator anywhere in it. The plain (non-Comet) run's plan, over the exact
+same query and fixture, contains zero `Comet`-prefixed operators. That
+contrast - not a timing number - is the direct evidence that the
+substitution actually happened for this query, rather than being
+inferred from the presence of a configuration flag that might silently
+have had no effect.
+
+**The honest limit of this specific proof**: it runs at a small,
+CI-appropriate row count on a shared CI runner, specifically to prove
+the mechanism and keep the check fast and reliable - it is a correctness
+and plan-shape proof, not a new performance number, and it does not
+replace the wall-clock comparison already recorded earlier in this
+chapter at realistic scale. The two are deliberately kept separate:
+proving the substitution *happens* and measuring how much it's *worth*
+are different claims, checked by different runs.
+
 ## Why the three never appear side by side as a ranking
 
 Putting Ballista's elapsed time and Comet's elapsed time in one table,

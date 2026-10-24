@@ -85,6 +85,103 @@ jobs:
       # OOM-killed the runner; thin LTO avoids that without serializing jobs.
       - run: cargo build --profile ci-release --locked
 
+      # Phases B/C/D/F/G (docs/internals/experiment.md): `cargo test` above
+      # only compiles these binaries (none has a #[test] wrapper, so no
+      # test harness ever runs their `main()`), and `cargo build` only
+      # links them. Neither proves the binaries' own internal correctness
+      # checks (each returns `ExitCode::FAILURE` on a result mismatch)
+      # ever ran. This step closes that gap: it actually executes each one
+      # and fails the job on a non-zero exit, so "CI-passed" means
+      # executed-and-correct, not compiled-only.
+      - name: Run and verify Phase B/C/D/F/G experiment binaries
+        run: |
+          mkdir -p experiment-output
+          failed=""
+          run() {
+            name="$1"
+            shift
+            echo "=== $name ==="
+            if ! "./target/ci-release/$name" "$@" > "experiment-output/$name.log" 2>&1; then
+              echo "FAILED: $name (see experiment-output/$name.log)"
+              failed="$failed $name"
+            fi
+            cat "experiment-output/$name.log"
+          }
+          # Deliberately not `set -e`: a single CI round trip on this job
+          # already costs tens of minutes (fat/thin-LTO linking across
+          # arrow/datafusion/tonic/ballista) — running every binary and
+          # reporting every failure together is far cheaper than fixing
+          # one, waiting another full build, and finding the next.
+          run materialization-vs-handoff --len 500000 --runs 2
+          run ipc-vs-parquet --rows 500000
+          run mmap-ipc-handoff --len 500000 --runs 2
+          run encodings-and-kernel
+          run flight-orders-handoff
+          if [ -n "$failed" ]; then
+            echo "FAILED binaries:$failed"
+            exit 1
+          fi
+      - name: Upload experiment binary output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-build-experiment-output
+          path: experiment-output/
+          retention-days: 30
+          if-no-files-found: ignore
+
+  # Codegen evidence for crates/pipeline/src/simd_add.rs
+  # (docs/internals/experiment.md, Phase A acceptance: "Assembly identifies
+  # the vectorized loop"). `checks`/`test` cover correctness; this is the
+  # one acceptance criterion they do not already verify — whether the
+  # explicit-SIMD functions actually compile to the intended instructions,
+  # not just a Rust loop that happens to produce correct output. This is
+  # codegen evidence only: `#[target_feature(enable = "avx2")]` forces LLVM
+  # to emit AVX2 instructions in that function's body independent of this
+  # runner's physical CPU, so a green check here does not, by itself, prove
+  # the AVX2 path was actually executed at runtime — only that both the
+  # SSE2 and AVX2 instruction sequences exist in the compiled binary.
+  simd-assembly:
+    needs: checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y binutils
+      - run: cargo build --profile ci-release --locked -p pipeline --bin simd-wrapping-add
+      - name: Disassemble the release binary
+        run: objdump -d --no-show-raw-insn target/ci-release/simd-wrapping-add > simd-wrapping-add.asm
+      - name: Confirm AVX2 codegen (add_avx2, 256-bit ymm registers)
+        run: |
+          echo "Searching for a 32-bit-lane AVX2 add over ymm registers:"
+          grep -E 'vpaddd[[:space:]].*%ymm' simd-wrapping-add.asm | head -5
+          grep -cE 'vpaddd[[:space:]].*%ymm' simd-wrapping-add.asm
+      - name: Confirm SSE2 codegen (add_sse2, 128-bit xmm registers)
+        run: |
+          echo "Searching for a 32-bit-lane SSE2 add over xmm registers:"
+          echo "Note: this instruction may also originate from LLVM"
+          echo "autovectorizing wrapping_add_scalar, not only from add_sse2 —"
+          echo "a separate, not yet automated, open question the plan asks"
+          echo "to state explicitly rather than assume either way."
+          grep -E 'paddd[[:space:]].*%xmm' simd-wrapping-add.asm | head -5
+          grep -cE 'paddd[[:space:]].*%xmm' simd-wrapping-add.asm
+      - name: Run the experiment (real x86_64 execution, shared-runner timing)
+        run: |
+          echo "Raw timings below are from a shared GitHub-hosted runner." \
+            "They are collected as evidence of correct execution, not a" \
+            "performance claim (plan section 16)."
+          ./target/ci-release/simd-wrapping-add --len 5000000 --runs 5 | tee simd-wrapping-add.out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: simd-wrapping-add-evidence
+          path: |
+            simd-wrapping-add.asm
+            simd-wrapping-add.out
+          retention-days: 30
+
   semver-checks:
     needs: checks
     if: "github.event_name == 'pull_request'"
