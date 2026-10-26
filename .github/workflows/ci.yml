@@ -39,6 +39,7 @@ jobs:
           filters: |
             rust:
               - 'crates/**'
+              - 'compat/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
