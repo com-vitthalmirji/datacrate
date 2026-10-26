@@ -417,7 +417,7 @@ dependencies = [
  "arrow-select 59.3.0",
  "flatbuffers",
  "lz4_flex",
- "zstd 0.13.3",
+ "zstd 0.13.3+datacrate.1",
 ]
 
 [[package]]
@@ -1384,7 +1384,7 @@ dependencies = [
  "liblzma",
  "memchr",
  "zstd 0.14.3",
- "zstd-safe 8.2.0",
+ "zstd-safe",
 ]
 
 [[package]]
@@ -1846,7 +1846,7 @@ dependencies = [
  "tokio",
  "url",
  "uuid",
- "zstd 0.13.3",
+ "zstd 0.13.3+datacrate.1",
 ]
 
 [[package]]
@@ -1970,7 +1970,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "url",
- "zstd 0.13.3",
+ "zstd 0.13.3+datacrate.1",
 ]
 
 [[package]]
@@ -4362,7 +4362,7 @@ dependencies = [
  "snap",
  "tokio",
  "twox-hash",
- "zstd 0.13.3",
+ "zstd 0.13.3+datacrate.1",
 ]
 
 [[package]]
@@ -4471,6 +4471,7 @@ dependencies = [
  "ahash",
  "arrow 59.3.0",
  "arrow-flight",
+ "arrow-ipc",
  "async-trait",
  "ballista",
  "ballista-core",
@@ -4501,6 +4502,7 @@ dependencies = [
  "tracing-subscriber",
  "trybuild",
  "url",
+ "zstd 0.13.3+datacrate.1",
 ]
 
 [[package]]
@@ -4573,7 +4575,7 @@ dependencies = [
  "streaming-iterator",
  "strum_macros 0.28.0",
  "version_check",
- "zstd 0.13.3",
+ "zstd 0.13.3+datacrate.1",
 ]
 
 [[package]]
@@ -4950,7 +4952,7 @@ dependencies = [
  "simdutf8",
  "snap",
  "streaming-decompression",
- "zstd 0.13.3",
+ "zstd 0.13.3+datacrate.1",
 ]
 
 [[package]]
@@ -7801,11 +7803,9 @@ dependencies = [
 
 [[package]]
 name = "zstd"
-version = "0.13.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
+version = "0.13.3+datacrate.1"
 dependencies = [
- "zstd-safe 7.3.0",
+ "zstd 0.14.3",
 ]
 
 [[package]]
@@ -7814,16 +7814,7 @@ version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db3ae9bf90af6e40197bef767eeefc46ad6397420fe873830bd85e5fbbfb3c70"
 dependencies = [
- "zstd-safe 8.2.0",
-]
-
-[[package]]
-name = "zstd-safe"
-version = "7.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64d80649ab6db9d9f6f9c80a40becd948eda4714a0a5ac8c4d157a32231c7882"
-dependencies = [
- "zstd-sys",
+ "zstd-safe",
 ]
 
 [[package]]

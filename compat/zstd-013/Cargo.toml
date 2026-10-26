@@ -1,0 +1,28 @@
+[package]
+name = "zstd"
+version = "0.13.3+datacrate.1"
+edition = "2024"
+license = "MIT"
+publish = false
+build = false
+description = "Local zstd 0.13 compatibility facade over patched upstream zstd"
+
+[dependencies]
+zstd-patched = { package = "zstd", version = "=0.14.3", default-features = false }
+
+[features]
+default = ["legacy", "arrays", "zdict_builder"]
+arrays = ["zstd-patched/arrays"]
+bindgen = ["zstd-patched/bindgen"]
+debug = ["zstd-patched/debug"]
+doc-cfg = ["zstd-patched/doc-cfg"]
+experimental = ["zstd-patched/experimental"]
+fat-lto = ["zstd-patched/fat-lto"]
+legacy = ["zstd-patched/legacy"]
+no_asm = ["zstd-patched/no_asm"]
+pkg-config = ["zstd-patched/pkg-config"]
+thin = ["zstd-patched/thin"]
+thin-lto = ["zstd-patched/thin-lto"]
+wasm = ["zstd-patched/wasm"]
+zdict_builder = ["zstd-patched/zdict_builder"]
+zstdmt = ["zstd-patched/zstdmt"]

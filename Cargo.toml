@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
+exclude = ["compat/zstd-013"]
 
 [workspace.lints.clippy]
 # No unwrap() anywhere reachable from user/file/participant input. Combined
@@ -31,3 +32,7 @@ strip = true
 inherits = "release"
 lto = "thin"
 codegen-units = 16
+
+# Legacy callers use a forwarding facade, not the vulnerable registry implementation.
+[patch.crates-io]
+zstd = { path = "compat/zstd-013" }

@@ -127,6 +127,10 @@ name = "scale-aggregate-duckdb"
 required-features = ["duckdb"]
 
 [dev-dependencies]
+# Exercise the patched legacy interface and actual compressed IPC in CI.
+zstd-compat = { package = "zstd", version = "0.13.3" }
+arrow-ipc = { version = "59.3.0", features = ["zstd"] }
+
 # Per-test MinIO container for failure-path tests that need real S3-compatible
 # error behavior (auth failures, missing objects) — object_store::memory::InMemory
 # can't produce those. "blocking" feature avoids spreading async into this
