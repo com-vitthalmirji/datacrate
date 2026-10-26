@@ -486,8 +486,8 @@ pub(crate) fn parquet_writer(
         .map_err(|source| PipelineIoError::WriteParquet { source })
 }
 
-/// Writes `batch` to `path` as a single-row-group Parquet file, compressed
-/// with `compression`.
+/// Writes `batch` to `path` as Parquet, compressed with `compression`.
+/// The writer may split one batch into multiple row groups.
 ///
 /// # Errors
 ///
