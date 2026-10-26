@@ -5,6 +5,10 @@ on:
     paths:
       - "**/Cargo.toml"
       - "**/Cargo.lock"
+      - "compat/**"
+      - "scripts/check_zstd_dependencies.py"
+      - "scripts/tests/test_zstd_dependencies.py"
+      - ".github/workflows/audit.yml"
   schedule:
     - cron: "0 6 * * 1"
 
@@ -17,6 +21,10 @@ jobs:
       issues: write
     steps:
       - uses: actions/checkout@v7
+      - name: Verify the compression compatibility boundary
+        run: |
+          python3 -m unittest discover -s scripts/tests -p test_zstd_dependencies.py
+          python3 scripts/check_zstd_dependencies.py
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
