@@ -360,6 +360,32 @@ A controlled GET failure while the listing remains valid verifies that
 stream errors reach the consumer. Removing a file before physical planning
 can instead produce an empty listing, which is a different condition.
 
+## Keeping compressed I/O while updating a transitive codec
+
+A compatible dependency update initially kept two Zstd implementations: existing
+Arrow, Parquet and engine callers still required 0.13, while fixes were available
+in 0.14.3. Cargo cannot use a 0.14 release to satisfy `^0.13`. Turning compression
+off would change the pipeline's supported formats.
+
+The repository now uses a private forwarding facade for the old package identity.
+Its only code forbids unsafe code and re-exports the pinned upstream 0.14.3
+interface; it contains no codec implementation. Existing caller feature requests
+forward to upstream. This is a compatibility decision for this application's
+callers, not a guarantee that all 0.13 programs work with 0.14.
+
+Because RustSec skips local path packages when matching vulnerabilities, a green
+audit alone is insufficient. A separate CI guard checks the exact facade source,
+features, dependency pin and resolved registry codec versions. Rust CI compiles
+the application callers and runs compressed Parquet/Arrow IPC round trips,
+streaming context reuse and corrupt legacy-frame rejection tests in
+`crates/pipeline/tests/zstd_compat.rs`. These checks preserve decoded values and
+exercise error boundaries; they are not an exhaustive security review.
+
+The override applies to builds rooted in this repository. A downstream application
+must choose its own Cargo patch; publishing a library does not carry this one with
+it. Once every parent dependency accepts a fixed codec release, remove the facade
+and its dedicated guard, then repeat the audit and compressed-I/O checks.
+
 ## Run the whole chapter live
 
 ```console
