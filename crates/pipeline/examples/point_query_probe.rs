@@ -2,7 +2,14 @@
 //! Compares only row-level Parquet filter pushdown; both contexts use one
 //! target partition and a warm metadata cache; both read the same file.
 
-use std::{error::Error, fs::File, io, path::PathBuf, sync::Arc, time::Instant};
+use std::{
+    error::Error,
+    fs::File,
+    io,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Instant,
+};
 
 use arrow::array::{Array, Decimal128Array, Int64Array};
 use clap::Parser;
@@ -27,7 +34,7 @@ struct Args {
     lookups: usize,
 }
 
-async fn context(input: &PathBuf, pushdown: bool) -> Result<SessionContext> {
+async fn context(input: &Path, pushdown: bool) -> Result<SessionContext> {
     let mut config = SessionConfig::new().with_target_partitions(1);
     config.options_mut().execution.parquet.pruning = true;
     config.options_mut().execution.parquet.enable_page_index = true;
