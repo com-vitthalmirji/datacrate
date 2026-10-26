@@ -20,6 +20,8 @@ ballista = ["dep:ballista", "dep:ballista-core", "dep:ballista-executor"]
 polars = ["dep:polars"]
 # scale-aggregate-duckdb only (DataFusion/Polars/DuckDB parity benchmark).
 duckdb = ["dep:duckdb"]
+# Allocator comparison for the point_query_tuning example only.
+point-query-mimalloc = ["dep:mimalloc"]
 
 [dependencies]
 # Per-row hashing for the completion manifest's content digest
@@ -67,6 +69,7 @@ log = "0.4"
 # IPC reading. Already resolved transitively via polars-io at 0.9.11, so
 # this pins no new version, only a direct dependency edge.
 memmap2 = "0.9"
+mimalloc = { version = "0.1.52", optional = true }
 # Pinned to match datafusion 55.1.0's exact object_store dependency (also
 # 0.13.2) so an Arc<dyn ObjectStore> built here can be registered directly
 # with DataFusion's RuntimeEnv, instead of two incompatible trait-object

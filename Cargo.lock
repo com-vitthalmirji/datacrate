@@ -4487,6 +4487,7 @@ dependencies = [
  "futures-util",
  "log",
  "memmap2",
+ "mimalloc",
  "object_store",
  "parquet",
  "polars",

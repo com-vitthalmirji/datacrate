@@ -360,6 +360,43 @@ A controlled GET failure while the listing remains valid verifies that
 stream errors reach the consumer. Removing a file before physical planning
 can instead produce an empty listing, which is a different condition.
 
+## Point lookups: separate scan work from planning work
+
+A small result can still pay for repeated planning or scanning pages it does
+not need. The `point_query_probe` example compares decoder filter pushdown on
+the existing sorted 5M-row orders fixture, recording planning and execution
+separately and checking each returned ID and amount. Its JSON output includes
+physical plans and scan metrics; fewer scan rows do not by themselves prove a
+faster query.
+
+`point_query_tuning` additionally compares rewritten Parquet layouts, fresh SQL,
+logical prepared statements and experimental physical scan rebinding. Preparation
+verifies all four columns against the fixture's arithmetic oracle. Measurement
+uses the same keys across cases and includes stream draining and result checks.
+
+Generate the fixture with `just comet-dataset` first if it is not already present.
+Run the examples from the repository root.
+
+```console
+$ cargo run --release -p pipeline --example point_query_probe
+$ cargo run --release -p pipeline --example point_query_tuning -- --layouts target/point-query-layouts --prepare-files
+$ cargo run --release -p pipeline --example point_query_tuning -- --layouts target/point-query-layouts
+```
+
+Preparation creates new files and refuses to overwrite existing layout files.
+The optional `point-query-mimalloc` feature selects mimalloc only in the tuning
+example when passed as `--features point-query-mimalloc` to Cargo;
+`--current-thread` selects its alternative Tokio runtime. Compare these
+configurations deliberately rather than assuming a faster default.
+
+The rebound scan supports only `SELECT id, amount FROM orders WHERE id = key`
+over one complete immutable file. Each request gets a fresh predicate, source
+and execution state while retaining the metadata reader factory. This is not a
+general physical prepared-statement cache: mutable files, changing file sets
+and concurrent service behavior need their own lifecycle design. The recorded
+boundary is warm sequential lookup throughput, not cold-read or p99 service
+latency. Setup and layout preparation are outside lookup timing.
+
 ## Run the whole chapter live
 
 ```console
