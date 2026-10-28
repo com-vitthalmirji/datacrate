@@ -46,7 +46,7 @@ jobs:
         working-directory: scala/comet-interop
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
@@ -74,7 +74,7 @@ jobs:
       comet-maven-path: org/apache/datafusion/comet-spark-spark4.1_2.13/0.16.0/comet-spark-spark4.1_2.13-0.16.0.jar
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
@@ -193,7 +193,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
