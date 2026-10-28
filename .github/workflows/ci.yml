@@ -131,7 +131,7 @@ jobs:
           fi
       - name: Upload experiment binary output
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-build-experiment-output
           path: experiment-output/
@@ -182,7 +182,7 @@ jobs:
             "They are collected as evidence of correct execution, not a" \
             "performance claim (plan section 16)."
           ./target/ci-release/simd-wrapping-add --len 5000000 --runs 5 | tee simd-wrapping-add.out
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: simd-wrapping-add-evidence
           path: |
